@@ -30,6 +30,15 @@ struct State {
     seat: Seat,
     keyboard: ZwpVirtualKeyboardV1,
     pointer: ZwlrVirtualPointerV1,
+    /// Kept for rebinding: Hyprland stops honouring a bound virtual pointer
+    /// once its output changes mode (a headless resize freezes the cursor
+    /// for good), while a freshly created binding on the same output works.
+    ptr_mgr: ZwlrVirtualPointerManagerV1,
+    qh: QueueHandle<State>,
+    wl_seat: WlSeat,
+    /// The output `pointer` is bound to, and its logical size at bind time.
+    bound: Option<WlOutput>,
+    bound_logical: (u32, u32),
     keys: KeyState,
     pressed_keys: BTreeSet<u32>,
     pressed_buttons: BTreeSet<u32>,
@@ -86,6 +95,11 @@ fn run(
         seat,
         keyboard,
         pointer: ptr_mgr.create_virtual_pointer(Some(&seat_proxy), &qh, ()),
+        ptr_mgr,
+        qh: qh.clone(),
+        wl_seat: seat_proxy.clone(),
+        bound: None,
+        bound_logical: (1, 1),
         keys,
         pressed_keys: BTreeSet::new(),
         pressed_buttons: BTreeSet::new(),
@@ -93,17 +107,7 @@ fn run(
         quit: false,
     };
     std::mem::swap(&mut state.sink, sink);
-    let result = input_loop(
-        &mut state,
-        conn,
-        queue,
-        rx,
-        ready_tx,
-        &cfg,
-        &qh,
-        &ptr_mgr,
-        &seat_proxy,
-    );
+    let result = input_loop(&mut state, conn, queue, rx, ready_tx, &cfg);
     if let Err(e) = &result {
         state.emit(InputEvent::Error(e.to_string()));
     }
@@ -115,7 +119,6 @@ fn run(
     result
 }
 
-#[allow(clippy::too_many_arguments)]
 fn input_loop(
     state: &mut State,
     conn: Connection,
@@ -123,18 +126,22 @@ fn input_loop(
     rx: channel::Channel<InputCmd>,
     ready_tx: mpsc::Sender<Result<()>>,
     cfg: &InputConfig,
-    qh: &QueueHandle<State>,
-    ptr_mgr: &ZwlrVirtualPointerManagerV1,
-    seat_proxy: &WlSeat,
 ) -> Result<()> {
     queue.roundtrip(state)?;
     queue.roundtrip(state)?;
 
     let (output, info) = state.outputs.find(&cfg.output)?;
     state.extent = info.logical_size();
-    let bound = ptr_mgr.create_virtual_pointer_with_output(Some(seat_proxy), Some(&output), qh, ());
+    let bound = state.ptr_mgr.create_virtual_pointer_with_output(
+        Some(&state.wl_seat),
+        Some(&output),
+        &state.qh,
+        (),
+    );
     let old = std::mem::replace(&mut state.pointer, bound);
     old.destroy();
+    state.bound = Some(output);
+    state.bound_logical = info.logical_size();
     state.upload_keymap()?;
     tracing::info!(output = %info.name, extent = ?state.extent, "input ready");
     state.emit(InputEvent::Ready);
@@ -171,6 +178,42 @@ impl State {
             self.pointer.button(t, b, wl_pointer::ButtonState::Released);
         }
         self.pointer.frame();
+    }
+
+    /// A `wl_output` burst for the bound output finished. Hyprland (0.56,
+    /// and current main) silently stops delivering a bound virtual pointer's
+    /// motion after the output's mode changes — the pointer stays frozen
+    /// while a freshly created binding on the same output works. Re-bind
+    /// whenever the logical size changed (a resize or scale change).
+    fn on_output_done(&mut self, output: &WlOutput) {
+        if self.bound.as_ref() != Some(output) {
+            return;
+        }
+        let Some((_, info)) = self.outputs.list.iter().find(|(o, _)| o == output) else {
+            return;
+        };
+        let logical = info.logical_size();
+        if logical == self.bound_logical {
+            return;
+        }
+        self.bound_logical = logical;
+        self.extent = logical;
+        let bound = self.ptr_mgr.create_virtual_pointer_with_output(
+            Some(&self.wl_seat),
+            Some(output),
+            &self.qh,
+            (),
+        );
+        let old = std::mem::replace(&mut self.pointer, bound);
+        old.destroy();
+        // Buttons held across the swap belong to the new device now.
+        let t = now_ms();
+        for &b in &self.pressed_buttons {
+            self.pointer.button(t, b, wl_pointer::ButtonState::Pressed);
+        }
+        self.pointer.frame();
+        let _ = self.conn.flush();
+        tracing::info!(extent = ?logical, "bound output mode changed; virtual pointer re-bound");
     }
 }
 
@@ -286,7 +329,9 @@ impl Dispatch<WlOutput, ()> for State {
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
-        s.outputs.handle(o, e);
+        if s.outputs.handle(o, e) {
+            s.on_output_done(o);
+        }
     }
 }
 
