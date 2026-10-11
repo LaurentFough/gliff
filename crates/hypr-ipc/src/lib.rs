@@ -15,7 +15,7 @@ use serde::Deserialize;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    #[error("XDG_RUNTIME_DIR is not set")]
+    #[error("XDG_RUNTIME_DIR is not set and /run/user/<uid> does not exist")]
     NoRuntimeDir,
     #[error("no Hyprland instance found under {0}")]
     NoInstance(PathBuf),
@@ -33,6 +33,20 @@ pub enum Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// `$XDG_RUNTIME_DIR`, or `/run/user/<uid>` when the variable is not set and
+/// that directory exists. Tailscale SSH, for one, starts commands without it.
+pub fn runtime_dir() -> Result<PathBuf> {
+    if let Some(dir) = std::env::var_os("XDG_RUNTIME_DIR") {
+        return Ok(PathBuf::from(dir));
+    }
+    let dir = PathBuf::from(format!("/run/user/{}", rustix::process::getuid().as_raw()));
+    if dir.is_dir() {
+        Ok(dir)
+    } else {
+        Err(Error::NoRuntimeDir)
+    }
+}
+
 /// A running Hyprland instance.
 #[derive(Debug, Clone)]
 pub struct Instance {
@@ -42,12 +56,10 @@ pub struct Instance {
 
 impl Instance {
     /// Locate an instance. Order: explicit signature, `HYPRLAND_INSTANCE_SIGNATURE`,
-    /// then the newest instance under `$XDG_RUNTIME_DIR/hypr` whose socket
+    /// then the newest instance under the [`runtime_dir`]'s `hypr` whose socket
     /// answers (a crashed compositor leaves its directory and socket behind).
     pub fn discover(explicit: Option<&str>) -> Result<Self> {
-        let runtime_dir = std::env::var_os("XDG_RUNTIME_DIR")
-            .map(PathBuf::from)
-            .ok_or(Error::NoRuntimeDir)?;
+        let runtime_dir = runtime_dir()?;
         let from_env = std::env::var("HYPRLAND_INSTANCE_SIGNATURE").ok();
         Self::discover_in(&runtime_dir, explicit.or(from_env.as_deref()))
     }

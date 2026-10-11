@@ -109,9 +109,10 @@ gliff --server-bin 'gliff-server --low-bandwidth' user@host
   drivers and both video paths, and prints PASS or FAIL for each.
 - If ssh cannot find `gliff-server`, give its path:
   `gliff --server-bin /path/to/gliff-server user@host`.
-- The server needs the remote user's running Hyprland session. If the ssh
-  session does not have `XDG_RUNTIME_DIR` or `WAYLAND_DISPLAY`, set them
-  through `--server-bin 'env XDG_RUNTIME_DIR=/run/user/1000 gliff-server'`.
+- The server needs the remote user's running Hyprland session, which it
+  finds under `XDG_RUNTIME_DIR`, or `/run/user/<uid>` when ssh does not set
+  it. If the session is elsewhere, set it through
+  `--server-bin 'env XDG_RUNTIME_DIR=/path gliff-server'`.
 - To rule out a driver problem, force the CPU on your end with
   `gliff --video cpu user@host`.
 - Screens wider than 4096 pixels are streamed at a reduced size and scaled
