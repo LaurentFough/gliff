@@ -1514,6 +1514,10 @@ fn pipeline(
     cfg.target = target.clone();
     cfg.render_node = node.to_path_buf();
     cfg.cursor = false;
+    // Capture the way the tier under test captures: the GPU tier imports the
+    // dmabuf as it is, so it must not get a wl_shm buffer, while the CPU tier
+    // maps the frame and keeps the fallback (NVIDIA offers no linear dmabuf).
+    cfg.shm_fallback = video != VideoMode::Gpu;
     let (tx, rx) = mpsc::channel();
     let capturer = Capturer::start(
         cfg,
@@ -1541,15 +1545,32 @@ fn pipeline(
             "no frame captured (a headless output renders reliably; a physical KVM output may not)"
         )
     })?;
-    let reference = frame.buffer.read_bgra()?;
-    let (w, h) = (reference.width as u32, reference.height as u32);
     let info = &frame.buffer.info;
+    // Even dimensions, as `read_bgra` crops to for the 4:2:0 path.
+    let (w, h) = (info.width & !1, info.height & !1);
     let fourcc = drm_fourcc::DrmFourcc::try_from(info.fourcc)
         .map_err(|_| anyhow!("captured fourcc {:#x} is not a DRM format", info.fourcc))?;
     println!(
         "  captured {w}x{h} {fourcc:?} modifier {:#x} from {output}",
         info.modifier
     );
+    if video == VideoMode::Gpu && frame.buffer.is_shm() {
+        bail!(
+            "the GPU tier needs dmabuf capture, but capture fell back to wl_shm; \
+             this is what the server refuses too"
+        );
+    }
+    // The CPU reference for the PSNR, when the frame maps at all: a tiled
+    // capture buffer (NVIDIA, GPU tier) is not CPU-readable, which is why the
+    // CPU tier captures into wl_shm instead.
+    let reference = match frame.buffer.read_bgra() {
+        Ok(r) => Some(r),
+        Err(e) if video == VideoMode::Gpu => {
+            println!("  no CPU reference for this frame: {e}; the PSNR is skipped");
+            None
+        }
+        Err(e) => return Err(e).context("read the captured frame"),
+    };
     let plane = DmabufPlane {
         fd: info.fd.as_fd(),
         width: info.width,
@@ -1604,6 +1625,9 @@ fn pipeline(
     let packet = match &mut encoder {
         ProbeEncoder::Gpu(enc) => enc.encode_dmabuf(1, &plane, true).context("encode")?,
         ProbeEncoder::Cpu(enc) => {
+            let reference = reference
+                .as_ref()
+                .ok_or_else(|| anyhow!("the CPU tier needs a mappable capture buffer"))?;
             let pixels = if scaled {
                 downscale_bgra(
                     &reference.pixels,
@@ -1647,6 +1671,16 @@ fn pipeline(
     let dec_ms = t1.elapsed().as_secs_f64() * 1000.0;
     drop(frame);
     drop(capturer);
+
+    let Some(reference) = reference else {
+        println!("  decoded {dec_ms:.1} ms");
+        status(
+            true,
+            "Dual420 4:4:4 GPU pipeline on a captured frame (ran; no PSNR without a \
+             CPU-mappable capture buffer)",
+        );
+        return Ok(());
+    };
 
     // What the CPU reference path makes of the same pixels, so only coding
     // loss and shader rounding count. A scaled stream is compared with a
