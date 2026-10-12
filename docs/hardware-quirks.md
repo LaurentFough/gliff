@@ -185,6 +185,20 @@ headless` and `output remove` are hyprctl commands and work with both config
 types. The server reads back the mode Hyprland applied instead of assuming
 the request took effect.
 
+## Hyper-V guests (no render node)
+
+A Hyper-V guest has only the `hyperv_drm` display node (`/dev/dri/card1`)
+and no `/dev/dri/renderD*`. Hyprland renders in software there and does not
+offer `zwp_linux_dmabuf_v1`, so there is nothing to allocate a dmabuf on or
+hand one to. The capture thread then logs one warning naming the reason (no
+dmabuf global, or the GBM device could not be opened on the render node) and
+allocates its ring as wl_shm buffers over memfds; the compositor copies each
+frame into them. The server sees the missing render node before opening
+Vulkan or VA-API and takes the CPU (OpenH264) tier with its own warning.
+Without wl_shm either, capture fails with an error naming both. Observed on
+gliff 0.3.1 guests, where the session previously ended with "compositor does
+not offer zwp_linux_dmabuf_v1".
+
 ## Known limitations recorded from code review (not yet fixed)
 
 - **Instance discovery tie-break.** `hypr-ipc` picks the newest instance
