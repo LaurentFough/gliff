@@ -302,6 +302,13 @@ fn shm_ring_format(
     .map(|(drm, shm)| (drm as u32, shm))
 }
 
+/// Whether a failed dmabuf ring allocation should drop to wl_shm: a GBM
+/// failure (QEMU virtio-gpu without 3D opens the render node but cannot
+/// allocate on it) when the compositor offers wl_shm.
+fn gbm_failure_falls_back_to_shm(e: &Error, shm_offered: bool) -> bool {
+    shm_offered && matches!(e, Error::Gbm(_))
+}
+
 fn run_loop(
     state: &mut State,
     conn: Connection,
@@ -480,6 +487,25 @@ impl State {
         if let Some((fourcc, format)) = self.choose_shm_format() {
             return self.allocate_shm_ring(fourcc, format);
         }
+        match self.allocate_dmabuf_ring() {
+            Err(e) if gbm_failure_falls_back_to_shm(&e, self.shm.is_some()) => {
+                tracing::warn!(
+                    error = %e,
+                    "dmabuf allocation failed; capturing into wl_shm (CPU video pipeline only)"
+                );
+                for slot in self.ring.drain(..) {
+                    slot.destroy();
+                }
+                self.gbm = None;
+                let (fourcc, format) = self.choose_shm_format().ok_or(e)?;
+                self.allocate_shm_ring(fourcc, format)
+            }
+            result => result,
+        }
+    }
+
+    /// A ring of GBM buffers handed to the compositor as dmabufs.
+    fn allocate_dmabuf_ring(&mut self) -> Result<()> {
         let Some(gbm) = &self.gbm else {
             return Err(Error::Capture(format!(
                 "no usable wl_shm format offered (got {:x?})",
@@ -1183,6 +1209,16 @@ mod tests {
             shm_ring_format(&cfg(true, true), None, &[ARGB_SHM, XRGB_SHM]),
             Some((XRGB, wl_shm::Format::Xrgb8888))
         );
+    }
+
+    #[test]
+    fn gbm_allocation_failure_falls_back_to_shm_when_offered() {
+        // QEMU virtio-gpu without 3D: the render node opens but cannot allocate.
+        let gbm = Error::Gbm("allocate 1280x800 XR24: Permission denied".into());
+        assert!(gbm_failure_falls_back_to_shm(&gbm, true));
+        assert!(!gbm_failure_falls_back_to_shm(&gbm, false));
+        let other = Error::Capture("no usable dmabuf format offered".into());
+        assert!(!gbm_failure_falls_back_to_shm(&other, true));
     }
 
     #[test]

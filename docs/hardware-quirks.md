@@ -199,6 +199,11 @@ Without wl_shm either, capture fails with an error naming both. Observed on
 gliff 0.3.1 guests, where the session previously ended with "compositor does
 not offer zwp_linux_dmabuf_v1".
 
+QEMU guests with `virtio-vga` and no 3D (virgl off) are a variant: they have
+a render node and Hyprland offers dmabuf, but GBM cannot allocate on it
+(`DRM_IOCTL_MODE_CREATE_DUMB failed: Permission denied`). A GBM allocation
+failure drops the ring to wl_shm the same way, with one warning.
+
 ## Known limitations recorded from code review (not yet fixed)
 
 - **Instance discovery tie-break.** `hypr-ipc` picks the newest instance
