@@ -568,6 +568,14 @@ fn serve_test(node: &std::path::Path, addr: &str, frames: usize, video: VideoMod
         let mut send_keymap = std::env::var("GLIFF_SEND_KEYMAP_OPTIONS").ok().map(|options| {
             hypr_input::keymap_from_names(&hypr_input::KeymapNames { layout: "us".into(), options: Some(options), ..Default::default() })
         }).transpose()?;
+        // GLIFF_SEND_KEYMAP_SWITCH types evdev key 16 and Return twice, each
+        // right behind a keymap change: first under us (Q, so "q"), then under
+        // fr (A, so "a"). A remote that keeps the first keymap types "q" twice.
+        let mut keymap_switch = if std::env::var_os("GLIFF_SEND_KEYMAP_SWITCH").is_some() {
+            ["us", "fr"].iter().map(|layout| hypr_input::keymap_from_names(&hypr_input::KeymapNames { layout: (*layout).into(), ..Default::default() })).collect::<Result<Vec<_>, _>>()?
+        } else {
+            Vec::new()
+        };
         let recv_file = std::env::var("GLIFF_RECV_CLIP_FILE").ok();
         let recv_dir = std::env::var("GLIFF_RECV_CLIP_DIR").ok().map(PathBuf::from);
         let mut clip_recv: Vec<u8> = Vec::new();
@@ -623,6 +631,15 @@ fn serve_test(node: &std::path::Path, addr: &str, frames: usize, video: VideoMod
                             writer.write_msg(&ClientMsg::Keymap { keymap }).await?;
                             writer.write_msg(&ClientMsg::Key { keycode: KEY_LEFTSHIFT, pressed: true }).await?;
                             writer.write_msg(&ClientMsg::Key { keycode: KEY_LEFTSHIFT, pressed: false }).await?;
+                        }
+                    }
+                    if (got == 4 || got == 6) && !keymap_switch.is_empty() {
+                        const KEY_Q: u32 = 16;
+                        const KEY_ENTER: u32 = 28;
+                        writer.write_msg(&ClientMsg::Keymap { keymap: keymap_switch.remove(0) }).await?;
+                        for keycode in [KEY_Q, KEY_ENTER] {
+                            writer.write_msg(&ClientMsg::Key { keycode, pressed: true }).await?;
+                            writer.write_msg(&ClientMsg::Key { keycode, pressed: false }).await?;
                         }
                     }
                     if got == 3 { writer.write_msg(&ClientMsg::Resize { width: 800, height: 600, scale: 2.0 }).await?; }
