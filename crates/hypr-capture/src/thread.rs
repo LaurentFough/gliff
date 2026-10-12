@@ -78,6 +78,13 @@ impl RingSlot {
     }
 }
 
+/// What a dmabuf ring needs: the protocol to wrap buffers and a GBM
+/// device to allocate them.
+struct Gbm {
+    dmabuf: ZwpLinuxDmabufV1,
+    device: Arc<Mutex<Device<File>>>,
+}
+
 #[derive(Default)]
 struct Constraints {
     width: u32,
@@ -94,11 +101,12 @@ struct State {
     qh: QueueHandle<State>,
     outputs: Outputs,
     seat: Seat,
-    dmabuf: ZwpLinuxDmabufV1,
+    /// `None` when the compositor offers no dmabuf or there is no render
+    /// node to allocate on (Hyper-V guests): the ring is then wl_shm.
+    gbm: Option<Gbm>,
     shm: Option<WlShm>,
     source_mgr: ExtOutputImageCaptureSourceManagerV1,
     copy_mgr: ExtImageCopyCaptureManagerV1,
-    device: Arc<Mutex<Device<File>>>,
     cmd_tx: Sender<Cmd>,
 
     output: Option<(WlOutput, OutputInfo)>,
@@ -163,9 +171,7 @@ fn run(
 ) -> Result<()> {
     let (conn, globals, queue) = hypr_wl::init::<State>(&cfg.target)?;
     let qh = queue.handle();
-    let dmabuf: ZwpLinuxDmabufV1 = globals
-        .bind(&qh, 3..=5, ())
-        .map_err(|_| hypr_wl::Error::MissingGlobal("zwp_linux_dmabuf_v1"))?;
+    let dmabuf: Option<ZwpLinuxDmabufV1> = globals.bind(&qh, 3..=5, ()).ok();
     let source_mgr: ExtOutputImageCaptureSourceManagerV1 = globals
         .bind(&qh, 1..=1, ())
         .map_err(|_| hypr_wl::Error::MissingGlobal("ext_output_image_capture_source_manager_v1"))?;
@@ -175,12 +181,30 @@ fn run(
     let shm: Option<WlShm> = globals.bind(&qh, 1..=1, ()).ok();
     let outputs = Outputs::bind(&globals, &qh)?;
     let seat = Seat::bind(&globals, &qh)?;
-    let file = File::options()
-        .read(true)
-        .write(true)
-        .open(&cfg.render_node)?;
-    let device = Device::new(file)
-        .map_err(|e| Error::Gbm(format!("open {}: {e}", cfg.render_node.display())))?;
+    let gbm = match dmabuf {
+        None => Err("the compositor does not offer zwp_linux_dmabuf_v1".to_string()),
+        Some(dmabuf) => open_gbm(&cfg.render_node)
+            .map(|device| Gbm {
+                dmabuf,
+                device: Arc::new(Mutex::new(device)),
+            })
+            .map_err(|e| e.to_string()),
+    };
+    let gbm = match gbm {
+        Ok(gbm) => Some(gbm),
+        Err(why) if shm.is_some() => {
+            tracing::warn!(
+                %why,
+                "dmabuf capture unavailable; capturing into wl_shm (CPU video pipeline only)"
+            );
+            None
+        }
+        Err(why) => {
+            return Err(Error::Capture(format!(
+                "dmabuf capture unavailable ({why}) and the compositor offers no wl_shm"
+            )))
+        }
+    };
 
     let mut state = State {
         sink: Box::new(|_| {}),
@@ -188,11 +212,10 @@ fn run(
         qh: qh.clone(),
         outputs,
         seat,
-        dmabuf,
+        gbm,
         shm,
         source_mgr,
         copy_mgr,
-        device: Arc::new(Mutex::new(device)),
         cmd_tx,
         output: None,
         source: None,
@@ -237,6 +260,46 @@ fn run(
     let _ = state.conn.roundtrip();
     std::mem::swap(&mut state.sink, sink);
     result
+}
+
+fn open_gbm(render_node: &std::path::Path) -> Result<Device<File>> {
+    let gbm_err = |e: std::io::Error| Error::Gbm(format!("open {}: {e}", render_node.display()));
+    let file = File::options()
+        .read(true)
+        .write(true)
+        .open(render_node)
+        .map_err(gbm_err)?;
+    Device::new(file).map_err(gbm_err)
+}
+
+/// The wl_shm format for the capture ring, as (DRM fourcc, wl_shm format),
+/// or `None` to capture into dmabufs. `dmabuf` is the dmabuf format choice
+/// (its modifiers) when a dmabuf ring is possible at all, `None` when the
+/// compositor offers no dmabuf or there is no render node. With dmabuf
+/// available, wl_shm is only used under `prefer_linear` + `shm_fallback`
+/// when no format offers the linear modifier (NVIDIA).
+fn shm_ring_format(
+    cfg: &CaptureConfig,
+    dmabuf: Option<Option<(u32, Vec<u64>)>>,
+    offered: &[u32],
+) -> Option<(u32, wl_shm::Format)> {
+    if let Some(choice) = dmabuf {
+        if !cfg.prefer_linear || !cfg.shm_fallback {
+            return None;
+        }
+        if choice.is_some_and(|(_, mods)| mods == [u64::from(DrmModifier::Linear)]) {
+            return None;
+        }
+    }
+    [
+        (DrmFourcc::Xrgb8888, wl_shm::Format::Xrgb8888),
+        (DrmFourcc::Argb8888, wl_shm::Format::Argb8888),
+        (DrmFourcc::Xbgr8888, wl_shm::Format::Xbgr8888),
+        (DrmFourcc::Abgr8888, wl_shm::Format::Abgr8888),
+    ]
+    .into_iter()
+    .find(|(_, shm)| offered.contains(&u32::from(*shm)))
+    .map(|(drm, shm)| (drm as u32, shm))
 }
 
 fn run_loop(
@@ -393,28 +456,12 @@ impl State {
         None
     }
 
-    /// A 32-bit RGB wl_shm format the compositor offers, as (DRM fourcc,
-    /// wl_shm format), when the dmabuf formats leave the CPU nothing linear
-    /// to map.
+    /// The wl_shm format to capture into, when the ring should be wl_shm
+    /// rather than dmabuf.
     fn choose_shm_format(&self) -> Option<(u32, wl_shm::Format)> {
-        if !self.cfg.prefer_linear || !self.cfg.shm_fallback || self.shm.is_none() {
-            return None;
-        }
-        let linear = u64::from(DrmModifier::Linear);
-        if let Some((_, mods)) = self.choose_format() {
-            if mods == [linear] {
-                return None;
-            }
-        }
-        [
-            (DrmFourcc::Xrgb8888, wl_shm::Format::Xrgb8888),
-            (DrmFourcc::Argb8888, wl_shm::Format::Argb8888),
-            (DrmFourcc::Xbgr8888, wl_shm::Format::Xbgr8888),
-            (DrmFourcc::Abgr8888, wl_shm::Format::Abgr8888),
-        ]
-        .into_iter()
-        .find(|(_, shm)| self.constraints.shm_formats.contains(&u32::from(*shm)))
-        .map(|(drm, shm)| (drm as u32, shm))
+        self.shm.as_ref()?;
+        let dmabuf = self.gbm.as_ref().map(|_| self.choose_format());
+        shm_ring_format(&self.cfg, dmabuf, &self.constraints.shm_formats)
     }
 
     fn allocate_ring(&mut self) -> Result<()> {
@@ -433,6 +480,13 @@ impl State {
         if let Some((fourcc, format)) = self.choose_shm_format() {
             return self.allocate_shm_ring(fourcc, format);
         }
+        let Some(gbm) = &self.gbm else {
+            return Err(Error::Capture(format!(
+                "no usable wl_shm format offered (got {:x?})",
+                self.constraints.shm_formats
+            )));
+        };
+        let (dmabuf, device) = (gbm.dmabuf.clone(), Arc::clone(&gbm.device));
         let (fourcc, modifiers) = self.choose_format().ok_or_else(|| {
             Error::Capture(format!(
                 "no usable dmabuf format offered (got {:x?})",
@@ -446,11 +500,10 @@ impl State {
         let format = DrmFourcc::try_from(fourcc).map_err(|e| Error::Gbm(e.to_string()))?;
         let mut chosen_modifier = None;
         for index in 0..self.cfg.buffers {
-            let device = self
-                .device
+            let guard = device
                 .lock()
                 .map_err(|_| Error::Gbm("device mutex poisoned".into()))?;
-            let bo = device
+            let bo = guard
                 .create_buffer_object_with_modifiers2::<()>(
                     w,
                     h,
@@ -459,7 +512,7 @@ impl State {
                     BufferObjectFlags::RENDERING,
                 )
                 .or_else(|_| {
-                    device.create_buffer_object::<()>(
+                    guard.create_buffer_object::<()>(
                         w,
                         h,
                         format,
@@ -467,7 +520,7 @@ impl State {
                     )
                 })
                 .map_err(|e| Error::Gbm(format!("allocate {w}x{h} {format:?}: {e}")))?;
-            drop(device);
+            drop(guard);
             let modifier: u64 = bo.modifier().map_err(|e| Error::Gbm(e.to_string()))?.into();
             let plane_count = bo.plane_count().map_err(|e| Error::Gbm(e.to_string()))?;
             let mut planes = Vec::new();
@@ -480,7 +533,7 @@ impl State {
                 });
             }
             let fd = bo.fd().map_err(|e| Error::Gbm(e.to_string()))?;
-            let params = self.dmabuf.create_params(&self.qh, ());
+            let params = dmabuf.create_params(&self.qh, ());
             for (i, p) in planes.iter().enumerate() {
                 params.add(
                     fd.as_fd(),
@@ -514,7 +567,7 @@ impl State {
                 },
                 backing: Backing::Gbm {
                     bo: Mutex::new(bo),
-                    device: Arc::clone(&self.device),
+                    device: Arc::clone(&device),
                 },
             });
             self.ring.push(RingSlot {
@@ -1079,3 +1132,63 @@ delegate_noop!(State: ignore WlPointer);
 delegate_noop!(State: ExtOutputImageCaptureSourceManagerV1);
 delegate_noop!(State: ExtImageCaptureSourceV1);
 delegate_noop!(State: ExtImageCopyCaptureManagerV1);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const XRGB: u32 = DrmFourcc::Xrgb8888 as u32;
+    const ARGB_SHM: u32 = wl_shm::Format::Argb8888 as u32;
+    const XRGB_SHM: u32 = wl_shm::Format::Xrgb8888 as u32;
+
+    fn cfg(prefer_linear: bool, shm_fallback: bool) -> CaptureConfig {
+        let mut cfg = CaptureConfig::new("X");
+        cfg.prefer_linear = prefer_linear;
+        cfg.shm_fallback = shm_fallback;
+        cfg
+    }
+
+    fn linear() -> u64 {
+        u64::from(DrmModifier::Linear)
+    }
+
+    #[test]
+    fn linear_dmabuf_keeps_the_dmabuf_ring() {
+        let dmabuf = Some(Some((XRGB, vec![linear()])));
+        assert_eq!(shm_ring_format(&cfg(true, true), dmabuf, &[XRGB_SHM]), None);
+    }
+
+    #[test]
+    fn tiled_only_dmabuf_falls_back_to_shm_when_allowed() {
+        let tiled = Some(Some((XRGB, vec![0x0300_0000_0000_0001])));
+        assert_eq!(
+            shm_ring_format(&cfg(true, true), tiled.clone(), &[XRGB_SHM]),
+            Some((XRGB, wl_shm::Format::Xrgb8888))
+        );
+        assert_eq!(
+            shm_ring_format(&cfg(false, true), tiled.clone(), &[XRGB_SHM]),
+            None
+        );
+        assert_eq!(shm_ring_format(&cfg(true, false), tiled, &[XRGB_SHM]), None);
+    }
+
+    #[test]
+    fn no_dmabuf_captures_into_shm_regardless_of_config() {
+        // Hyper-V: no zwp_linux_dmabuf_v1 global, no render node.
+        assert_eq!(
+            shm_ring_format(&cfg(false, false), None, &[ARGB_SHM]),
+            Some((DrmFourcc::Argb8888 as u32, wl_shm::Format::Argb8888))
+        );
+        assert_eq!(
+            shm_ring_format(&cfg(true, true), None, &[ARGB_SHM, XRGB_SHM]),
+            Some((XRGB, wl_shm::Format::Xrgb8888))
+        );
+    }
+
+    #[test]
+    fn no_dmabuf_and_no_usable_shm_format_is_none() {
+        let rgb565 = wl_shm::Format::Rgb565 as u32;
+        assert_eq!(shm_ring_format(&cfg(true, true), None, &[rgb565]), None);
+        assert_eq!(shm_ring_format(&cfg(true, true), None, &[]), None);
+    }
+}
