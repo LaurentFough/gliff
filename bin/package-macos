@@ -1,0 +1,38 @@
+#!/bin/sh
+# Produce a downloadable bundle; public packages require notarization.
+set -eu
+[ "$(uname -s)" = Darwin ] || { echo 'Run this packaging on macOS.' >&2; exit 1; }
+GLIFF_MODE=release
+if [ "${1:-}" = --development ]; then GLIFF_MODE=development; shift; fi
+[ "$#" -le 1 ] || { echo 'Usage: bin/package-macos [--development] [OUTPUT_DIRECTORY]' >&2; exit 1; }
+ROOT="$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)"
+if [ "$GLIFF_MODE" = release ]; then
+    : "${GLIFF_NOTARY_PROFILE:?Set GLIFF_NOTARY_PROFILE to a notarytool keychain profile.}"
+fi
+mkdir -p "${1:-$ROOT/target/macos}"
+GLIFF_OUTPUT="$(CDPATH='' cd -- "${1:-$ROOT/target/macos}" && pwd)"
+GLIFF_STAGE=$(mktemp -d "${TMPDIR:-/tmp}/gliff-package.XXXXXX")
+trap 'rm -rf "$GLIFF_STAGE"' EXIT
+trap 'exit 1' HUP INT TERM
+GLIFF_APP="$GLIFF_STAGE/Gliff.app"
+"$ROOT/bin/build-macos-app" "$GLIFF_APP" "$GLIFF_MODE"
+GLIFF_VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' "$ROOT/Cargo.toml" | head -1)
+GLIFF_ARCH=$(uname -m)
+case "$GLIFF_ARCH" in arm64|x86_64) ;; *) echo 'Unsupported Mac architecture.' >&2; exit 1 ;; esac
+GLIFF_NAME="gliff-$GLIFF_VERSION-macos-$GLIFF_ARCH"
+[ "$GLIFF_MODE" != development ] || GLIFF_NAME="$GLIFF_NAME-development"
+GLIFF_ZIP="$GLIFF_STAGE/$GLIFF_NAME.zip"
+ditto -c -k --keepParent "$GLIFF_APP" "$GLIFF_ZIP"
+if [ "$GLIFF_MODE" = release ]; then
+    set -- --keychain-profile "$GLIFF_NOTARY_PROFILE"
+    if [ -n "${GLIFF_NOTARY_KEYCHAIN:-}" ]; then set -- "$@" --keychain "$GLIFF_NOTARY_KEYCHAIN"; fi
+    xcrun notarytool submit "$GLIFF_ZIP" "$@" --wait
+    xcrun stapler staple "$GLIFF_APP"
+    xcrun stapler validate "$GLIFF_APP"
+    spctl --assess --type execute --verbose "$GLIFF_APP"
+    rm "$GLIFF_ZIP"
+    ditto -c -k --keepParent "$GLIFF_APP" "$GLIFF_ZIP"
+fi
+mv "$GLIFF_ZIP" "$GLIFF_OUTPUT/"
+(cd "$GLIFF_OUTPUT" && shasum -a 256 "$GLIFF_NAME.zip" > "$GLIFF_NAME.zip.sha256")
+printf 'Packaged %s/%s.zip\n' "$GLIFF_OUTPUT" "$GLIFF_NAME"

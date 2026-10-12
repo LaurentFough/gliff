@@ -1,5 +1,8 @@
 #!/bin/sh
 set -eu
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+if [ "$(uname -s)" = Darwin ]; then
+    exec "$ROOT/bin/install-macos" "$@"
+fi
 cd "$ROOT/pkgbuild"
 makepkg -fsi "$@"

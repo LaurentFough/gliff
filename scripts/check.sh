@@ -5,15 +5,26 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+packages=(--workspace)
+if [ "$(uname -s)" = Darwin ]; then
+    packages=(-p gliff-proto -p gliff-transport -p gliff-sw -p gliff-macos -p gliff -p gliff-server)
+fi
+
 if [ "${1:-}" = "--fix" ]; then
     cargo fmt --all
-    cargo clippy --fix --workspace --all-targets --allow-dirty --allow-staged --locked
+    cargo clippy --fix "${packages[@]}" --all-targets --allow-dirty --allow-staged --locked
 fi
 
 echo "== fmt"
 cargo fmt --all --check
 echo "== clippy"
-cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo clippy "${packages[@]}" --all-targets --locked -- -D warnings
 echo "== test"
-cargo test --workspace --locked
+cargo test "${packages[@]}" --locked
+if [ "$(uname -s)" = Darwin ]; then
+    echo "== native bridge memory"
+    python3 scripts/macos-memory-check.py
+    echo "== native viewer input"
+    python3 scripts/macos-input-check.py
+fi
 echo "CHECK PASS"

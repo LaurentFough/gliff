@@ -1,0 +1,486 @@
+use anyhow::{bail, ensure, Context, Result};
+use bytes::Bytes;
+use clap::Parser;
+use gliff_proto::{
+    features, is_incompatible, ChromaMode, ClientCaps, ClientMsg, Codec, ServerMsg,
+    FEATURE_CURSOR_IN_VIDEO, PROTOCOL_VERSION,
+};
+use gliff_transport::{spawn_ssh, Framed, SshTarget};
+use serde_json::{json, Value};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::sync::mpsc;
+
+use crate::{keys, native};
+
+#[derive(Parser)]
+#[command(name = "gliff", version, about = "Remote desktop over SSH")]
+struct Cli {
+    #[arg(long, hide = true)]
+    host_bridge: Option<std::path::PathBuf>,
+    host: Option<String>,
+    /// List nearby Gliff computers as JSON without connecting or opening video.
+    #[arg(long, conflicts_with_all = ["host", "connect", "check_frames"])]
+    discover: bool,
+    /// SSH port (default: 22, or the port advertised by a selected computer).
+    #[arg(long, value_parser = clap::value_parser!(u16).range(1..))]
+    port: Option<u16>,
+    #[arg(long)]
+    connect: Option<String>,
+    #[arg(long, default_value = "gliff-server")]
+    server_bin: String,
+    #[arg(long, conflicts_with = "output")]
+    headless: bool,
+    #[arg(long)]
+    output: Option<String>,
+    #[arg(long, value_parser = ["cpu", "gpu"])]
+    video: Option<String>,
+    /// Decode a fixed number of frames without opening a window (integration test).
+    #[arg(long)]
+    check_frames: Option<u32>,
+}
+
+pub fn client_main() -> Result<()> {
+    let cli = Cli::parse();
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_writer(std::io::stderr)
+        .init();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    tokio::task::LocalSet::new().block_on(&rt, async move {
+        if let Some(path) = &cli.host_bridge {
+            return crate::host_bridge::app(path).await;
+        }
+        if cli.discover {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&crate::discovery::list().await?)?
+            );
+            return Ok(());
+        }
+        let selected = match cli.host.as_deref() {
+            Some(h) => crate::discovery::Selection {
+                host: h.into(),
+                port: cli.port.unwrap_or(22),
+            },
+            None if cli.connect.is_some() => crate::discovery::Selection {
+                host: String::new(),
+                port: 22,
+            },
+            None => {
+                let Some(selection) = crate::discovery::choose().await? else {
+                    return Ok(());
+                };
+                selection
+            }
+        };
+        let host = selected.host.clone();
+        ensure!(
+            !host.is_empty() || cli.connect.is_some(),
+            "enter an SSH address"
+        );
+        if let Some(addr) = &cli.connect {
+            let stream = tokio::net::TcpStream::connect(addr).await?;
+            stream.set_nodelay(true)?;
+            let (rd, wr) = tokio::io::split(stream);
+            session(rd, wr, &host, cli.check_frames).await
+        } else {
+            selected.validate()?;
+            let mut target = SshTarget::new(host.clone());
+            target.server_bin = cli.server_bin;
+            target
+                .ssh_args
+                .extend(["-p".into(), cli.port.unwrap_or(selected.port).to_string()]);
+            if cli.check_frames.is_none() {
+                target.askpass = Some(native::helper_path()?);
+            }
+            if cli.headless {
+                target.server_args.push("--headless".into());
+            }
+            if let Some(output) = cli.output {
+                target.server_args.extend(["--output".into(), output]);
+            }
+            let mut ssh = spawn_ssh(&target)?;
+            let result = session(ssh.stdout, ssh.stdin, &host, cli.check_frames).await;
+            let _ = ssh.child.kill().await;
+            result
+        }
+    })
+}
+
+async fn session<R, W>(rd: R, wr: W, host: &str, check: Option<u32>) -> Result<()>
+where
+    R: AsyncRead + Unpin + 'static,
+    W: AsyncWrite + Unpin + 'static,
+{
+    let mut reader = Framed::new(rd);
+    let mut writer = Framed::new(wr);
+    writer
+        .write_msg(&ClientMsg::Hello {
+            version: PROTOCOL_VERSION,
+            keymap: String::new(),
+            caps: ClientCaps {
+                codecs: vec![Codec::H264],
+                max_width: 3840,
+                max_height: 2160,
+                chroma: vec![ChromaMode::Single420, ChromaMode::Dual420],
+                features: features()
+                    .into_iter()
+                    .chain([FEATURE_CURSOR_IN_VIDEO.to_string()])
+                    .collect(),
+            },
+        })
+        .await?;
+    let mut helper = if check.is_none() {
+        Some(native::spawn(
+            "app",
+            &[format!("Gliff — {host} · Shift+Esc releases keyboard")],
+        )?)
+    } else {
+        None
+    };
+    let (display_tx, mut display_rx) = mpsc::channel::<(u8, Vec<u8>)>(2);
+    let (event_tx, mut event_rx) = mpsc::channel::<Result<Value>>(64);
+    if let Some(helper) = &mut helper {
+        let mut rd = helper.stdout.take().unwrap();
+        let mut wr = helper.stdin.take().unwrap();
+        tokio::task::spawn_local(async move {
+            while let Some((kind, bytes)) = display_rx.recv().await {
+                native::write(&mut wr, kind, &bytes).await?;
+            }
+            Ok::<_, anyhow::Error>(())
+        });
+        tokio::task::spawn_local(async move {
+            loop {
+                let ev = async {
+                    let (kind, data) = native::read(&mut rd).await?;
+                    ensure!(kind == native::EVENT, "unexpected UI packet");
+                    Ok(serde_json::from_slice(&data)?)
+                }
+                .await;
+                let stopped = ev.is_err();
+                if event_tx.send(ev).await.is_err() || stopped {
+                    break;
+                }
+            }
+        });
+    }
+    let (out, mut outgoing) = mpsc::channel::<(ClientMsg, Bytes)>(64);
+    let mut writes = tokio::task::spawn_local(async move {
+        while let Some((msg, payload)) = outgoing.recv().await {
+            writer.write_msg_with_payloads(&msg, &[&payload]).await?;
+        }
+        Ok::<_, gliff_transport::Error>(())
+    });
+    let (incoming_tx, mut incoming) = mpsc::channel::<Result<(ServerMsg, Bytes)>>(8);
+    let reads = tokio::task::spawn_local(async move {
+        loop {
+            let msg = async {
+                let m = reader.read_msg::<ServerMsg>().await?;
+                let p = reader.read_payload(server_payload(&m)).await?;
+                Ok((m, p))
+            }
+            .await;
+            let stopped = msg.is_err();
+            if incoming_tx.send(msg).await.is_err() || stopped {
+                break;
+            }
+        }
+    });
+    let mut decoder = None;
+    let mut coded_stream = None;
+    let mut scale = 1000;
+    let mut frames = 0;
+    let mut got_hello = false;
+    let mut idle = tokio::time::interval(Duration::from_millis(100));
+    let mut last_id = 0;
+    let clipboard =
+        crate::clipboard::Bridge::new(gliff_transport::clipboard::Side::Client, display_tx.clone());
+    let mut clips = clipboard.take_outbound();
+    let mut deadline = Box::pin(tokio::time::sleep(Duration::from_secs(20)));
+    let result: Result<()> = async {
+    loop {
+        tokio::select! {
+            _ = &mut deadline => bail!("server stopped responding for 20 seconds"),
+            result = &mut writes => { result??; bail!("network writer stopped"); }
+            ev = event_rx.recv(), if helper.is_some() => {
+                let ev = ev.context("window closed")??;
+                if ev["type"] == "bye" { out.send((ClientMsg::Bye, Bytes::new())).await?; break; }
+                if ev["type"] == "clipboard" { clipboard.local(&ev).await?; }
+                else if ev["type"] == "paste" { clipboard.paste(&ev); }
+                else if let Some(msg) = input(&ev) { out.send((msg, Bytes::new())).await?; }
+            }
+            Some((msg, payload)) = clips.recv() => { out.send((ClientMsg::from(msg), payload)).await?; }
+            _ = idle.tick(), if decoder.is_some() => {
+                let decoder: &mut gliff_sw::Decoder = decoder.as_mut().unwrap();
+                if decoder.has_pending() {
+                    if let Some(frame) = decoder.flush()? {
+                        show(&display_tx, helper.is_some(), frame, scale).await?;
+                        frames += 1;
+                        out.send((ClientMsg::FrameAck { frame_id: last_id, decoded_at_ms: now_ms() }, Bytes::new())).await?;
+                    }
+                }
+            }
+            packet = incoming.recv() => {
+                let (msg, payload) = packet.context("server closed")??;
+                deadline.as_mut().reset(tokio::time::Instant::now() + Duration::from_secs(20));
+                match msg.into_clipboard() {
+                    Ok(msg) => clipboard.peer(msg, payload),
+                    Err(msg) => match msg {
+                        ServerMsg::HelloAck { version, .. } => { ensure!(version == PROTOCOL_VERSION, "incompatible server protocol {version}"); got_hello = true; }
+                        ServerMsg::StreamConfig { codec, chroma, width, height, scale_milli, .. } => {
+                            ensure!(got_hello && codec == Codec::H264 && width > 0 && height > 0 && scale_milli > 0, "unsupported stream configuration");
+                            ensure!(matches!(chroma, ChromaMode::Single420 | ChromaMode::Dual420), "unsupported chroma mode");
+                            // Pace, scale and pipeline metadata can change without
+                            // a new coded stream or keyframe. Preserve references.
+                            if coded_stream != Some((width, height, chroma)) {
+                                decoder = Some(gliff_sw::Decoder::new(chroma == ChromaMode::Dual420)?);
+                                coded_stream = Some((width, height, chroma));
+                            }
+                            scale = scale_milli;
+                            tracing::info!(width, height, scale_milli, "connected using CPU video");
+                        }
+                        ServerMsg::VideoFrame { frame_id, data_len, aux_len, .. } => {
+                            ensure!(payload.len() == data_len as usize + aux_len as usize, "invalid video payload");
+                            let decoder = decoder.as_mut().context("video before configuration")?;
+                            last_id = frame_id;
+                            match decoder.decode(&payload[..data_len as usize], &payload[data_len as usize..]) {
+                                Ok(Some(frame)) => { show(&display_tx, helper.is_some(), frame, scale).await?; frames += 1; }
+                                Ok(None) => {}
+                                Err(e) => { tracing::warn!(error = %e, "decode failed; requesting keyframe"); out.send((ClientMsg::RequestKeyframe, Bytes::new())).await?; }
+                            }
+                            out.send((ClientMsg::FrameAck { frame_id, decoded_at_ms: now_ms() }, Bytes::new())).await?;
+                        }
+                        ServerMsg::Ping { t } => { out.send((ClientMsg::Pong { t }, Bytes::new())).await?; }
+                        ServerMsg::Error { code, message, .. } => bail!("{}: {message}", if is_incompatible(code) { "incompatible server" } else { "server error" }),
+                        _ => {}
+                    }
+                }
+            }
+        }
+        if check.is_some_and(|n| frames >= n) {
+            out.send((ClientMsg::Bye, Bytes::new())).await?;
+            println!("PASS: decoded {frames} frames from {host}");
+            break;
+        }
+    }
+    Ok(())
+    }.await;
+    // Stop the transport immediately on failure, even while its error window
+    // remains open. EOF tears down the remote host and releases held input.
+    reads.abort();
+    writes.abort();
+    if let Err(error) = &result {
+        if helper.is_some() {
+            let command =
+                json!({"message":format!("{error:#}\nClose this window and connect again.")});
+            let _ = display_tx
+                .send((native::EVENT, serde_json::to_vec(&command)?))
+                .await;
+            while let Some(Ok(event)) = event_rx.recv().await {
+                if event["type"] == "bye" {
+                    break;
+                }
+            }
+        }
+    }
+    if let Some(helper) = &mut helper {
+        let _ = helper.kill().await;
+    }
+    result
+}
+
+async fn show(
+    tx: &mpsc::Sender<(u8, Vec<u8>)>,
+    visible: bool,
+    frame: gliff_sw::BgraFrame,
+    scale: u32,
+) -> Result<()> {
+    ensure!(
+        frame.width > 0
+            && frame.height > 0
+            && frame.pixels.len() == frame.width as usize * frame.height as usize * 4,
+        "invalid decoded frame"
+    );
+    if visible {
+        let mut pixels = Vec::with_capacity(12 + frame.pixels.len());
+        for n in [frame.width, frame.height, scale] {
+            pixels.extend_from_slice(&n.to_le_bytes());
+        }
+        pixels.extend_from_slice(&frame.pixels);
+        // A slow display must not stop network reads or accumulate stale frames.
+        match tx.try_send((native::PIXELS, pixels)) {
+            Ok(()) | Err(mpsc::error::TrySendError::Full(_)) => {}
+            Err(mpsc::error::TrySendError::Closed(_)) => bail!("window closed"),
+        }
+    }
+    Ok(())
+}
+
+fn input(ev: &Value) -> Option<ClientMsg> {
+    match ev["type"].as_str()? {
+        "key" => Some(ClientMsg::Key {
+            keycode: keys::evdev(u16::try_from(ev["keycode"].as_u64()?).ok()?)?,
+            pressed: ev["pressed"].as_bool()?,
+        }),
+        "motion" => Some(ClientMsg::PointerMotion {
+            x: ev["x"].as_f64()?,
+            y: ev["y"].as_f64()?,
+        }),
+        "button" => Some(ClientMsg::PointerButton {
+            button: match ev["button"].as_u64()? {
+                0 => 272,
+                1 => 273,
+                2 => 274,
+                _ => return None,
+            },
+            pressed: ev["pressed"].as_bool()?,
+        }),
+        "resize" => Some(ClientMsg::Resize {
+            width: u32::try_from(ev["width"].as_u64()?).ok()?.clamp(2, 3840),
+            height: u32::try_from(ev["height"].as_u64()?).ok()?.clamp(2, 2160),
+            scale: ev["scale"].as_f64()? as f32,
+        }),
+        "axis" => Some(ClientMsg::PointerAxis {
+            axis: if ev["horizontal"].as_bool()? {
+                gliff_proto::Axis::Horizontal
+            } else {
+                gliff_proto::Axis::Vertical
+            },
+            value: ev["value"].as_f64()?,
+            discrete: None,
+            stop: false,
+        }),
+        _ => None,
+    }
+}
+
+pub(crate) fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+fn server_payload(m: &ServerMsg) -> u32 {
+    match m {
+        ServerMsg::VideoFrame {
+            data_len, aux_len, ..
+        } => data_len.saturating_add(*aux_len),
+        ServerMsg::CursorShape { argb_len, .. } => *argb_len,
+        ServerMsg::ClipboardData { data_len, .. } => *data_len,
+        _ => 0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn pace_reconfiguration_keeps_decoder_reference_frames() -> Result<()> {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (client, server) = tokio::io::duplex(65536);
+                let (client_rd, client_wr) = tokio::io::split(client);
+                let (server_rd, server_wr) = tokio::io::split(server);
+                let server = tokio::task::spawn_local(async move {
+                    let mut rd = Framed::new(server_rd);
+                    let mut wr = Framed::new(server_wr);
+                    rd.read_msg::<ClientMsg>().await?;
+                    wr.write_msg(&ServerMsg::HelloAck {
+                        version: PROTOCOL_VERSION,
+                        session: gliff_proto::SessionInfo {
+                            headless: false,
+                            output: "fixture".into(),
+                        },
+                        outputs: vec![],
+                        features: vec![],
+                    })
+                    .await?;
+                    let config = |fps_cap| ServerMsg::StreamConfig {
+                        codec: Codec::H264,
+                        chroma: ChromaMode::Single420,
+                        pipeline: Some(gliff_proto::VideoPipeline::Cpu),
+                        width: 16,
+                        height: 16,
+                        scale_milli: 1000,
+                        extradata: vec![],
+                        aux_extradata: None,
+                        view_width: 16,
+                        view_height: 16,
+                        fps_cap,
+                    };
+                    wr.write_msg(&config(30)).await?;
+                    let mut encoder = gliff_sw::Encoder::new(
+                        gliff_sw::EncoderSettings {
+                            width: 16,
+                            height: 16,
+                            bitrate: 100000,
+                            framerate: 30,
+                        },
+                        false,
+                    )?;
+                    for frame_id in 1..=8 {
+                        if frame_id == 4 {
+                            wr.write_msg(&config(10)).await?;
+                        }
+                        let frame = encoder.encode_bgra(
+                            &vec![(frame_id * 20) as u8; 16 * 16 * 4],
+                            frame_id == 1,
+                        )?;
+                        wr.write_msg_with_payloads(
+                            &ServerMsg::VideoFrame {
+                                frame_id,
+                                pts_us: frame_id * 33000,
+                                keyframe: frame.keyframe,
+                                damage: vec![],
+                                data_len: frame.main.len() as u32,
+                                aux_len: 0,
+                            },
+                            &[&frame.main],
+                        )
+                        .await?;
+                    }
+                    // Keep the pipe open while the decoder drains its pending picture.
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    Ok::<_, anyhow::Error>(())
+                });
+                let result = tokio::time::timeout(
+                    Duration::from_secs(3),
+                    session(client_rd, client_wr, "fixture", Some(4)),
+                )
+                .await?;
+                server.abort();
+                result
+            })
+            .await
+    }
+    #[test]
+    fn native_positions_become_evdev_and_pointer_messages() {
+        assert_eq!(
+            input(&json!({"type":"key", "keycode":0, "pressed":true})),
+            Some(ClientMsg::Key {
+                keycode: 30,
+                pressed: true
+            })
+        );
+        assert_eq!(
+            input(&json!({"type":"button", "button":1, "pressed":false})),
+            Some(ClientMsg::PointerButton {
+                button: 273,
+                pressed: false
+            })
+        );
+        assert_eq!(
+            input(&json!({"type":"motion", "x":100.5, "y":200.0})),
+            Some(ClientMsg::PointerMotion { x: 100.5, y: 200.0 })
+        );
+        assert_eq!(
+            input(&json!({"type":"key", "keycode":65536, "pressed":true})),
+            None
+        );
+    }
+}

@@ -9,22 +9,27 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
+tokio = { workspace = true }
+toml = "1"
 anyhow.workspace = true
 thiserror.workspace = true
 clap.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
-tokio = { workspace = true }
-gtk4.workspace = true
-libadwaita.workspace = true
 gliff-proto.workspace = true
 gliff-transport.workspace = true
-gliff-vk.workspace = true
 gliff-sw.workspace = true
-hypr-capture.workspace = true
 bytes.workspace = true
+serde.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk4.workspace = true
+libadwaita.workspace = true
+gliff-vk.workspace = true
+hypr-capture.workspace = true
 drm-fourcc.workspace = true
 hypr-ipc.workspace = true
 hypr-input.workspace = true
-serde.workspace = true
-toml = "1"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+gliff-macos.workspace = true

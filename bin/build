@@ -2,4 +2,8 @@
 set -eu
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 cd "$ROOT"
-cargo build --release --locked "$@"
+if [ "$(uname -s)" = Darwin ]; then
+    cargo build --release --locked -p gliff -p gliff-server "$@"
+else
+    cargo build --release --locked "$@"
+fi

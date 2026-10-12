@@ -9,7 +9,7 @@ exec 9>"$GLIFF_ROOT/target/dev-build.lock"
 flock 9
 if ! "$GLIFF_ROOT/bin/build" >"$GLIFF_ROOT/target/dev-build.log" 2>&1; then
     printf 'Gliff build failed. See %s\n' "$GLIFF_ROOT/target/dev-build.log" >&2
-    notify-send --app-name="Gliff (Development)" --icon="$GLIFF_ROOT/pkgbuild/gliff.svg" \
+    notify-send --app-name="Gliff (Development)" --icon="$GLIFF_ROOT/pkgbuild/gliff.png" \
         --urgency=critical "Gliff build failed" \
         "See $GLIFF_ROOT/target/dev-build.log" || true
     exit 1

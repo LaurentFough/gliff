@@ -1,6 +1,6 @@
 # gliff architecture and design
 
-gliff remote-desktops a Hyprland session to another Hyprland machine over SSH.
+gliff remote-desktops a Hyprland or macOS session to a Linux or macOS client over SSH.
 This document covers what is built, the design choices behind it, and what is
 still pending. Building, running a development setup and the testing tools
 are in `docs/development.md`.
@@ -43,6 +43,39 @@ encode work; `--full-chroma` on a CPU server keeps Dual420 for a GPU client.
 Keyboard, pointer, resize, frame acks and keyframe requests flow client→server;
 video, cursor and pongs flow server→client.
 
+## macOS path
+
+The macOS client uses an AppKit window; the host captures a physical display
+through ScreenCaptureKit and injects input through CoreGraphics. A small Swift
+bridge talks to `gliff-macos` over bounded local packets. Rust retains the
+existing CBOR protocol and SSH transport, so either platform can connect to
+the other without a protocol version change. Mac hosts prefer VideoToolbox
+hardware H.264 for Single420. The Swift encoder requires hardware and confirms
+the selected session's hardware flag. It converts length-prefixed NAL units
+to Annex B and includes SPS/PPS on keyframes. One encode request at a time and
+per-packet autorelease pools and a three-surface pixel-buffer pool limit bound
+retained buffers. Startup/runtime failures
+fall back to OpenH264 with a keyframe and updated pipeline metadata. Explicit
+CPU mode and optional Dual420 hosting use OpenH264; Mac viewers still decode
+through OpenH264. The GPU wire tier identifies hardware encoding here; on
+Apple Silicon this uses the media encoder rather than a 3D shader pipeline.
+
+The native connection picker browses `_gliff._tcp` through Bonjour and resolves
+up to 128 services. Linux's desktop-session discovery service execs an Avahi
+publisher advertising the user's SSH endpoint; it never initializes capture.
+Selection passes a hostname and port to Rust, where network-provided targets
+are validated before invoking SSH. Native askpass handles SSH host confirmation
+and authentication. Browsing and cancelling the picker do not start video.
+
+Capture scale accounts for macOS logical display coordinates, including Retina
+and downscaled streams. Both sides translate hardware key positions to and from
+Linux evdev; Command maps to Super. macOS pasteboard providers request text only
+on paste and use the existing chunked clipboard transfer engine.
+
+Linux software capture uses `wl_shm`; this avoids dmabuf mapping failures on
+NVIDIA and removes the software capture path's need for a DRM device. The GPU
+path continues to capture dmabufs.
+
 ## Crates
 
 | Crate | Role | `unsafe` |
@@ -55,6 +88,7 @@ video, cursor and pongs flow server→client.
 | `hypr-input` | virtual keyboard (xkb state) + virtual pointer + clipboard bridge (mime types and pipes) on calloop threads | none |
 | `gliff-va` | libva display, H.264 encode/decode contexts on driver-owned surfaces, dmabuf export, the H.264 header parser and writer | yes, libva calls through committed bindgen output |
 | `gliff-vk` | Vulkan device, dmabuf import/export, split/recombine compute, the pipeline that hands surfaces to `gliff-va` | yes, Vulkan API calls |
+| `gliff-macos` | native AppKit client, ScreenCaptureKit host and CoreGraphics input bridge | no Rust unsafe; native APIs live in Swift |
 | `gliff-sw` | CPU fallback with OpenH264 encode/decode, fused BGRA<->I420 conversion | the encoder trace level through the raw API, and the AVX2 row kernels (pointer loads and stores) |
 | `gliff-server` | ties capture+input+encoder to the protocol; `--stdio`/`--listen` | none |
 | `gliff` | GTK4/libadwaita UI, decode worker | one block: hands GTK a dmabuf fd |

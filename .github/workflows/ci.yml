@@ -40,8 +40,72 @@ jobs:
       - uses: ./.github/actions/setup
       - run: mbx test --workspace --locked
 
+  macos:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-15, macos-15-intel]
+    runs-on: ${{ matrix.runner }}
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "13.0"
+    steps:
+      - uses: actions/checkout@v7
+      - run: scripts/check.sh
+      - run: bin/build
+      - name: Package development build
+        if: github.ref_type != 'tag'
+        run: bin/package-macos --development
+      - name: Set up release signing
+        if: github.ref_type == 'tag'
+        env:
+          GLIFF_MACOS_CERTIFICATE_BASE64: ${{ secrets.GLIFF_MACOS_CERTIFICATE_BASE64 }}
+          GLIFF_MACOS_CERTIFICATE_PASSWORD: ${{ secrets.GLIFF_MACOS_CERTIFICATE_PASSWORD }}
+          GLIFF_CODESIGN_IDENTITY: ${{ secrets.GLIFF_MACOS_SIGNING_IDENTITY }}
+          GLIFF_APPLE_ID: ${{ secrets.GLIFF_APPLE_ID }}
+          GLIFF_APPLE_TEAM_ID: ${{ secrets.GLIFF_APPLE_TEAM_ID }}
+          GLIFF_APPLE_APP_PASSWORD: ${{ secrets.GLIFF_APPLE_APP_PASSWORD }}
+        run: |
+          : "${GLIFF_MACOS_CERTIFICATE_BASE64:?Missing Developer ID certificate}"
+          : "${GLIFF_CODESIGN_IDENTITY:?Missing signing fingerprint}"
+          : "${GLIFF_APPLE_ID:?Missing notarization Apple ID}"
+          : "${GLIFF_APPLE_TEAM_ID:?Missing notarization team}"
+          : "${GLIFF_APPLE_APP_PASSWORD:?Missing notarization password}"
+          keychain="$RUNNER_TEMP/gliff-release.keychain-db"
+          keychain_password=$(openssl rand -hex 32)
+          echo "::add-mask::$keychain_password"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security list-keychains -d user -s "$keychain" login.keychain-db
+          printf '%s' "$GLIFF_MACOS_CERTIFICATE_BASE64" | base64 --decode > "$RUNNER_TEMP/gliff-signing.p12"
+          security import "$RUNNER_TEMP/gliff-signing.p12" -k "$keychain" -P "$GLIFF_MACOS_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          rm "$RUNNER_TEMP/gliff-signing.p12"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$keychain"
+          xcrun notarytool store-credentials gliff-release --keychain "$keychain" \
+            --apple-id "$GLIFF_APPLE_ID" --team-id "$GLIFF_APPLE_TEAM_ID" --password "$GLIFF_APPLE_APP_PASSWORD"
+          echo "GLIFF_NOTARY_PROFILE=gliff-release" >> "$GITHUB_ENV"
+          echo "GLIFF_NOTARY_KEYCHAIN=$keychain" >> "$GITHUB_ENV"
+      - name: Package signed and notarized release
+        if: github.ref_type == 'tag'
+        env:
+          GLIFF_CODESIGN_IDENTITY: ${{ secrets.GLIFF_MACOS_SIGNING_IDENTITY }}
+        run: bin/package-macos
+      - name: Upload Mac packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: gliff-macos-${{ runner.arch }}
+          path: |
+            target/macos/*.zip
+            target/macos/*.sha256
+          if-no-files-found: error
+      - name: Clean up signing credentials
+        if: always() && github.ref_type == 'tag'
+        run: |
+          rm -f "$RUNNER_TEMP/gliff-signing.p12"
+          security delete-keychain "$RUNNER_TEMP/gliff-release.keychain-db" || true
+
   release:
-    needs: [fmt, clippy, test]
+    needs: [fmt, clippy, test, macos]
     if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
     permissions:
@@ -62,8 +126,16 @@ jobs:
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
-      - name: Publish the release
+      - name: Download Mac packages
+        uses: actions/download-artifact@v4
+        with:
+          pattern: gliff-macos-*
+          path: macos-packages
+          merge-multiple: true
+
+      - name: Publish the release with Mac packages
         run: |
           gh release create "$GITHUB_REF_NAME" \
+            macos-packages/*.zip macos-packages/*.sha256 \
             --title "gliff ${{ steps.version.outputs.version }}" \
             --generate-notes

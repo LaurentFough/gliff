@@ -36,6 +36,10 @@ pub const PROTOCOL_VERSION: u16 = 1;
 /// behaviour is used only when both ends list it.
 pub const FEATURES: &[&str] = &[];
 
+/// Request cursor pixels inside video instead of separate cursor messages.
+/// Listed by clients that need this mode and servers that can provide it.
+pub const FEATURE_CURSOR_IN_VIDEO: &str = "cursor-in-video";
+
 pub fn features() -> Vec<String> {
     FEATURES.iter().map(|f| f.to_string()).collect()
 }

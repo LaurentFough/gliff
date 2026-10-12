@@ -13,6 +13,8 @@ pub struct SshTarget {
     pub server_args: Vec<String>,
     /// Extra ssh options (e.g. `-J jump`).
     pub ssh_args: Vec<String>,
+    /// Optional native GUI prompt helper (macOS); terminal clients leave unset.
+    pub askpass: Option<std::path::PathBuf>,
 }
 
 impl SshTarget {
@@ -22,6 +24,7 @@ impl SshTarget {
             server_bin: "gliff-server".into(),
             server_args: Vec::new(),
             ssh_args: Vec::new(),
+            askpass: None,
         }
     }
 }
@@ -37,17 +40,7 @@ pub struct SshStream {
 /// asks for low-latency queuing. stderr is inherited so server logs reach the
 /// client's terminal.
 pub fn spawn_ssh(target: &SshTarget) -> std::io::Result<SshStream> {
-    let mut cmd = Command::new("ssh");
-    cmd.arg("-T")
-        .arg("-o")
-        .arg("Compression=no")
-        .arg("-o")
-        .arg("IPQoS=lowdelay")
-        .args(&target.ssh_args)
-        .arg(&target.host)
-        .arg(&target.server_bin)
-        .arg("--stdio")
-        .args(&target.server_args);
+    let mut cmd = ssh_command(target);
     cmd.stdin(std::process::Stdio::piped());
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::inherit());
@@ -60,4 +53,89 @@ pub fn spawn_ssh(target: &SshTarget) -> std::io::Result<SshStream> {
         stdin,
         stdout,
     })
+}
+
+fn ssh_command(target: &SshTarget) -> Command {
+    let mut cmd = Command::new("ssh");
+    cmd.arg("-T")
+        .arg("-o")
+        .arg("Compression=no")
+        .arg("-o")
+        .arg("IPQoS=lowdelay")
+        .args(&target.ssh_args)
+        .arg("--")
+        .arg(&target.host)
+        .arg(remote_command(target));
+    if let Some(path) = &target.askpass {
+        cmd.env("SSH_ASKPASS", path)
+            .env("SSH_ASKPASS_REQUIRE", "force")
+            .env("GLIFF_ASKPASS", "1");
+    }
+    cmd
+}
+
+/// OpenSSH joins remote argv through the remote user's shell. Keep custom
+/// server commands (including `env ...`) intact, but quote each extra argument.
+fn remote_command(target: &SshTarget) -> String {
+    let args = std::iter::once("--stdio".to_string())
+        .chain(target.server_args.iter().map(|s| shell_quote(s)))
+        .collect::<Vec<_>>()
+        .join(" ");
+    if target.server_bin == "gliff-server" {
+        format!("if command -v gliff-server >/dev/null 2>&1; then exec gliff-server {args}; elif [ -x \"$HOME/Applications/Gliff.app/Contents/MacOS/gliff-server\" ]; then exec \"$HOME/Applications/Gliff.app/Contents/MacOS/gliff-server\" {args}; else exec \"$HOME/.local/bin/gliff-server\" {args}; fi")
+    } else {
+        format!("{} {args}", target.server_bin)
+    }
+}
+
+fn shell_quote(arg: &str) -> String {
+    format!("'{}'", arg.replace('\'', "'\\''"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn target_cannot_add_options_and_gui_prompts_are_opt_in() {
+        let mut target = SshTarget::new("-oProxyCommand=untrusted");
+        target.ssh_args = vec!["-p".into(), "2222".into()];
+        let cmd = ssh_command(&target);
+        let args: Vec<_> = cmd
+            .as_std()
+            .get_args()
+            .map(|a| a.to_str().unwrap())
+            .collect();
+        assert!(args
+            .windows(2)
+            .any(|a| a == ["--", "-oProxyCommand=untrusted"]));
+        assert!(args.windows(2).any(|a| a == ["-p", "2222"]));
+        assert_eq!(cmd.as_std().get_envs().count(), 0);
+        target.askpass = Some("/native/helper".into());
+        let cmd = ssh_command(&target);
+        let vars: std::collections::BTreeMap<_, _> = cmd
+            .as_std()
+            .get_envs()
+            .map(|(k, v)| (k.to_str().unwrap(), v.unwrap().to_str().unwrap()))
+            .collect();
+        assert_eq!(vars["SSH_ASKPASS"], "/native/helper");
+        assert_eq!(vars["SSH_ASKPASS_REQUIRE"], "force");
+        assert_eq!(vars["GLIFF_ASKPASS"], "1");
+    }
+
+    #[test]
+    fn remote_arguments_are_literal_and_custom_prefixes_work() {
+        let mut t = SshTarget::new("host");
+        t.server_bin = "env GLIFF_VIDEO=cpu /path/to/gliff-server".into();
+        t.server_args = vec!["--output".into(), "a'b; $(touch /tmp/no)".into()];
+        assert_eq!(remote_command(&t), "env GLIFF_VIDEO=cpu /path/to/gliff-server --stdio '--output' 'a'\\''b; $(touch /tmp/no)'");
+    }
+
+    #[test]
+    fn default_finds_native_app_when_ssh_path_is_minimal() {
+        let command = remote_command(&SshTarget::new("host"));
+        assert!(command.contains("command -v gliff-server"));
+        assert!(command.contains("$HOME/Applications/Gliff.app/Contents/MacOS/gliff-server"));
+        assert!(command.contains("$HOME/.local/bin/gliff-server"));
+    }
 }

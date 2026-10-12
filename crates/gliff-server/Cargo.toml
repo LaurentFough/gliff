@@ -9,19 +9,24 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
+tokio = { workspace = true }
 anyhow.workspace = true
 clap.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
-tokio = { workspace = true }
 bytes.workspace = true
 gliff-proto.workspace = true
 gliff-transport.workspace = true
-gliff-vk.workspace = true
 gliff-sw.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+gliff-vk.workspace = true
 drm-fourcc.workspace = true
 hypr-capture.workspace = true
 hypr-input.workspace = true
 hypr-ipc.workspace = true
 hypr-wl.workspace = true
 dbus = "0.9"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+gliff-macos.workspace = true

@@ -1,0 +1,57 @@
+#!/usr/bin/env python3
+"""Enable Gliff advertisement for this desktop user; no root access needed."""
+import argparse
+import os
+import shutil
+import subprocess
+from pathlib import Path
+
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument("--ssh-port", type=int, default=22)
+parser.add_argument("--disable", action="store_true")
+args = parser.parse_args()
+
+def preserve(path, suffix, move=False):
+    backup = path.with_name(path.name + suffix)
+    index = 1
+    while backup.exists() and backup.read_bytes() != path.read_bytes():
+        backup = path.with_name(f"{path.name}{suffix}.{index}")
+        index += 1
+    if move:
+        if backup.exists():
+            path.unlink()  # identical contents are already preserved
+        else:
+            path.rename(backup)
+    elif not backup.exists():
+        shutil.copy2(path, backup)
+
+if not 1 <= args.ssh_port <= 65535:
+    parser.error("SSH port must be between 1 and 65535")
+if args.disable:
+    subprocess.run(["systemctl", "--user", "disable", "--now", "gliff-discovery.service"], check=True)
+    destination = Path.home() / ".config/systemd/user/gliff-discovery.service"
+    if destination.is_file() and not destination.is_symlink():
+        preserve(destination, ".disabled", move=True)
+    subprocess.run(["systemctl", "--user", "mask", "gliff-discovery.service"], check=True)
+    raise SystemExit(0)
+root = Path(__file__).resolve().parents[1]
+server = shutil.which("gliff-server") or str(root / "target/release/gliff-server")
+if not os.access(server, os.X_OK):
+    parser.error("Install gliff-server or build it with bin/build first.")
+template = root / "pkgbuild/gliff-discovery.service"
+if not template.exists():
+    template = Path("/usr/lib/systemd/user/gliff-discovery.service")
+unit = template.read_text()
+escaped = server.replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%").replace("$", "$$")
+unit = unit.replace("ExecStart=/usr/bin/gliff-server --advertise", f'ExecStart="{escaped}" --advertise --ssh-port {args.ssh_port}')
+directory = Path.home() / ".config/systemd/user"
+directory.mkdir(parents=True, exist_ok=True)
+destination = directory / "gliff-discovery.service"
+if destination.is_symlink() and destination.resolve() == Path("/dev/null"):
+    subprocess.run(["systemctl", "--user", "unmask", "gliff-discovery.service"], check=True)
+if destination.exists() and destination.read_text() != unit:
+    preserve(destination, ".bak")
+destination.write_text(unit)
+subprocess.run(["systemctl", "--user", "daemon-reload"], check=True)
+subprocess.run(["systemctl", "--user", "enable", "--now", "gliff-discovery.service"], check=True)
+print("Gliff discovery is enabled for this desktop user.")

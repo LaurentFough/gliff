@@ -1,6 +1,8 @@
 target/
+__pycache__/
 *.png
 !/.github/assets/*.png
+!/pkgbuild/gliff.png
 /pkgbuild/pkg/
 /pkgbuild/src/
 *.pkg.tar.zst

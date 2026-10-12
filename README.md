@@ -2,30 +2,34 @@
 
 [![CI](https://github.com/omacom/gliff/actions/workflows/ci.yml/badge.svg)](https://github.com/omacom/gliff/actions/workflows/ci.yml)
 
-gliff is a remote desktop for Hyprland. It shows the Hyprland session of
+gliff is a remote desktop for Hyprland and macOS. It shows the desktop of
 another machine in a window on yours, and all it needs between the two is
 ssh: no open ports, no accounts, no relay.
 
-Text stays sharp. Most remote desktops send video with halved colour
-resolution, which blurs coloured text; gliff sends full-resolution colour
-(4:4:4) through the H.264 hardware every GPU has. Video runs on the GPU at
-both ends, and falls back to the CPU on machines where it cannot.
+On Linux, full-resolution colour (4:4:4) keeps coloured text sharp, with
+GPU video where supported and a CPU fallback. Mac hosts prefer hardware
+H.264 through VideoToolbox; full-colour mode uses the CPU. Mac viewers
+currently decode on the CPU.
 
 ![A gliff window showing a terminal on a remote machine](.github/assets/screenshot.png)
 
 ## What you get
 
-- Mirror any screen of the remote machine, or get a private screen that
-  exists only for your session and follows the size of your window.
-- Your keyboard layout, not the remote's: keys map the same on both ends.
-- A shared clipboard in both directions: text, images, and copied files.
-- Quality that adapts to the link, giving up frame rate before sharpness.
-- Reconnection when the link drops.
-- A window that follows your Omarchy theme.
+- Mirror a physical screen on either platform. Hyprland hosts also provide
+  private screens that follow the size of your window.
+- Remote keyboard, mouse and scrolling. Linux clients send their keyboard
+  layout; Mac clients use physical key positions and the host layout.
+- Shared text clipboard in both directions. Linux-to-Linux sessions also
+  transfer images and copied files.
+- Linux hosts adapt quality to the link, giving up frame rate before sharpness.
+- Linux viewers provide tabs, reconnection, and your Omarchy theme. Mac
+  viewers use a native window with one connection.
 
 ## Requirements
 
-- Hyprland on both machines, with a session running on the remote one.
+- Linux with Hyprland, or macOS 13 Ventura or later, on either end.
+- A logged-in desktop session on the remote machine. On a Mac host, grant
+  Screen Recording and Accessibility to Gliff.
 - ssh access from your machine to the remote one.
 - For GPU video: an AMD or Intel GPU with its Vulkan and VA-API drivers
   (on Arch, `vulkan-radeon` and `mesa` for AMD, or `vulkan-intel` and
@@ -45,6 +49,49 @@ omarchy pkg add gliff
 ```
 
 Then open **Gliff** from the app launcher, or run `gliff` in a terminal.
+
+On macOS, build and install the native app from this checkout (Rust and
+Xcode Command Line Tools are required):
+
+```
+bin/install-macos
+```
+
+This installs `~/Applications/Gliff.app`, with `gliff` and `gliff-server`
+links in `~/.local/bin`. Open the app to select a nearby computer or enter an
+SSH address, or run:
+
+```
+~/.local/bin/gliff user@omarchy-host
+~/.local/bin/gliff-server --permissions --request  # enable Mac hosting
+```
+
+Enable Gliff in **System Settings → Privacy & Security → Screen & System
+Audio Recording** (called Screen Recording on older releases) and
+**Accessibility**. Reconnect after granting permission. From Omarchy:
+
+```
+gliff user@mac-host
+```
+
+SSH finds the installed Mac app even when its non-interactive PATH does not
+include `~/.local/bin`. See [macOS support](docs/macos.md) for display selection,
+installation, testing, and the current feature differences.
+
+The Mac app discovers nearby Gliff desktops through Bonjour on the same local
+network. Allow Local Network access if macOS asks. Linux packages advertise
+logged-in desktops through an Avahi publisher tied to the desktop session;
+Avahi and SSH must be running. For a source/development installation, enable
+advertisement as your desktop user:
+
+```
+bin/enable-discovery
+```
+
+The installed equivalent is `gliff-enable-discovery`. Add `--ssh-port 2222`
+if SSH uses a different port, or `--disable` to stop advertising. Discovery
+lists computers; selecting **Connect** starts the SSH and desktop session.
+SSH host confirmation and authentication use native prompts on the Mac.
 
 On Arch without the OPR, build and install the package from a checkout:
 
@@ -73,7 +120,7 @@ A mirrored screen keeps its own size and is fitted into the window. A private
 screen follows the window as you resize it, and is removed when you
 disconnect.
 
-Every machine you connect to gets a tab in the title bar. Click a tab to
+On Linux, every machine you connect to gets a tab in the title bar. Click a tab to
 connect to that machine, or to switch to it: each connection keeps running
 while you look at another, so switching is instant. Hover a tab for its
 button: a stop square disconnects a running machine, and an X forgets one
@@ -89,7 +136,7 @@ off it to get your own back. Press `Shift+Esc` to get your shortcuts back
 without moving the pointer. `--release-hotkey` changes that key (`ctrl+alt+q`,
 `double-escape`, or `none`).
 
-**Clipboard.** Copy on one machine and paste on the other. Nothing is sent
+**Clipboard.** On Linux, copy on one machine and paste on the other. Nothing is sent
 until you paste. A paste that takes more than a second shows its progress
 with a cancel button. Pasted files are kept in `~/.cache/gliff/clipboard`.
 
@@ -105,7 +152,7 @@ gliff --server-bin 'gliff-server --low-bandwidth' user@host
 
 ## If something does not work
 
-- Run `gliff-probe all` on each machine. It checks the compositor, the GPU
+- On Linux, run `gliff-probe all`. It checks the compositor, the GPU
   drivers and both video paths, and prints PASS or FAIL for each.
 - If ssh cannot find `gliff-server`, give its path:
   `gliff --server-bin /path/to/gliff-server user@host`.
@@ -114,8 +161,8 @@ gliff --server-bin 'gliff-server --low-bandwidth' user@host
   through `--server-bin 'env XDG_RUNTIME_DIR=/run/user/1000 gliff-server'`.
 - To rule out a driver problem, force the CPU on your end with
   `gliff --video cpu user@host`.
-- Screens wider than 4096 pixels are streamed at a reduced size and scaled
-  back up.
+- Linux streams reduce screens wider than 4096 pixels. Mac hosting is capped
+  at 1920×1200 and 30 fps.
 
 ## More
 

@@ -82,11 +82,11 @@ struct State {
     qh: QueueHandle<State>,
     outputs: Outputs,
     seat: Seat,
-    dmabuf: ZwpLinuxDmabufV1,
+    dmabuf: Option<ZwpLinuxDmabufV1>,
     shm: Option<WlShm>,
     source_mgr: ExtOutputImageCaptureSourceManagerV1,
     copy_mgr: ExtImageCopyCaptureManagerV1,
-    device: Arc<Mutex<Device<File>>>,
+    device: Option<Arc<Mutex<Device<File>>>>,
     cmd_tx: Sender<Cmd>,
 
     output: Option<(WlOutput, OutputInfo)>,
@@ -151,9 +151,10 @@ fn run(
 ) -> Result<()> {
     let (conn, globals, queue) = hypr_wl::init::<State>(&cfg.target)?;
     let qh = queue.handle();
-    let dmabuf: ZwpLinuxDmabufV1 = globals
-        .bind(&qh, 3..=5, ())
-        .map_err(|_| hypr_wl::Error::MissingGlobal("zwp_linux_dmabuf_v1"))?;
+    let dmabuf: Option<ZwpLinuxDmabufV1> = globals.bind(&qh, 3..=5, ()).ok();
+    if !cfg.use_shm && dmabuf.is_none() {
+        return Err(hypr_wl::Error::MissingGlobal("zwp_linux_dmabuf_v1").into());
+    }
     let source_mgr: ExtOutputImageCaptureSourceManagerV1 = globals
         .bind(&qh, 1..=1, ())
         .map_err(|_| hypr_wl::Error::MissingGlobal("ext_output_image_capture_source_manager_v1"))?;
@@ -163,12 +164,17 @@ fn run(
     let shm: Option<WlShm> = globals.bind(&qh, 1..=1, ()).ok();
     let outputs = Outputs::bind(&globals, &qh)?;
     let seat = Seat::bind(&globals, &qh)?;
-    let file = File::options()
-        .read(true)
-        .write(true)
-        .open(&cfg.render_node)?;
-    let device = Device::new(file)
-        .map_err(|e| Error::Gbm(format!("open {}: {e}", cfg.render_node.display())))?;
+    let device = if cfg.use_shm {
+        None
+    } else {
+        let file = File::options()
+            .read(true)
+            .write(true)
+            .open(&cfg.render_node)?;
+        let device = Device::new(file)
+            .map_err(|e| Error::Gbm(format!("open {}: {e}", cfg.render_node.display())))?;
+        Some(Arc::new(Mutex::new(device)))
+    };
 
     let mut state = State {
         sink: Box::new(|_| {}),
@@ -180,7 +186,7 @@ fn run(
         shm,
         source_mgr,
         copy_mgr,
-        device: Arc::new(Mutex::new(device)),
+        device,
         cmd_tx,
         output: None,
         source: None,
@@ -242,14 +248,18 @@ fn run_loop(
     state.output = Some((output.clone(), info));
 
     let source = state.source_mgr.create_source(&output, &qh, ());
-    let session =
-        state
-            .copy_mgr
-            .create_session(&source, manager::Options::empty(), &qh, Kind::Screen);
+    let options = if state.cfg.cursor_in_video {
+        manager::Options::PaintCursors
+    } else {
+        manager::Options::empty()
+    };
+    let session = state
+        .copy_mgr
+        .create_session(&source, options, &qh, Kind::Screen);
     state.source = Some(source);
     state.session = Some(session);
 
-    if state.cfg.cursor && state.shm.is_some() {
+    if state.cfg.cursor && !state.cfg.cursor_in_video && state.shm.is_some() {
         state.start_cursor_session();
     }
     let _ = ready_tx.send(Ok(()));
@@ -381,7 +391,89 @@ impl State {
         None
     }
 
+    fn allocate_shm_ring(&mut self) -> Result<()> {
+        use nix::sys::memfd::{memfd_create, MFdFlags};
+        use wayland_client::protocol::wl_shm;
+        let shm = self
+            .shm
+            .as_ref()
+            .ok_or_else(|| Error::Capture("wl_shm unavailable".into()))?;
+        let format = [wl_shm::Format::Xrgb8888, wl_shm::Format::Argb8888]
+            .into_iter()
+            .find(|f| self.constraints.shm_formats.contains(&(*f as u32)))
+            .ok_or_else(|| Error::Capture("no usable shared-memory screen format".into()))?;
+        let fourcc = if format == wl_shm::Format::Xrgb8888 {
+            DrmFourcc::Xrgb8888
+        } else {
+            DrmFourcc::Argb8888
+        } as u32;
+        let (w, h) = (self.constraints.width, self.constraints.height);
+        let stride = w
+            .checked_mul(4)
+            .ok_or_else(|| Error::Capture("screen stride overflow".into()))?;
+        let size = stride
+            .checked_mul(h)
+            .filter(|n| *n > 0 && *n <= i32::MAX as u32)
+            .ok_or_else(|| Error::Capture("invalid shared-memory screen size".into()))?;
+        self.ring_generation += 1;
+        for slot in self.ring.drain(..) {
+            slot.wl_buffer.destroy();
+        }
+        for index in 0..self.cfg.buffers {
+            let fd = memfd_create(c"gliff-screen", MFdFlags::MFD_CLOEXEC)
+                .map_err(|e| Error::Capture(format!("memfd: {e}")))?;
+            let file = File::from(fd);
+            file.set_len(size as u64)?;
+            let pool = shm.create_pool(file.as_fd(), size as i32, &self.qh, ());
+            let wl_buffer =
+                pool.create_buffer(0, w as i32, h as i32, stride as i32, format, &self.qh, ());
+            // A wl_buffer retains its pool's storage after wl_shm_pool.destroy.
+            pool.destroy();
+            let buffer = Arc::new(CaptureBuffer {
+                index,
+                generation: self.ring_generation,
+                info: DmabufInfo {
+                    fd: file.try_clone()?.into(),
+                    width: w,
+                    height: h,
+                    fourcc,
+                    modifier: 0,
+                    planes: vec![Plane { offset: 0, stride }],
+                },
+                storage: crate::Storage::Shm(file),
+            });
+            self.ring.push(RingSlot {
+                buffer,
+                wl_buffer,
+                busy: false,
+            });
+        }
+        self.ring_format = Some((fourcc, 0));
+        let output = self
+            .output
+            .as_ref()
+            .map(|(_, i)| i.clone())
+            .unwrap_or_default();
+        tracing::info!(
+            w,
+            h,
+            buffers = self.cfg.buffers,
+            "shared-memory capture ring allocated"
+        );
+        self.emit(CaptureEvent::Ready {
+            output,
+            width: w,
+            height: h,
+            fourcc,
+            modifier: 0,
+        });
+        Ok(())
+    }
+
     fn allocate_ring(&mut self) -> Result<()> {
+        if self.cfg.use_shm {
+            return self.allocate_shm_ring();
+        }
         self.ring_generation += 1;
         let (fourcc, modifiers) = self.choose_format().ok_or_else(|| {
             Error::Capture(format!(
@@ -398,6 +490,8 @@ impl State {
         for index in 0..self.cfg.buffers {
             let device = self
                 .device
+                .as_ref()
+                .ok_or_else(|| Error::Gbm("no GBM device".into()))?
                 .lock()
                 .map_err(|_| Error::Gbm("device mutex poisoned".into()))?;
             let bo = device
@@ -430,7 +524,11 @@ impl State {
                 });
             }
             let fd = bo.fd().map_err(|e| Error::Gbm(e.to_string()))?;
-            let params = self.dmabuf.create_params(&self.qh, ());
+            let params = self
+                .dmabuf
+                .as_ref()
+                .ok_or_else(|| Error::Capture("no dmabuf global".into()))?
+                .create_params(&self.qh, ());
             for (i, p) in planes.iter().enumerate() {
                 params.add(
                     fd.as_fd(),
@@ -462,8 +560,10 @@ impl State {
                     modifier,
                     planes,
                 },
-                bo: Mutex::new(bo),
-                device: Arc::clone(&self.device),
+                storage: crate::Storage::Dmabuf {
+                    bo: Mutex::new(bo),
+                    device: Arc::clone(self.device.as_ref().unwrap()),
+                },
             });
             self.ring.push(RingSlot {
                 buffer,

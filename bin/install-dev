@@ -25,14 +25,19 @@ applications = data_home / "applications"
 applications.mkdir(parents=True, exist_ok=True)
 # Launchers cache icons by path, so a changed icon at the same path keeps showing the old
 # one. Install a copy named after its contents and point the entry at that.
-source_icon = root / "pkgbuild/gliff.svg"
+source_icon = root / "pkgbuild/gliff.png"
 icons = data_home / "icons"
 icons.mkdir(parents=True, exist_ok=True)
-icon = icons / f"gliff-dev-{hashlib.sha1(source_icon.read_bytes()).hexdigest()[:8]}.svg"
-for stale in icons.glob("gliff-dev-*.svg"):
+icon = icons / f"gliff-dev-{hashlib.sha1(source_icon.read_bytes()).hexdigest()[:8]}.png"
+for stale in [*icons.glob("gliff-dev-*.svg"), *icons.glob("gliff-dev-*.png")]:
     if stale != icon:
         stale.unlink()
 shutil.copyfile(source_icon, icon)
+# GTK windows look up the app by name; the launcher uses the hashed path above.
+# The shared source is 1024px, matching hicolor's 512px entry at scale 2.
+theme_icon = icons / "hicolor/512x512@2/apps/gliff.png"
+theme_icon.parent.mkdir(parents=True, exist_ok=True)
+shutil.copyfile(source_icon, theme_icon)
 entry = applications / "gliff-dev.desktop"
 entry.write_text(
     "[Desktop Entry]\n"

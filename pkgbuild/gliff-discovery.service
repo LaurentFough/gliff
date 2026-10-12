@@ -1,0 +1,13 @@
+[Unit]
+Description=Advertise this desktop to nearby Gliff clients
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+Type=exec
+ExecStart=/usr/bin/gliff-server --advertise
+Restart=on-failure
+RestartSec=15
+
+[Install]
+WantedBy=graphical-session.target

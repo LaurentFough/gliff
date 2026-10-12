@@ -111,10 +111,14 @@ enum Cmd {
         #[arg(long)]
         output: Option<String>,
     },
-    /// Connect to a running `gliff-server --listen` and decode a few frames
+    /// Connect over TCP or SSH and decode real desktop frames
     ServeTest {
-        #[arg(long, default_value = "127.0.0.1:9000")]
+        #[arg(long, default_value = "127.0.0.1:9000", conflicts_with = "ssh")]
         connect: String,
+        #[arg(long)]
+        ssh: Option<String>,
+        #[arg(long, default_value = "gliff-server")]
+        server_bin: String,
         #[arg(long, default_value_t = 30)]
         frames: usize,
     },
@@ -205,7 +209,12 @@ fn main() -> Result<()> {
             click,
         } => input(&target, output, &text, click)?,
         Cmd::Pipeline { output } => pipeline(&target, &node, output, video)?,
-        Cmd::ServeTest { connect, frames } => serve_test(&node, &connect, frames, video)?,
+        Cmd::ServeTest {
+            connect,
+            frames,
+            ssh,
+            server_bin,
+        } => serve_test(&node, &connect, frames, video, ssh.as_deref(), &server_bin)?,
         Cmd::StreamBench {
             connect,
             seconds,
@@ -369,6 +378,7 @@ fn capture(
 ) -> Result<()> {
     let output = pick_output(target, output)?;
     let mut cfg = CaptureConfig::new(output.clone());
+    cfg.use_shm = true;
     cfg.target = target.clone();
     cfg.render_node = node.to_path_buf();
     cfg.cursor = cursor;
@@ -513,7 +523,14 @@ fn input(target: &Target, output: Option<String>, text: &str, click: bool) -> Re
     Ok(())
 }
 
-fn serve_test(node: &std::path::Path, addr: &str, frames: usize, video: VideoMode) -> Result<()> {
+fn serve_test(
+    node: &std::path::Path,
+    addr: &str,
+    frames: usize,
+    video: VideoMode,
+    ssh: Option<&str>,
+    server_bin: &str,
+) -> Result<()> {
     use gliff_proto::{ChromaMode, ClientCaps, ClientMsg, Codec, ServerMsg};
     use gliff_transport::Framed;
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -521,9 +538,20 @@ fn serve_test(node: &std::path::Path, addr: &str, frames: usize, video: VideoMod
         .build()?;
     let local = tokio::task::LocalSet::new();
     local.block_on(&rt, async move {
-        let stream = tokio::net::TcpStream::connect(addr).await.with_context(|| format!("connect {addr}"))?;
-        stream.set_nodelay(true)?;
-        let (rd, wr) = tokio::io::split(stream);
+        let _ssh_child;
+        let (rd, wr): (Box<dyn tokio::io::AsyncRead + Unpin>, Box<dyn tokio::io::AsyncWrite + Unpin>) = if let Some(host) = ssh {
+            let mut target = gliff_transport::SshTarget::new(host);
+            target.server_bin = server_bin.into();
+            let stream = gliff_transport::spawn_ssh(&target)?;
+            _ssh_child = Some(stream.child);
+            (Box::new(stream.stdout), Box::new(stream.stdin))
+        } else {
+            _ssh_child = None;
+            let stream = tokio::net::TcpStream::connect(addr).await.with_context(|| format!("connect {addr}"))?;
+            stream.set_nodelay(true)?;
+            let (rd, wr) = tokio::io::split(stream);
+            (Box::new(rd), Box::new(wr))
+        };
         let mut reader = Framed::new(rd);
         let mut writer = Framed::new(wr);
         let caps = ClientCaps { codecs: vec![Codec::H264], max_width: 1280, max_height: 720, chroma: vec![ChromaMode::Dual420, ChromaMode::Single420], features: gliff_proto::features() };
@@ -1474,6 +1502,7 @@ fn pipeline(
 ) -> Result<()> {
     let output = pick_output(target, output)?;
     let mut cfg = CaptureConfig::new(output.clone());
+    cfg.use_shm = video == VideoMode::Cpu;
     cfg.target = target.clone();
     cfg.render_node = node.to_path_buf();
     cfg.cursor = false;

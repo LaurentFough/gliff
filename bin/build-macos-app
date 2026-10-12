@@ -1,0 +1,64 @@
+#!/bin/sh
+# Build a new app bundle without touching an installed copy.
+set -eu
+[ "$(uname -s)" = Darwin ] || { echo 'Run this build on macOS.' >&2; exit 1; }
+[ "$#" -ge 1 ] && [ "$#" -le 2 ] || { echo 'Usage: bin/build-macos-app PATH.app [development|release]' >&2; exit 1; }
+GLIFF_APP="$1"
+case "$GLIFF_APP" in /*) ;; *) GLIFF_APP="$(pwd)/$GLIFF_APP" ;; esac
+case "$GLIFF_APP" in *.app) ;; *) echo 'The output must be an .app bundle.' >&2; exit 1 ;; esac
+GLIFF_SIGNING_MODE="${2:-development}"
+GLIFF_SIGNING_IDENTITY="${GLIFF_CODESIGN_IDENTITY:--}"
+case "$GLIFF_SIGNING_IDENTITY" in
+    -) ;;
+    *[!a-fA-F0-9]*|'') echo 'GLIFF_CODESIGN_IDENTITY must be a certificate SHA-1 fingerprint.' >&2; exit 1 ;;
+    *) [ "${#GLIFF_SIGNING_IDENTITY}" -eq 40 ] || { echo 'Invalid signing fingerprint.' >&2; exit 1; } ;;
+esac
+case "$GLIFF_SIGNING_MODE" in
+    development) set -- ;;
+    release)
+        [ "$GLIFF_SIGNING_IDENTITY" != - ] || { echo 'Public releases need a Developer ID Application certificate.' >&2; exit 1; }
+        security find-identity -v -p codesigning | awk -v identity="$GLIFF_SIGNING_IDENTITY" '
+            toupper($2) == toupper(identity) && /"Developer ID Application:/ { found = 1 }
+            END { exit !found }
+        ' || { echo 'The selected certificate is not Developer ID Application.' >&2; exit 1; }
+        set -- --timestamp --options runtime ;;
+    *) echo 'Signing mode must be development or release.' >&2; exit 1 ;;
+esac
+[ ! -e "$GLIFF_APP" ] || { echo 'The output app already exists.' >&2; exit 1; }
+ROOT="$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)"
+cd "$ROOT"
+export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.cargo/bin:$PATH"
+export MACOSX_DEPLOYMENT_TARGET=13.0
+cargo build --release --locked -p gliff -p gliff-server
+GLIFF_BUNDLE_COMPLETE=0
+cleanup() { [ "$GLIFF_BUNDLE_COMPLETE" -eq 1 ] || rm -rf "$GLIFF_APP"; }
+trap cleanup EXIT
+trap 'exit 1' HUP INT TERM
+mkdir -p "$GLIFF_APP/Contents/MacOS" "$GLIFF_APP/Contents/Resources"
+cp target/release/gliff target/release/gliff-server "$GLIFF_APP/Contents/MacOS/"
+cp crates/gliff-macos/resources/Gliff.icns LICENSE NOTICE "$GLIFF_APP/Contents/Resources/"
+target/release/gliff-server --install-native "$GLIFF_APP/Contents/MacOS/gliff-native"
+GLIFF_VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+cat > "$GLIFF_APP/Contents/Info.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleIdentifier</key><string>org.omacom.gliff</string>
+<key>CFBundleName</key><string>Gliff</string>
+<key>CFBundleIconFile</key><string>Gliff.icns</string>
+<key>GliffSigningIdentity</key><string>$GLIFF_SIGNING_IDENTITY</string>
+<key>CFBundleExecutable</key><string>gliff</string>
+<key>CFBundlePackageType</key><string>APPL</string>
+<key>CFBundleShortVersionString</key><string>$GLIFF_VERSION</string>
+<key>CFBundleVersion</key><string>$GLIFF_VERSION</string>
+<key>LSMinimumSystemVersion</key><string>13.0</string>
+<key>NSHighResolutionCapable</key><true/>
+<key>NSLocalNetworkUsageDescription</key><string>Find nearby computers running Gliff so you can connect to their desktops.</string>
+<key>NSBonjourServices</key><array><string>_gliff._tcp</string></array>
+</dict></plist>
+PLIST
+codesign --force --sign "$GLIFF_SIGNING_IDENTITY" "$@" --identifier org.omacom.gliff.native "$GLIFF_APP/Contents/MacOS/gliff-native"
+codesign --force --sign "$GLIFF_SIGNING_IDENTITY" "$@" --identifier org.omacom.gliff.server "$GLIFF_APP/Contents/MacOS/gliff-server"
+codesign --force --sign "$GLIFF_SIGNING_IDENTITY" "$@" "$GLIFF_APP"
+codesign --verify --deep --strict "$GLIFF_APP"
+GLIFF_BUNDLE_COMPLETE=1

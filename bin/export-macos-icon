@@ -1,0 +1,21 @@
+#!/bin/sh
+# Rebuild the selected transparent macOS icon using Apple's native tools.
+set -eu
+[ "$(uname -s)" = Darwin ] || { echo 'Run this export on macOS.' >&2; exit 1; }
+ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+GLIFF_ICON_SOURCE="$ROOT/pkgbuild/gliff.png"
+GLIFF_ICON_OUTPUT="${1:-$ROOT/crates/gliff-macos/resources/Gliff.icns}"
+GLIFF_ICON_WORK=$(mktemp -d "${TMPDIR:-/tmp}/gliff-icon.XXXXXX")
+trap 'rm -rf "$GLIFF_ICON_WORK"' EXIT
+trap 'exit 1' HUP INT TERM
+GLIFF_ICONSET="$GLIFF_ICON_WORK/Gliff.iconset"
+mkdir -p "$GLIFF_ICONSET"
+for size in 16 32 128 256 512; do
+    sips -z "$size" "$size" "$GLIFF_ICON_SOURCE" --out "$GLIFF_ICONSET/icon_${size}x${size}.png" >/dev/null
+    double=$((size * 2))
+    sips -z "$double" "$double" "$GLIFF_ICON_SOURCE" --out "$GLIFF_ICONSET/icon_${size}x${size}@2x.png" >/dev/null
+done
+iconutil --convert icns --output "$GLIFF_ICON_WORK/Gliff.icns" "$GLIFF_ICONSET"
+mkdir -p "$(dirname -- "$GLIFF_ICON_OUTPUT")"
+cp "$GLIFF_ICON_WORK/Gliff.icns" "$GLIFF_ICON_OUTPUT"
+printf 'Exported %s\n' "$GLIFF_ICON_OUTPUT"

@@ -62,8 +62,14 @@ pub struct CaptureConfig {
     pub buffers: usize,
     /// Prefer a linear modifier so the CPU can map frames cheaply.
     pub prefer_linear: bool,
+    /// Capture into wl_shm for software encoding; avoids driver-specific
+    /// dmabuf mapping and works without a DRM device.
+    pub use_shm: bool,
     /// Also run a cursor session and report shape/position.
     pub cursor: bool,
+    /// Paint the cursor into video; avoids a separate cursor capture session.
+    /// Takes precedence over `cursor`.
+    pub cursor_in_video: bool,
 }
 
 pub const DEFAULT_RENDER_NODE: &str = "/dev/dri/renderD128";
@@ -84,7 +90,9 @@ impl CaptureConfig {
             render_node: render_node(None),
             buffers: 3,
             prefer_linear: true,
+            use_shm: false,
             cursor: true,
+            cursor_in_video: false,
         }
     }
 }
@@ -113,9 +121,18 @@ pub struct CaptureBuffer {
     /// Ring generation this buffer belongs to; bumped on every reallocation so
     /// a release from a pre-resize frame cannot free a current buffer.
     pub generation: u64,
+    /// Buffer geometry. `fd` is a shared-memory file when `use_shm` is set;
+    /// only dmabuf captures may be imported into Vulkan.
     pub info: DmabufInfo,
-    bo: Mutex<BufferObject<()>>,
-    device: Arc<Mutex<Device<File>>>,
+    storage: Storage,
+}
+
+enum Storage {
+    Dmabuf {
+        bo: Mutex<BufferObject<()>>,
+        device: Arc<Mutex<Device<File>>>,
+    },
+    Shm(File),
 }
 
 impl std::fmt::Debug for CaptureBuffer {
@@ -130,20 +147,27 @@ impl std::fmt::Debug for CaptureBuffer {
 impl CaptureBuffer {
     /// Map the whole buffer for CPU reads and run `f(pixels, stride_bytes)`.
     pub fn with_mapped<R>(&self, f: impl FnOnce(&[u8], u32) -> R) -> Result<R> {
-        let device = self
-            .device
-            .lock()
-            .map_err(|_| Error::Gbm("device mutex poisoned".into()))?;
-        let bo = self
-            .bo
-            .lock()
-            .map_err(|_| Error::Gbm("buffer mutex poisoned".into()))?;
-        let (w, h) = (self.info.width, self.info.height);
-        let mapped = bo
-            .map(&device, 0, 0, w, h, |m| f(m.buffer(), m.stride()))
-            .map_err(|_| Error::Gbm("buffer belongs to another device".into()))?
-            .map_err(|e| Error::Gbm(format!("map: {e}")))?;
-        Ok(mapped)
+        match &self.storage {
+            Storage::Shm(file) => {
+                use std::os::unix::fs::FileExt;
+                let stride = self.info.planes[0].stride;
+                let mut pixels = vec![0; stride as usize * self.info.height as usize];
+                file.read_exact_at(&mut pixels, 0)?;
+                Ok(f(&pixels, stride))
+            }
+            Storage::Dmabuf { bo, device } => {
+                let device = device
+                    .lock()
+                    .map_err(|_| Error::Gbm("device mutex poisoned".into()))?;
+                let bo = bo
+                    .lock()
+                    .map_err(|_| Error::Gbm("buffer mutex poisoned".into()))?;
+                let (w, h) = (self.info.width, self.info.height);
+                bo.map(&device, 0, 0, w, h, |m| f(m.buffer(), m.stride()))
+                    .map_err(|_| Error::Gbm("buffer belongs to another device".into()))?
+                    .map_err(|e| Error::Gbm(format!("map: {e}")))
+            }
+        }
     }
 
     /// Copy the pixels out as packed BGRA, whatever 32-bit RGB layout the
@@ -305,3 +329,45 @@ pub const REQUIRED_GLOBALS: &[&str] = &[
     "ext_image_copy_capture_manager_v1",
     "zwp_linux_dmabuf_v1",
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::FileExt;
+
+    #[test]
+    fn software_capture_reads_shared_memory_and_crops_padding() {
+        let fd = nix::sys::memfd::memfd_create(
+            c"gliff-shm-test",
+            nix::sys::memfd::MFdFlags::MFD_CLOEXEC,
+        )
+        .unwrap();
+        let file = File::from(fd);
+        file.set_len(48).unwrap();
+        let mut input = vec![0; 48];
+        // 3x3 image with 16-byte padded rows, cropped to even 2x2 for I420.
+        for (i, b) in input.iter_mut().enumerate() {
+            *b = i as u8;
+        }
+        file.write_all_at(&input, 0).unwrap();
+        let buffer = CaptureBuffer {
+            index: 0,
+            generation: 1,
+            info: DmabufInfo {
+                fd: file.try_clone().unwrap().into(),
+                width: 3,
+                height: 3,
+                fourcc: DrmFourcc::Xrgb8888 as u32,
+                modifier: 0,
+                planes: vec![Plane {
+                    offset: 0,
+                    stride: 16,
+                }],
+            },
+            storage: Storage::Shm(file),
+        };
+        let image = buffer.read_bgra().unwrap();
+        assert_eq!((image.width, image.height), (2, 2));
+        assert_eq!(image.pixels, [&input[..8], &input[16..24]].concat());
+    }
+}

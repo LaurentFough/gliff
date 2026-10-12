@@ -9,6 +9,7 @@ license=('MIT' 'BSD-2-Clause')
 install='gliff.install'
 options=('!debug' '!lto')
 depends=(
+  'avahi'
   'dbus'
   'gcc-libs'
   'glibc'
@@ -20,6 +21,7 @@ depends=(
   'libxkbcommon'
   'mesa'
   'openssh'
+  'python'
   'vulkan-icd-loader'
   'wayland'
 )
@@ -44,9 +46,15 @@ package() {
   install -Dm755 target/release/gliff "$pkgdir/usr/bin/gliff"
   install -Dm755 target/release/gliff-server "$pkgdir/usr/bin/gliff-server"
   install -Dm755 target/release/gliff-probe "$pkgdir/usr/bin/gliff-probe"
+  install -Dm755 bin/enable-discovery "$pkgdir/usr/bin/gliff-enable-discovery"
+  install -Dm644 pkgbuild/gliff-discovery.service "$pkgdir/usr/lib/systemd/user/gliff-discovery.service"
+  # Start discovery with each desktop session. Explicit user disable overrides it.
+  install -d "$pkgdir/usr/lib/systemd/user/graphical-session.target.wants"
+  ln -s ../gliff-discovery.service "$pkgdir/usr/lib/systemd/user/graphical-session.target.wants/gliff-discovery.service"
   install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
   install -Dm644 NOTICE "$pkgdir/usr/share/licenses/$pkgname/NOTICE"
-  install -Dm644 pkgbuild/gliff.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/gliff.svg"
+  install -Dm644 pkgbuild/gliff.png "$pkgdir/usr/share/icons/hicolor/512x512@2/apps/gliff.png"
+  install -Dm644 pkgbuild/gliff.png "$pkgdir/usr/share/pixmaps/gliff.png"
   install -Dm644 pkgbuild/gliff.desktop "$pkgdir/usr/share/applications/gliff.desktop"
   install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
   install -Dm644 docs/hardware-quirks.md "$pkgdir/usr/share/doc/$pkgname/hardware-quirks.md"
