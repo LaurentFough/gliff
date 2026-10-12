@@ -3,6 +3,7 @@ use std::fs::File;
 use std::io::Write;
 use std::os::fd::AsFd;
 use std::sync::mpsc;
+use std::time::{Duration, Instant};
 
 use calloop::channel::{self, Sender};
 use nix::sys::memfd::{memfd_create, MFdFlags};
@@ -23,12 +24,23 @@ use hypr_wl::{now_ms, LoopState, Outputs, Seat};
 
 const KEYMAP_FORMAT_XKB_V1: u32 = 1;
 
+/// How long a keyboard replaced by a keymap change lives on. Destroying it at
+/// once, while an input method (fcitx5) may still be handling its last keys,
+/// left a stray modifier on those keys.
+const RETIRED_KEYBOARD_GRACE: Duration = Duration::from_secs(1);
+
 struct State {
     sink: EventSink,
     conn: Connection,
     outputs: Outputs,
     seat: Seat,
+    qh: QueueHandle<State>,
+    kb_mgr: ZwpVirtualKeyboardManagerV1,
+    seat_proxy: WlSeat,
     keyboard: ZwpVirtualKeyboardV1,
+    /// Keyboards replaced by a keymap change, with when, until their grace
+    /// period is over.
+    retired: Vec<(Instant, ZwpVirtualKeyboardV1)>,
     pointer: ZwlrVirtualPointerV1,
     keys: KeyState,
     pressed_keys: BTreeSet<u32>,
@@ -84,7 +96,11 @@ fn run(
         conn: conn.clone(),
         outputs,
         seat,
+        qh: qh.clone(),
+        kb_mgr,
+        seat_proxy: seat_proxy.clone(),
         keyboard,
+        retired: Vec::new(),
         pointer: ptr_mgr.create_virtual_pointer(Some(&seat_proxy), &qh, ()),
         keys,
         pressed_keys: BTreeSet::new(),
@@ -109,6 +125,9 @@ fn run(
     }
     state.release_all();
     state.keyboard.destroy();
+    for (_, keyboard) in state.retired.drain(..) {
+        keyboard.destroy();
+    }
     state.pointer.destroy();
     let _ = state.conn.flush();
     std::mem::swap(&mut state.sink, sink);
@@ -160,6 +179,17 @@ impl State {
         Ok(())
     }
 
+    fn destroy_retired_keyboards(&mut self) {
+        let now = Instant::now();
+        self.retired.retain(|(since, keyboard)| {
+            let keep = now.duration_since(*since) < RETIRED_KEYBOARD_GRACE;
+            if !keep {
+                keyboard.destroy();
+            }
+            keep
+        });
+    }
+
     fn release_all(&mut self) {
         let t = now_ms();
         for code in std::mem::take(&mut self.pressed_keys) {
@@ -178,6 +208,7 @@ impl LoopState for State {
     type Cmd = InputCmd;
 
     fn on_cmd(&mut self, cmd: InputCmd) {
+        self.destroy_retired_keyboards();
         let t = now_ms();
         match cmd {
             InputCmd::Key { code, pressed } => {
@@ -237,11 +268,21 @@ impl LoopState for State {
                 }
                 self.pointer.frame();
             }
+            InputCmd::SetKeymap(text) if text == self.keys.text => {}
             InputCmd::SetKeymap(text) => match KeyState::from_text(&text) {
                 Ok(mut ks) => {
                     let (dep, lat, lock, group) =
                         ks.carry_over(&self.keys, self.pressed_keys.iter().copied());
                     self.keys = ks;
+                    // A new keyboard rather than a new keymap on this one: with
+                    // an input method active (fcitx5 on Omarchy) Hyprland routes
+                    // keys through its keyboard grab, which keeps the first
+                    // keymap it saw from a keyboard and so ignores a re-upload.
+                    let keyboard =
+                        self.kb_mgr
+                            .create_virtual_keyboard(&self.seat_proxy, &self.qh, ());
+                    let old = std::mem::replace(&mut self.keyboard, keyboard);
+                    self.retired.push((Instant::now(), old));
                     if let Err(e) = self.upload_keymap() {
                         self.emit(InputEvent::Error(e.to_string()));
                     }
