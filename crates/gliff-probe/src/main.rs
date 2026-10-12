@@ -1146,6 +1146,11 @@ fn gpu_info(node: &std::path::Path) -> Result<()> {
         gpu.va.vendor, gpu.va.version.0, gpu.va.version.1
     );
     print_caps(&gpu.va_caps);
+    print_encode(&gpu);
+    match gpu.va_caps.can_decode() {
+        Ok(()) => status(true, "VA-API H.264 decode"),
+        Err(e) => status(false, &format!("VA-API H.264 decode: {e}")),
+    }
     Ok(())
 }
 
@@ -1160,13 +1165,45 @@ fn print_caps(caps: &gliff_va::Caps) {
             caps.max_height
         );
     }
-    match caps.can_encode() {
-        Ok(()) => status(true, "VA-API H.264 encode"),
-        Err(e) => status(false, &format!("VA-API H.264 encode: {e}")),
+}
+
+/// Which API encodes H.264 here, if either. The VA-API line keeps its own
+/// PASS (`e2e.sh` keys the VA-API-only checks on it), but a VA-API driver
+/// without an encoder is not a failure when Vulkan Video encodes instead:
+/// that is the normal NVIDIA case, and a bare FAIL there reads as if the
+/// GPU tier were unavailable.
+fn print_encode(gpu: &Gpu) {
+    let vk = gpu.vk_encode_info();
+    let va = gpu.va_caps.can_encode();
+    match (&va, &vk) {
+        (Ok(()), _) => status(true, "VA-API H.264 encode"),
+        (Err(e), Some(_)) => println!("  va-api H.264 encode: {e}; Vulkan Video encodes instead"),
+        (Err(e), None) => status(false, &format!("VA-API H.264 encode: {e}")),
     }
-    match caps.can_decode() {
-        Ok(()) => status(true, "VA-API H.264 decode"),
-        Err(e) => status(false, &format!("VA-API H.264 decode: {e}")),
+    match (&vk, va.is_ok()) {
+        (Some(info), false) => status(
+            true,
+            &format!(
+                "Vulkan Video H.264 encode: maximum {}x{}, {} encode queue(s), {} {}",
+                info.max_extent.0,
+                info.max_extent.1,
+                info.queues,
+                info.std_header,
+                info.std_header_version
+            ),
+        ),
+        // The VA-API encoder is the one the pipeline picks; say the fallback
+        // is there without a second PASS line for an encoder nothing uses.
+        (Some(info), true) => println!(
+            "  vulkan video: H.264 encode also available (maximum {}x{}), unused while VA-API encodes",
+            info.max_extent.0, info.max_extent.1
+        ),
+        (None, false) => status(
+            false,
+            "Vulkan Video H.264 encode: no encoder (no VK_KHR_video_encode_h264 H.264 profile, \
+             or GLIFF_VK_ENCODE=0); the CPU tier will be used",
+        ),
+        (None, true) => {}
     }
 }
 

@@ -30,7 +30,7 @@ pub mod image;
 pub mod pipeline;
 mod vkenc;
 
-pub use device::Gpu;
+pub use device::{Gpu, VkEncodeInfo};
 pub use gliff_va::EncoderSettings;
 pub use image::{DmabufPlane, ExportedDmabuf};
 pub use pipeline::{split_into_surface, Decoder, DisplayFrame, EncodedFrame, Encoder, SurfacePath};

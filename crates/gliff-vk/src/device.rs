@@ -39,6 +39,18 @@ pub(crate) struct VideoEncode {
     pub(crate) bitstream_alignment: u64,
 }
 
+/// What the Vulkan Video H.264 encoder offers, for `gliff-probe`.
+#[derive(Debug, Clone)]
+pub struct VkEncodeInfo {
+    /// Largest coded size the device encodes.
+    pub max_extent: (u32, u32),
+    /// Encode queues the pipeline got: two means main and aux encode in parallel.
+    pub queues: usize,
+    /// The video std header the driver implements, and its version.
+    pub std_header: String,
+    pub std_header_version: String,
+}
+
 /// One Vulkan device with the queues, extension tables and pools the media
 /// pipeline uses. Not thread-safe: every pipeline built on it lives on the
 /// thread that created it, as the VA-API path did.
@@ -274,6 +286,29 @@ impl Gpu {
         } else {
             "none"
         }
+    }
+
+    /// What the Vulkan Video encoder offers, when the device has one. `None`
+    /// when `VK_KHR_video_encode_h264` is missing, the driver refuses the
+    /// profile, or `GLIFF_VK_ENCODE=0`.
+    pub fn vk_encode_info(&self) -> Option<VkEncodeInfo> {
+        let video = self.video_encode.as_ref()?;
+        let spec = video.std_header.spec_version;
+        Some(VkEncodeInfo {
+            max_extent: video.max_extent,
+            queues: video.queues.len(),
+            std_header: video
+                .std_header
+                .extension_name_as_c_str()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|_| "unnamed".into()),
+            std_header_version: format!(
+                "{}.{}.{}",
+                vk::api_version_major(spec),
+                vk::api_version_minor(spec),
+                vk::api_version_patch(spec)
+            ),
+        })
     }
 
     pub fn can_decode(&self) -> bool {

@@ -17,7 +17,10 @@ needed. The detailed findings come from AMD:
 The same path also runs on Intel Panther Lake (see the Intel section).
 
 `gliff-probe gpu` prints the Vulkan device, the VA-API driver and its H.264
-capabilities; `gliff-probe surfaces` proves the hand-off between the two.
+capabilities, and which API encodes: `PASS VA-API H.264 encode`, or
+`PASS Vulkan Video H.264 encode` where the VA-API driver has no encoder
+(NVIDIA). `gliff-probe surfaces` proves the hand-off between Vulkan and
+VA-API, so it needs the VA-API codec.
 
 ## Confirmed on AMD (RADV + radeonsi)
 
