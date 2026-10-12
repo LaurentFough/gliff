@@ -1133,6 +1133,11 @@ impl VideoTier {
             tracing::info!("using the CPU video pipeline as requested");
             return Self::Cpu;
         }
+        if !render_node.exists() {
+            // Hyper-V guests have only a display node and no render node.
+            tracing::warn!(render_node = %render_node.display(), "no render node; falling back to the CPU pipeline");
+            return Self::Cpu;
+        }
         match Gpu::open(Some(render_node)) {
             Ok(gpu) if gpu.can_encode() => {
                 tracing::info!(gpu = %gpu.name, va = %gpu.va.vendor, "using the GPU video pipeline");
@@ -1298,8 +1303,8 @@ impl VideoEncoder {
             Self::Gpu(enc) => {
                 anyhow::ensure!(
                     !frame.buffer.is_shm(),
-                    "the GPU tier needs dmabuf capture, but the compositor offered no linear \
-                     dmabuf and capture fell back to wl_shm; run with --video cpu"
+                    "the GPU tier needs dmabuf capture, but capture fell back to wl_shm (no linear \
+                     dmabuf, no dmabuf global or no render node); run with --video cpu"
                 );
                 let info = &frame.buffer.info;
                 let fourcc = drm_fourcc::DrmFourcc::try_from(info.fourcc).map_err(|_| {
