@@ -264,7 +264,7 @@ where
     let mut reader = Framed::new(rd);
     let mut writer = Framed::new(wr);
 
-    let gpu = open_gpu(video);
+    let mut gpu = open_gpu(video);
     let caps = ClientCaps {
         codecs: vec![Codec::H264],
         max_width: 3840,
@@ -341,6 +341,7 @@ where
         }
     };
     let mut decoder = new_decoder(&gpu, chroma, width, height)?;
+    let mut server_pipeline = pipeline;
     let mut video_label = tier_label(pipeline, &decoder);
     let _ = status.send(Status::Connected {
         video: video_label.clone(),
@@ -640,6 +641,28 @@ where
                         }
                     }
                     Err(e) => {
+                        // Some drivers advertise H.264 decoding but export
+                        // surfaces our Vulkan importer cannot use. Keyframes
+                        // cannot fix that capability mismatch.
+                        if matches!(decoder, VideoDecoder::Gpu(_))
+                            && matches!(
+                                e.downcast_ref::<gliff_vk::Error>(),
+                                Some(gliff_vk::Error::Unsupported(_))
+                            )
+                        {
+                            tracing::warn!(error = %e, "unsupported GPU decode path; switching to CPU");
+                            gpu = None;
+                            decoder = new_decoder(&gpu, chroma, width, height)?;
+                            undelivered = None;
+                            last_gpu_geometry = None;
+                            video_label = tier_label(server_pipeline, &decoder);
+                            let _ = status.send(Status::Connected {
+                                video: video_label.clone(),
+                                view_width: view.0,
+                                view_height: view.1,
+                                fps_cap,
+                            });
+                        }
                         tracing::warn!(error = %e, "decode error; requesting keyframe");
                         in_decoder.clear();
                         let _ = out_tx.send((ClientMsg::RequestKeyframe, Bytes::new()));
@@ -667,6 +690,7 @@ where
                 }
                 (width, height, chroma, scale_milli) = (w, h, c, s);
                 (view, fps_cap) = ((view_width, view_height), f);
+                server_pipeline = pipeline;
                 video_label = tier_label(pipeline, &decoder);
                 let _ = status.send(Status::Connected {
                     video: video_label.clone(),
