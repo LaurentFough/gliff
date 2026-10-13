@@ -534,6 +534,10 @@ struct NearbyComputer {
     let user: String
     let platform: String
     var address: String { user.isEmpty ? host : "\(user)@\(host)" }
+    var displayName: String {
+        let hostname = host.hasSuffix(".local") ? String(host.dropLast(6)) : host
+        return name == "Gliff on \(hostname) (\(user))" ? hostname : name
+    }
     var value: [String: Any] { ["name": name, "host": host, "port": port, "user": user, "platform": platform] }
 }
 
@@ -602,20 +606,39 @@ final class NearbyComputers: NSObject, NetServiceBrowserDelegate, NetServiceDele
     }
 }
 
-final class ComputerPicker: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTableViewDataSource, NSTableViewDelegate {
+final class ComputerPickerRow: NSTableRowView {
+    override func drawSelection(in dirtyRect: NSRect) {
+        guard selectionHighlightStyle != .none else { return }
+        let color = isEmphasized ? NSColor.selectedContentBackgroundColor : NSColor.unemphasizedSelectedContentBackgroundColor
+        color.setFill()
+        var rect = bounds.insetBy(dx: 4, dy: 3)
+        if let scroll = enclosingScrollView { rect.size.width = min(bounds.width, scroll.contentSize.width) - 8 }
+        NSBezierPath(roundedRect: rect, xRadius: 6, yRadius: 6).fill()
+    }
+}
+
+final class ComputerPicker: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTableViewDataSource, NSTableViewDelegate, NSTextFieldDelegate {
     let nearby = NearbyComputers()
     let table = NSTableView()
     let address = NSTextField(string: "")
     let port = NSTextField(string: "22")
     let status = NSTextField(wrappingLabelWithString: "Searching the local network…")
+    let progress = NSProgressIndicator()
     var window: NSWindow?
     var rows: [NearbyComputer] = []
     var updating = false
     var finished = false
     var selectedID: String?
-    func label(_ text: String, _ rect: NSRect, _ size: CGFloat = 13) -> NSTextField {
+    func label(_ text: String, _ size: CGFloat = 13) -> NSTextField {
         let label = NSTextField(labelWithString: text)
-        label.frame = rect; label.font = NSFont.systemFont(ofSize: size); return label
+        label.font = NSFont.systemFont(ofSize: size); return label
+    }
+    func stack(_ views: [NSView], _ orientation: NSUserInterfaceLayoutOrientation, _ spacing: CGFloat) -> NSStackView {
+        let stack = NSStackView(views: views)
+        stack.orientation = orientation; stack.spacing = spacing
+        stack.alignment = orientation == .vertical ? .leading : .centerY
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        return stack
     }
     func applicationDidFinishLaunching(_ note: Notification) {
         let menu = NSMenu(); let item = NSMenuItem(); menu.addItem(item)
@@ -625,34 +648,99 @@ final class ComputerPicker: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         appMenu.addItem(NSMenuItem.separator())
         appMenu.addItem(withTitle: "Quit Gliff", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         NSApplication.shared.mainMenu = menu
-        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 620, height: 460), styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 540), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
         w.title = "Gliff"; w.delegate = self
+        w.contentMinSize = NSSize(width: 700, height: 470)
+        let background = NSBox()
+        background.boxType = .custom; background.titlePosition = .noTitle
+        background.borderWidth = 0; background.fillColor = .underPageBackgroundColor
+        w.contentView = background
         let view = w.contentView!
-        view.addSubview(label("Nearby Computers", NSRect(x: 24, y: 412, width: 400, height: 28), 22))
-        view.addSubview(label("Choose a computer or enter an SSH address.", NSRect(x: 24, y: 386, width: 570, height: 20)))
-        let scroll = NSScrollView(frame: NSRect(x: 24, y: 172, width: 572, height: 202))
-        scroll.hasVerticalScroller = true; scroll.borderType = .bezelBorder
-        for (id, title, width) in [("name", "Computer", CGFloat(285)), ("address", "SSH address", CGFloat(265))] {
+        let card = NSBox()
+        card.boxType = .custom; card.titlePosition = .noTitle
+        card.fillColor = .controlBackgroundColor; card.borderColor = .separatorColor
+        card.borderWidth = 0.5; card.cornerRadius = 16
+        card.contentViewMargins = .zero; card.translatesAutoresizingMaskIntoConstraints = false
+        card.wantsLayer = true; card.layer?.cornerRadius = 16
+        card.layer?.shadowColor = NSColor.black.cgColor; card.layer?.shadowOpacity = 0.12
+        card.layer?.shadowRadius = 12; card.layer?.shadowOffset = NSSize(width: 0, height: -4)
+        view.addSubview(card)
+        let title = label("Connect to a Computer", 18)
+        title.font = NSFont.systemFont(ofSize: 18, weight: .semibold)
+        let subtitle = label("Choose a nearby computer or enter an SSH address.")
+        subtitle.textColor = .secondaryLabelColor
+        let heading = stack([title, subtitle], .vertical, 4)
+        let list = NSBox()
+        list.boxType = .custom; list.titlePosition = .noTitle
+        list.fillColor = .controlBackgroundColor; list.borderColor = .separatorColor
+        list.borderWidth = 0.5; list.cornerRadius = 8; list.contentViewMargins = .zero
+        list.wantsLayer = true; list.layer?.cornerRadius = 8; list.layer?.masksToBounds = true
+        let scroll = NSScrollView()
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+        scroll.hasVerticalScroller = true; scroll.borderType = .noBorder
+        for (id, title, width) in [("name", "Computer", CGFloat(236)), ("address", "SSH Address", CGFloat(340))] {
             let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(id)); column.title = title; column.width = width
             table.addTableColumn(column)
         }
-        table.delegate = self; table.dataSource = self; table.rowHeight = 26
-        table.frame = scroll.bounds; table.autoresizingMask = [.width]
+        table.delegate = self; table.dataSource = self; table.rowHeight = 30
+        table.style = .inset; table.usesAlternatingRowBackgroundColors = true
+        table.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
+        table.setAccessibilityLabel("Nearby Computers")
+        table.frame = NSRect(x: 0, y: 0, width: 600, height: 170); table.autoresizingMask = [.width]
         table.target = self; table.doubleAction = #selector(connect)
-        scroll.documentView = table; view.addSubview(scroll)
-        status.frame = NSRect(x: 24, y: 124, width: 490, height: 40)
-        status.textColor = .secondaryLabelColor; view.addSubview(status)
-        let refresh = NSButton(title: "Refresh", target: self, action: #selector(refresh))
-        refresh.frame = NSRect(x: 518, y: 134, width: 80, height: 28); view.addSubview(refresh)
-        view.addSubview(label("SSH address", NSRect(x: 24, y: 104, width: 430, height: 18)))
-        address.frame = NSRect(x: 24, y: 74, width: 466, height: 26); address.placeholderString = "user@computer.local"
-        address.target = self; address.action = #selector(connect); view.addSubview(address)
-        view.addSubview(label("Port", NSRect(x: 510, y: 104, width: 86, height: 18)))
-        port.frame = NSRect(x: 510, y: 74, width: 86, height: 26); view.addSubview(port)
+        scroll.documentView = table; list.contentView!.addSubview(scroll)
+        progress.style = .spinning; progress.controlSize = .small
+        progress.isIndeterminate = true; progress.isDisplayedWhenStopped = false
+        progress.setAccessibilityLabel("Searching for nearby computers")
+        status.font = NSFont.systemFont(ofSize: 12); status.textColor = .secondaryLabelColor
+        status.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        let refresh = NSButton(image: NSImage(systemSymbolName: "arrow.clockwise", accessibilityDescription: "Refresh Nearby Computers")!, target: self, action: #selector(refresh))
+        refresh.bezelStyle = .inline; refresh.controlSize = .small
+        refresh.toolTip = "Refresh Nearby Computers"; refresh.setAccessibilityLabel("Refresh Nearby Computers")
+        let statusRow = stack([progress, status, refresh], .horizontal, 8)
+        address.placeholderString = "user@computer.local"
+        address.bezelStyle = .roundedBezel; port.bezelStyle = .roundedBezel
+        address.font = NSFont.systemFont(ofSize: 13); port.font = address.font
+        address.setAccessibilityLabel("SSH Address"); port.setAccessibilityLabel("SSH Port")
+        address.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        address.delegate = self; port.delegate = self
+        let fields = stack([label("SSH Address:"), address, label("Port:"), port], .horizontal, 10)
         let cancel = NSButton(title: "Cancel", target: self, action: #selector(cancel))
-        cancel.frame = NSRect(x: 394, y: 20, width: 94, height: 32); cancel.keyEquivalent = "\u{1b}"; view.addSubview(cancel)
+        cancel.bezelStyle = .rounded; cancel.controlSize = .large; cancel.keyEquivalent = "\u{1b}"
         let connect = NSButton(title: "Connect", target: self, action: #selector(connect))
-        connect.frame = NSRect(x: 496, y: 20, width: 100, height: 32); connect.keyEquivalent = "\r"; view.addSubview(connect)
+        connect.bezelStyle = .rounded; connect.controlSize = .large; connect.keyEquivalent = "\r"
+        let actions = stack([NSView(), cancel, connect], .horizontal, 8)
+        let content = stack([heading, list, statusRow, fields, actions], .vertical, 16)
+        card.contentView!.addSubview(content)
+        for row in [heading, list, statusRow, fields, actions] { row.translatesAutoresizingMaskIntoConstraints = false }
+        NSLayoutConstraint.activate([
+            card.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            card.centerYAnchor.constraint(equalTo: view.centerYAnchor),
+            card.widthAnchor.constraint(equalToConstant: 652),
+            card.heightAnchor.constraint(equalToConstant: 422),
+            content.leadingAnchor.constraint(equalTo: card.contentView!.leadingAnchor, constant: 24),
+            content.trailingAnchor.constraint(equalTo: card.contentView!.trailingAnchor, constant: -24),
+            content.topAnchor.constraint(equalTo: card.contentView!.topAnchor, constant: 24),
+            content.bottomAnchor.constraint(lessThanOrEqualTo: card.contentView!.bottomAnchor, constant: -24),
+            list.widthAnchor.constraint(equalTo: content.widthAnchor),
+            list.heightAnchor.constraint(equalToConstant: 170),
+            scroll.leadingAnchor.constraint(equalTo: list.contentView!.leadingAnchor),
+            scroll.trailingAnchor.constraint(equalTo: list.contentView!.trailingAnchor),
+            scroll.topAnchor.constraint(equalTo: list.contentView!.topAnchor),
+            scroll.bottomAnchor.constraint(equalTo: list.contentView!.bottomAnchor),
+            statusRow.widthAnchor.constraint(equalTo: content.widthAnchor),
+            statusRow.heightAnchor.constraint(equalToConstant: 32),
+            progress.widthAnchor.constraint(equalToConstant: 16),
+            progress.heightAnchor.constraint(equalToConstant: 16),
+            fields.widthAnchor.constraint(equalTo: content.widthAnchor),
+            port.widthAnchor.constraint(equalToConstant: 64),
+            actions.widthAnchor.constraint(equalTo: content.widthAnchor),
+            cancel.widthAnchor.constraint(greaterThanOrEqualToConstant: 80),
+            connect.widthAnchor.constraint(greaterThanOrEqualToConstant: 90),
+        ])
+        table.nextKeyView = address; address.nextKeyView = port
+        port.nextKeyView = connect; connect.nextKeyView = cancel; cancel.nextKeyView = refresh
+        refresh.nextKeyView = table
         w.defaultButtonCell = connect.cell as? NSButtonCell
         w.center(); w.makeKeyAndOrderFront(nil); w.makeFirstResponder(address); window = w
         NSApplication.shared.activate(ignoringOtherApps: true)
@@ -666,6 +754,7 @@ final class ComputerPicker: NSObject, NSApplicationDelegate, NSWindowDelegate, N
                 if cmd["type"] as? String == "cancel" { self.cancel(nil) }
                 if cmd["type"] as? String == "select", let index = cmd["index"] as? Int, self.rows.indices.contains(index) {
                     self.table.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false)
+                    self.window?.makeFirstResponder(self.table)
                 }
                 if cmd["type"] as? String == "inspect" {
                     event(["type": "picker_state", "hosts": self.rows.map { $0.value }, "rows": self.table.numberOfRows, "host": self.address.stringValue, "port": self.port.stringValue])
@@ -679,12 +768,42 @@ final class ComputerPicker: NSObject, NSApplicationDelegate, NSWindowDelegate, N
             table.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false)
         }
         updating = false
-        status.stringValue = nearby.failure ?? (rows.isEmpty ? "Looking for Gliff computers on this local network… You can also enter an address below." : "\(rows.count) computer\(rows.count == 1 ? "" : "s") found. SSH access is required to connect.")
+        if rows.isEmpty && nearby.failure == nil { progress.startAnimation(nil) } else { progress.stopAnimation(nil) }
+        status.stringValue = nearby.failure ?? (rows.isEmpty ? "Searching for nearby computers… You can also enter an SSH address." : "\(rows.count) computer\(rows.count == 1 ? "" : "s") found. SSH access is required to connect.")
     }
     func numberOfRows(in tableView: NSTableView) -> Int { rows.count }
-    func tableView(_ tableView: NSTableView, objectValueFor tableColumn: NSTableColumn?, row: Int) -> Any? {
+    func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? { ComputerPickerRow() }
+    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         guard rows.indices.contains(row) else { return nil }
-        return tableColumn?.identifier.rawValue == "name" ? rows[row].name : rows[row].address
+        let computer = rows[row]
+        let identifier = tableColumn!.identifier
+        if let cell = tableView.makeView(withIdentifier: identifier, owner: self) as? NSTableCellView {
+            cell.textField?.stringValue = identifier.rawValue == "name" ? computer.displayName : computer.address
+            return cell
+        }
+        let cell = NSTableCellView(); cell.identifier = identifier
+        let text = label(identifier.rawValue == "name" ? computer.displayName : computer.address)
+        text.lineBreakMode = .byTruncatingTail; text.translatesAutoresizingMaskIntoConstraints = false
+        cell.textField = text; cell.addSubview(text)
+        var leading = cell.leadingAnchor
+        if identifier.rawValue == "name" {
+            let icon = NSImageView()
+            icon.image = NSImage(systemSymbolName: "desktopcomputer", accessibilityDescription: nil)
+            icon.translatesAutoresizingMaskIntoConstraints = false
+            cell.imageView = icon; cell.addSubview(icon)
+            NSLayoutConstraint.activate([
+                icon.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 4),
+                icon.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
+                icon.widthAnchor.constraint(equalToConstant: 18), icon.heightAnchor.constraint(equalToConstant: 18),
+            ])
+            leading = icon.trailingAnchor
+        }
+        NSLayoutConstraint.activate([
+            text.leadingAnchor.constraint(equalTo: leading, constant: 8),
+            text.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -6),
+            text.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
+        ])
+        return cell
     }
     func tableViewSelectionDidChange(_ notification: Notification) {
         guard !updating, rows.indices.contains(table.selectedRow) else { return }
@@ -692,6 +811,11 @@ final class ComputerPicker: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         address.stringValue = computer.address; port.stringValue = String(computer.port)
     }
     @objc func refresh(_ sender: Any?) { nearby.start() }
+    func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+        if commandSelector == #selector(NSResponder.insertNewline(_:)) { connect(nil); return true }
+        if commandSelector == #selector(NSResponder.cancelOperation(_:)) { cancel(nil); return true }
+        return false
+    }
     @objc func connect(_ sender: Any?) {
         let host = address.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !host.isEmpty, !host.hasPrefix("-"), host.utf8.count <= 320,

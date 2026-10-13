@@ -21,6 +21,9 @@ it uses ad-hoc signing, which can require renewed grants after each rebuild.
 Open Gliff to show **Nearby Computers**. Select a computer to fill in its
 SSH username, hostname and port, then choose **Connect**. You can edit these
 fields or enter a manual address. Cancel closes the picker without connecting.
+The connection panel follows the Mac's appearance and accent color. Tab moves
+between fields, Return connects, and Escape cancels; changing focus does not
+start a connection.
 The app asks for Local Network access on macOS versions that require it;
 enable Gliff under System Settings → Privacy & Security → Local Network.
 
