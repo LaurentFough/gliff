@@ -33,8 +33,13 @@ func exact(_ count: Int) -> Data? {
     // caches after each short read; reserve once and keep read buffers small.
     var data = Data(capacity: count)
     while data.count < count {
-        guard let part = try? FileHandle.standardInput.read(upToCount: min(count - data.count, 64 * 1024)), !part.isEmpty else { return nil }
-        data.append(part)
+        // Drain Foundation's temporary NSData after each short read instead of
+        // keeping a frame's worth of chunk buffers until the packet completes.
+        let received = autoreleasepool { () -> Bool in
+            guard let part = try? FileHandle.standardInput.read(upToCount: min(count - data.count, 64 * 1024)), !part.isEmpty else { return false }
+            data.append(part); return true
+        }
+        if !received { return nil }
     }
     return data
 }
