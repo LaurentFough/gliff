@@ -625,6 +625,7 @@ final class ComputerPicker: NSObject, NSApplicationDelegate, NSWindowDelegate, N
     let status = NSTextField(wrappingLabelWithString: "Searching the local network…")
     let progress = NSProgressIndicator()
     var window: NSWindow?
+    var listHeight: NSLayoutConstraint?
     var rows: [NearbyComputer] = []
     var updating = false
     var finished = false
@@ -648,9 +649,8 @@ final class ComputerPicker: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         appMenu.addItem(NSMenuItem.separator())
         appMenu.addItem(withTitle: "Quit Gliff", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         NSApplication.shared.mainMenu = menu
-        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 540), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
+        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 600, height: 340), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
         w.title = "Gliff"; w.delegate = self
-        w.contentMinSize = NSSize(width: 700, height: 470)
         let background = NSBox()
         background.boxType = .custom; background.titlePosition = .noTitle
         background.borderWidth = 0; background.fillColor = .underPageBackgroundColor
@@ -678,7 +678,7 @@ final class ComputerPicker: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         let scroll = NSScrollView()
         scroll.translatesAutoresizingMaskIntoConstraints = false
         scroll.hasVerticalScroller = true; scroll.borderType = .noBorder
-        for (id, title, width) in [("name", "Computer", CGFloat(236)), ("address", "SSH Address", CGFloat(340))] {
+        for (id, title, width) in [("name", "Computer", CGFloat(180)), ("address", "SSH Address", CGFloat(324))] {
             let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(id)); column.title = title; column.width = width
             table.addTableColumn(column)
         }
@@ -686,13 +686,14 @@ final class ComputerPicker: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         table.style = .inset; table.usesAlternatingRowBackgroundColors = true
         table.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
         table.setAccessibilityLabel("Nearby Computers")
-        table.frame = NSRect(x: 0, y: 0, width: 600, height: 170); table.autoresizingMask = [.width]
+        table.frame = NSRect(x: 0, y: 0, width: 536, height: 66); table.autoresizingMask = [.width]
         table.target = self; table.doubleAction = #selector(connect)
         scroll.documentView = table; list.contentView!.addSubview(scroll)
         progress.style = .spinning; progress.controlSize = .small
         progress.isIndeterminate = true; progress.isDisplayedWhenStopped = false
         progress.setAccessibilityLabel("Searching for nearby computers")
         status.font = NSFont.systemFont(ofSize: 12); status.textColor = .secondaryLabelColor
+        status.preferredMaxLayoutWidth = 496
         status.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         let refresh = NSButton(image: NSImage(systemSymbolName: "arrow.clockwise", accessibilityDescription: "Refresh Nearby Computers")!, target: self, action: #selector(refresh))
         refresh.bezelStyle = .inline; refresh.controlSize = .small
@@ -710,26 +711,29 @@ final class ComputerPicker: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         let connect = NSButton(title: "Connect", target: self, action: #selector(connect))
         connect.bezelStyle = .rounded; connect.controlSize = .large; connect.keyEquivalent = "\r"
         let actions = stack([NSView(), cancel, connect], .horizontal, 8)
-        let content = stack([heading, list, statusRow, fields, actions], .vertical, 16)
+        let content = stack([heading, list, statusRow, fields, actions], .vertical, 12)
         card.contentView!.addSubview(content)
         for row in [heading, list, statusRow, fields, actions] { row.translatesAutoresizingMaskIntoConstraints = false }
+        let listHeight = list.heightAnchor.constraint(equalToConstant: 66)
+        self.listHeight = listHeight
         NSLayoutConstraint.activate([
-            card.centerXAnchor.constraint(equalTo: view.centerXAnchor),
-            card.centerYAnchor.constraint(equalTo: view.centerYAnchor),
-            card.widthAnchor.constraint(equalToConstant: 652),
-            card.heightAnchor.constraint(equalToConstant: 422),
-            content.leadingAnchor.constraint(equalTo: card.contentView!.leadingAnchor, constant: 24),
-            content.trailingAnchor.constraint(equalTo: card.contentView!.trailingAnchor, constant: -24),
-            content.topAnchor.constraint(equalTo: card.contentView!.topAnchor, constant: 24),
-            content.bottomAnchor.constraint(lessThanOrEqualTo: card.contentView!.bottomAnchor, constant: -24),
+            view.widthAnchor.constraint(greaterThanOrEqualToConstant: 600),
+            card.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 12),
+            card.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -12),
+            card.topAnchor.constraint(equalTo: view.topAnchor, constant: 12),
+            card.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -12),
+            content.leadingAnchor.constraint(equalTo: card.contentView!.leadingAnchor, constant: 20),
+            content.trailingAnchor.constraint(equalTo: card.contentView!.trailingAnchor, constant: -20),
+            content.topAnchor.constraint(equalTo: card.contentView!.topAnchor, constant: 20),
+            content.bottomAnchor.constraint(equalTo: card.contentView!.bottomAnchor, constant: -20),
             list.widthAnchor.constraint(equalTo: content.widthAnchor),
-            list.heightAnchor.constraint(equalToConstant: 170),
+            listHeight,
             scroll.leadingAnchor.constraint(equalTo: list.contentView!.leadingAnchor),
             scroll.trailingAnchor.constraint(equalTo: list.contentView!.trailingAnchor),
             scroll.topAnchor.constraint(equalTo: list.contentView!.topAnchor),
             scroll.bottomAnchor.constraint(equalTo: list.contentView!.bottomAnchor),
             statusRow.widthAnchor.constraint(equalTo: content.widthAnchor),
-            statusRow.heightAnchor.constraint(equalToConstant: 32),
+            statusRow.heightAnchor.constraint(greaterThanOrEqualToConstant: 20),
             progress.widthAnchor.constraint(equalToConstant: 16),
             progress.heightAnchor.constraint(equalToConstant: 16),
             fields.widthAnchor.constraint(equalTo: content.widthAnchor),
@@ -742,7 +746,8 @@ final class ComputerPicker: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         port.nextKeyView = connect; connect.nextKeyView = cancel; cancel.nextKeyView = refresh
         refresh.nextKeyView = table
         w.defaultButtonCell = connect.cell as? NSButtonCell
-        w.center(); w.makeKeyAndOrderFront(nil); w.makeFirstResponder(address); window = w
+        window = w; fitWindow()
+        w.center(); w.makeKeyAndOrderFront(nil); w.makeFirstResponder(address)
         NSApplication.shared.activate(ignoringOtherApps: true)
         nearby.onChange = { [weak self] in self?.update() }
         nearby.start()
@@ -770,6 +775,17 @@ final class ComputerPicker: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         updating = false
         if rows.isEmpty && nearby.failure == nil { progress.startAnimation(nil) } else { progress.stopAnimation(nil) }
         status.stringValue = nearby.failure ?? (rows.isEmpty ? "Searching for nearby computers… You can also enter an SSH address." : "\(rows.count) computer\(rows.count == 1 ? "" : "s") found. SSH access is required to connect.")
+        listHeight?.constant = (table.headerView?.frame.height ?? 22) + CGFloat(max(1, min(rows.count, 4))) * (table.rowHeight + table.intercellSpacing.height) + 12
+        fitWindow()
+    }
+    func fitWindow() {
+        guard let window = window, let view = window.contentView else { return }
+        // Follow the content until the user enlarges the window; preserve their size afterwards.
+        let wasCompact = window.contentMinSize == .zero || window.contentLayoutRect.size == window.contentMinSize
+        view.layoutSubtreeIfNeeded()
+        let size = view.fittingSize
+        window.contentMinSize = size
+        if wasCompact { window.setContentSize(size) }
     }
     func numberOfRows(in tableView: NSTableView) -> Int { rows.count }
     func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? { ComputerPickerRow() }
@@ -821,7 +837,7 @@ final class ComputerPicker: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         guard !host.isEmpty, !host.hasPrefix("-"), host.utf8.count <= 320,
               host.range(of: "^[A-Za-z0-9_.:@\\[\\]%-]+$", options: .regularExpression) != nil,
               let number = Int(port.stringValue), (1...65535).contains(number) else {
-            status.stringValue = "Enter an SSH address and a port between 1 and 65535."; return
+            status.stringValue = "Enter an SSH address and a port between 1 and 65535."; fitWindow(); return
         }
         complete(["type": "connect", "host": host, "port": number])
     }

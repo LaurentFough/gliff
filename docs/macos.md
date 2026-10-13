@@ -24,6 +24,8 @@ fields or enter a manual address. Cancel closes the picker without connecting.
 The connection panel follows the Mac's appearance and accent color. Tab moves
 between fields, Return connects, and Escape cancels; changing focus does not
 start a connection.
+It opens at the minimum size that fits its controls. The computer list grows
+to show up to four rows, then scrolls; discovery preserves a window you enlarge.
 The app asks for Local Network access on macOS versions that require it;
 enable Gliff under System Settings → Privacy & Security → Local Network.
 
