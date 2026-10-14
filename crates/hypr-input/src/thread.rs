@@ -46,12 +46,12 @@ struct State {
     quit: bool,
 }
 
-/// Tracks the bound output's logical size (the rebind trigger) and the
+/// Tracks the bound output's mode (the rebind trigger) and the
 /// extent used for absolute motion. Free of Wayland objects so the
 /// SetExtent / wl_output-done ordering can be unit-tested.
 struct Binding {
-    /// The bound output's logical size at bind time, per `wl_output`.
-    logical: (u32, u32),
+    /// Physical width, height, integer scale and transform, per `wl_output`.
+    mode: (i32, i32, i32, u32),
     /// Extent for absolute motion. Owned by the server's `SetExtent`
     /// (fractional-scale aware); a `wl_output` burst must never
     /// overwrite it.
@@ -59,8 +59,8 @@ struct Binding {
 }
 
 impl Binding {
-    fn new(logical: (u32, u32), extent: (u32, u32)) -> Self {
-        Self { logical, extent }
+    fn new(mode: (i32, i32, i32, u32), extent: (u32, u32)) -> Self {
+        Self { mode, extent }
     }
 
     /// Record the server-supplied extent, the sole authority for motion.
@@ -68,14 +68,13 @@ impl Binding {
         self.extent = (width.max(1), height.max(1));
     }
 
-    /// A `wl_output` burst for the bound output finished with this logical
-    /// size. Returns whether the pointer binding must be re-created; never
+    /// A `wl_output` burst for the bound output finished with this mode. Returns whether the pointer binding must be re-created; never
     /// touches `extent`.
-    fn on_done(&mut self, logical: (u32, u32)) -> bool {
-        if logical == self.logical {
+    fn on_done(&mut self, mode: (i32, i32, i32, u32)) -> bool {
+        if mode == self.mode {
             return false;
         }
-        self.logical = logical;
+        self.mode = mode;
         true
     }
 }
@@ -132,7 +131,7 @@ fn run(
         qh: qh.clone(),
         wl_seat: seat_proxy.clone(),
         bound: None,
-        binding: Binding::new((1, 1), (1, 1)),
+        binding: Binding::new((1, 1, 1, 0), (1, 1)),
         keys,
         pressed_keys: BTreeSet::new(),
         pressed_buttons: BTreeSet::new(),
@@ -166,7 +165,10 @@ fn input_loop(
     // Placeholder extent until the server's first SetExtent arrives with the
     // fractional-scale aware size (it is sent at session start).
     let logical = info.logical_size();
-    state.binding = Binding::new(logical, logical);
+    state.binding = Binding::new(
+        (info.width, info.height, info.scale, info.transform),
+        logical,
+    );
     let bound = state.ptr_mgr.create_virtual_pointer_with_output(
         Some(&state.wl_seat),
         Some(&output),
@@ -218,7 +220,7 @@ impl State {
     /// and current main) silently stops delivering a bound virtual pointer's
     /// motion after the output's mode changes — the pointer stays frozen
     /// while a freshly created binding on the same output works. Re-bind
-    /// whenever the logical size changed (a resize or scale change).
+    /// whenever the physical mode, scale or transform changed.
     fn on_output_done(&mut self, output: &WlOutput) {
         if self.bound.as_ref() != Some(output) {
             return;
@@ -226,11 +228,10 @@ impl State {
         let Some((_, info)) = self.outputs.list.iter().find(|(o, _)| o == output) else {
             return;
         };
-        let logical = info.logical_size();
-        // The wl_output logical size is only a rebind trigger: its scale is
-        // an integer, wrong for fractional-scale outputs, so the extent
-        // stays with the server's SetExtent whichever callback runs first.
-        if !self.binding.on_done(logical) {
+        let mode = (info.width, info.height, info.scale, info.transform);
+        // A mode and scale can change together without changing logical size.
+        // Keep motion extent with the server, which knows fractional scales.
+        if !self.binding.on_done(mode) {
             return;
         }
         let bound = self.ptr_mgr.create_virtual_pointer_with_output(
@@ -249,7 +250,7 @@ impl State {
         self.pointer.frame();
         let _ = self.conn.flush();
         tracing::info!(
-            wl_logical = ?logical,
+            mode = ?mode,
             extent = ?self.binding.extent,
             "bound output mode changed; virtual pointer re-bound"
         );
@@ -403,30 +404,39 @@ mod tests {
 
     #[test]
     fn server_extent_survives_a_late_wl_output_done() {
-        let mut b = Binding::new((2560, 1440), (2560, 1440));
+        let mut b = Binding::new((2560, 1440, 1, 0), (2560, 1440));
         b.set_extent(SERVER.0, SERVER.1);
-        assert!(b.on_done((1280, 720)));
+        assert!(b.on_done((1280, 720, 1, 0)));
         assert_eq!(b.extent, SERVER);
     }
 
     #[test]
     fn server_extent_after_an_early_wl_output_done_wins() {
-        let mut b = Binding::new((2560, 1440), (2560, 1440));
-        assert!(b.on_done((1280, 720)));
+        let mut b = Binding::new((2560, 1440, 1, 0), (2560, 1440));
+        assert!(b.on_done((1280, 720, 1, 0)));
         b.set_extent(SERVER.0, SERVER.1);
         assert_eq!(b.extent, SERVER);
     }
 
     #[test]
-    fn unchanged_logical_size_does_not_rebind() {
-        let mut b = Binding::new((2560, 1440), (2560, 1440));
-        assert!(!b.on_done((2560, 1440)));
+    fn unchanged_mode_does_not_rebind() {
+        let mut b = Binding::new((2560, 1440, 1, 0), (2560, 1440));
+        assert!(!b.on_done((2560, 1440, 1, 0)));
     }
 
     #[test]
     fn extent_is_never_empty() {
-        let mut b = Binding::new((4, 4), (4, 4));
+        let mut b = Binding::new((4, 4, 1, 0), (4, 4));
         b.set_extent(0, 0);
         assert_eq!(b.extent, (1, 1));
+    }
+    #[test]
+    fn mode_changes_rebind_even_when_logical_size_is_unchanged() {
+        let mut b = Binding::new((1280, 720, 1, 0), (1280, 720));
+        assert!(b.on_done((2560, 1440, 2, 0)));
+        assert_eq!(b.extent, (1280, 720));
+        assert!(!b.on_done((2560, 1440, 2, 0)));
+        assert!(b.on_done((2560, 1440, 2, 2)));
+        assert!(b.on_done((2560, 1440, 1, 2)));
     }
 }
