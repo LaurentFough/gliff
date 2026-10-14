@@ -151,6 +151,8 @@ impl CaptureBuffer {
     }
 
     /// Map the whole buffer for CPU reads and run `f(pixels, stride_bytes)`.
+    /// A wl_shm buffer is read into a temporary copy first; `read_bgra` reads
+    /// it directly instead.
     pub fn with_mapped<R>(&self, f: impl FnOnce(&[u8], u32) -> R) -> Result<R> {
         let (bo, device) = match &self.backing {
             Backing::Gbm { bo, device } => (bo, device),
@@ -185,28 +187,64 @@ impl CaptureBuffer {
             DrmFourcc::try_from(self.info.fourcc),
             Ok(DrmFourcc::Xrgb8888 | DrmFourcc::Argb8888)
         );
-        let pixels = self.with_mapped(|mapped, stride| {
-            let mut out = vec![0u8; width * height * 4];
-            for (dst, src) in out
-                .chunks_exact_mut(width * 4)
-                .zip(mapped.chunks(stride as usize))
-            {
-                if bgra_in_memory {
-                    dst.copy_from_slice(&src[..width * 4]);
-                } else {
-                    for (d, p) in dst.chunks_exact_mut(4).zip(src.chunks_exact(4)) {
-                        d.copy_from_slice(&[p[2], p[1], p[0], p[3]]);
+        let pixels = match &self.backing {
+            Backing::Shm(file) => {
+                let stride = self.info.planes[0].stride;
+                read_shm_bgra(file, stride, width, height, bgra_in_memory)?
+            }
+            Backing::Gbm { .. } => self.with_mapped(|mapped, stride| {
+                let mut out = vec![0u8; width * height * 4];
+                for (dst, src) in out
+                    .chunks_exact_mut(width * 4)
+                    .zip(mapped.chunks(stride as usize))
+                {
+                    if bgra_in_memory {
+                        dst.copy_from_slice(&src[..width * 4]);
+                    } else {
+                        for (d, p) in dst.chunks_exact_mut(4).zip(src.chunks_exact(4)) {
+                            d.copy_from_slice(&[p[2], p[1], p[0], p[3]]);
+                        }
                     }
                 }
-            }
-            out
-        })?;
+                out
+            })?,
+        };
         Ok(BgraImage {
             width,
             height,
             pixels,
         })
     }
+}
+
+/// Read the top-left `width`x`height` of a wl_shm frame straight from the
+/// memfd into packed rows: one copy, where `with_mapped` would read the whole
+/// buffer first. RGBA layouts are swizzled in place afterwards.
+fn read_shm_bgra(
+    file: &File,
+    stride: u32,
+    width: usize,
+    height: usize,
+    bgra_in_memory: bool,
+) -> Result<Vec<u8>> {
+    let row = width * 4;
+    let mut out = vec![0u8; row * height];
+    if out.is_empty() {
+        return Ok(out);
+    }
+    if stride as usize == row {
+        file.read_exact_at(&mut out, 0)?;
+    } else {
+        for (y, dst) in out.chunks_exact_mut(row).enumerate() {
+            file.read_exact_at(dst, y as u64 * u64::from(stride))?;
+        }
+    }
+    if !bgra_in_memory {
+        for p in out.chunks_exact_mut(4) {
+            p.swap(0, 2);
+        }
+    }
+    Ok(out)
 }
 
 /// Packed BGRA pixels, `width * 4` bytes per row.

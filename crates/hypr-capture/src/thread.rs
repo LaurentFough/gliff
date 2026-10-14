@@ -35,7 +35,7 @@ use wayland_protocols::ext::image_copy_capture::v1::client::ext_image_copy_captu
 use wayland_protocols::wp::linux_dmabuf::zv1::client::zwp_linux_buffer_params_v1::{self, ZwpLinuxBufferParamsV1};
 use wayland_protocols::wp::linux_dmabuf::zv1::client::zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1;
 
-use crate::cursor::ShmBuffer;
+use crate::cursor::{ShmBuffer, ShmLayout};
 use crate::{
     Backing, CaptureBuffer, CaptureConfig, CaptureEvent, CapturedFrame, DmabufInfo, Error,
     EventSink, OutputInfo, Plane, Rect, Result,
@@ -615,19 +615,26 @@ impl State {
             return Err(Error::Capture("wl_shm is not available".into()));
         };
         let (w, h) = (self.constraints.width, self.constraints.height);
+        let layout = ShmLayout::new(w, h)?;
+        let stride = layout.row_bytes;
         for slot in self.ring.drain(..) {
             slot.destroy();
         }
-        let stride = w * 4;
-        let size = stride as u64 * h as u64;
         for index in 0..self.cfg.buffers {
             let fd = memfd_create(c"gliff-capture", MFdFlags::MFD_CLOEXEC)
                 .map_err(|e| Error::Capture(format!("memfd: {e}")))?;
             let file = File::from(fd);
-            file.set_len(size)?;
-            let pool = shm.create_pool(file.as_fd(), size as i32, &self.qh, ());
-            let wl_buffer =
-                pool.create_buffer(0, w as i32, h as i32, stride as i32, format, &self.qh, ());
+            file.set_len(layout.len)?;
+            let pool = shm.create_pool(file.as_fd(), layout.size, &self.qh, ());
+            let wl_buffer = pool.create_buffer(
+                0,
+                layout.width,
+                layout.height,
+                layout.stride,
+                format,
+                &self.qh,
+                (),
+            );
             let fd: OwnedFd = file.try_clone()?.into();
             let buffer = Arc::new(CaptureBuffer {
                 index,
