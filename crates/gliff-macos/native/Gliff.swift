@@ -364,6 +364,9 @@ final class RemoteView: NSView {
         didSet { window?.invalidateCursorRects(for: self) }
     }
     private let invisibleCursor = NSCursor(image: NSImage(size: NSSize(width: 1, height: 1), flipped: false, drawingHandler: { _ in true }), hotSpot: .zero)
+    var cursorInVideo = false {
+        didSet { window?.invalidateCursorRects(for: self) }
+    }
     var scale: Double = 1
     var pressed: Set<UInt16> = []
     var buttons: Set<Int> = []
@@ -381,7 +384,7 @@ final class RemoteView: NSView {
     }
     override func resetCursorRects() {
         super.resetCursorRects()
-        if image != nil { addCursorRect(pictureRect, cursor: invisibleCursor) }
+        if image != nil && cursorInVideo { addCursorRect(pictureRect, cursor: invisibleCursor) }
     }
     var pictureRect: NSRect {
         guard let image = image else { return .zero }
@@ -508,6 +511,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 if clipboard.receive(cmd) { return }
                 DispatchQueue.main.async {
                     clipboard.command(cmd)
+                    if cmd["type"] as? String == "cursor_mode" { self.view.cursorInVideo = cmd["embedded"] as? Bool == true }
                     if let message = cmd["message"] as? String { self.view.message = message; self.view.image = nil; self.view.needsDisplay = true }
                     if let text = cmd["clipboard"] as? String { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(text, forType: .string) }
                 }

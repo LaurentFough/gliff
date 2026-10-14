@@ -241,7 +241,14 @@ where
                 match msg.into_clipboard() {
                     Ok(msg) => clipboard.peer(msg, payload),
                     Err(msg) => match msg {
-                        ServerMsg::HelloAck { version, .. } => { ensure!(version == PROTOCOL_VERSION, "incompatible server protocol {version}"); got_hello = true; }
+                        ServerMsg::HelloAck { version, session, features, .. } => {
+                            ensure!(version == PROTOCOL_VERSION, "incompatible server protocol {version}");
+                            got_hello = true;
+                            if helper.is_some() {
+                                let command = json!({"type":"cursor_mode", "embedded":cursor_in_video(session.headless, &features)});
+                                display_tx.send((native::EVENT, serde_json::to_vec(&command)?)).await?;
+                            }
+                        }
                         ServerMsg::StreamConfig { codec, chroma, width, height, scale_milli, .. } => {
                             ensure!(got_hello && codec == Codec::H264 && width > 0 && height > 0 && scale_milli > 0, "unsupported stream configuration");
                             ensure!(matches!(chroma, ChromaMode::Single420 | ChromaMode::Dual420), "unsupported chroma mode");
@@ -374,6 +381,12 @@ pub(crate) fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+
+fn cursor_in_video(headless: bool, features: &[String]) -> bool {
+    // Older physical-output servers ignore the request and send cursor
+    // shapes separately. Headless Hyprland frames already paint the cursor.
+    headless || features.iter().any(|f| f == FEATURE_CURSOR_IN_VIDEO)
 }
 
 fn server_payload(m: &ServerMsg) -> u32 {
@@ -533,6 +546,13 @@ mod tests {
                 Ok(())
             })
             .await
+    }
+
+    #[test]
+    fn cursor_visibility_follows_the_server_capability() {
+        assert!(!cursor_in_video(false, &[])); // older mirrored server
+        assert!(cursor_in_video(true, &[])); // older headless server
+        assert!(cursor_in_video(false, &[FEATURE_CURSOR_IN_VIDEO.into()]));
     }
 
     #[test]
