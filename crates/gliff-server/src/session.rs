@@ -25,7 +25,7 @@ use gliff_vk::{DmabufPlane, EncodedFrame, Encoder, EncoderSettings, Gpu};
 
 use crate::rate::{Ladder, LinkEstimator, RateController};
 use crate::writer::Writer;
-use hypr_capture::{CaptureConfig, CaptureEvent, CapturedFrame, Capturer};
+use hypr_capture::{CaptureConfig, CaptureEvent, CaptureMode, CapturedFrame, Capturer};
 use hypr_input::{Axis as InAxis, Clipboard, ClipboardEvent, Input, InputCmd, InputConfig};
 use hypr_wl::Target;
 
@@ -41,6 +41,8 @@ pub struct Config {
     pub video: VideoMode,
     /// Dual-stream 4:4:4 on the CPU tier too (it defaults to Single420).
     pub full_chroma: bool,
+    /// What the capture ring is made of; `Shm` implies the CPU tier.
+    pub capture: CaptureMode,
 }
 
 /// Events from the capture thread.
@@ -102,7 +104,7 @@ where
     let output = setup_output(&instance, &cfg, &caps)?;
     tracing::info!(output = %output.name, output.width, output.height, headless = output.is_headless(), "session output ready");
 
-    let video = VideoTier::open(cfg.video, &cfg.render_node);
+    let video = VideoTier::open(cfg.video, cfg.capture, &cfg.render_node);
     let codec = Codec::H264;
     writer
         .write_msg(&ServerMsg::HelloAck {
@@ -156,7 +158,13 @@ where
         .await?;
 
     let (cap_tx, mut cap_rx) = mpsc::unbounded_channel();
-    let capturer = start_capture(&cfg.target, &output.name, &cfg.render_node, cap_tx)?;
+    let capturer = start_capture(
+        &cfg.target,
+        &output.name,
+        &cfg.render_node,
+        cfg.capture,
+        cap_tx,
+    )?;
 
     let input = start_input(&cfg.target, &output.name, &keymap)?;
     input.send(output.logical_extent()).ok();
@@ -1128,9 +1136,14 @@ impl VideoTier {
     /// compute or a VA-API H.264 encoder falls back to the CPU instead of
     /// failing; a GPU whose encoder cannot then be created falls back in
     /// `VideoStart`, and one whose first encode fails in `encode_and_send`.
-    fn open(mode: VideoMode, render_node: &std::path::Path) -> Self {
+    fn open(mode: VideoMode, capture: CaptureMode, render_node: &std::path::Path) -> Self {
         if mode == VideoMode::Cpu {
             tracing::info!("using the CPU video pipeline as requested");
+            return Self::Cpu;
+        }
+        if capture == CaptureMode::Shm {
+            // Only the CPU pipeline can read a wl_shm frame.
+            tracing::info!("using the CPU video pipeline for wl_shm capture");
             return Self::Cpu;
         }
         if !render_node.exists() {
@@ -1515,11 +1528,13 @@ fn start_capture(
     target: &Target,
     output: &str,
     render_node: &std::path::Path,
+    capture: CaptureMode,
     tx: UnboundedSender<Incoming>,
 ) -> Result<Capturer> {
     let mut cc = CaptureConfig::new(output.to_string());
     cc.target = target.clone();
     cc.render_node = render_node.to_path_buf();
+    cc.mode = capture;
     cc.cursor = true;
     // One extra ring slot: the session pins the last sent frame for
     // still-picture refinement.

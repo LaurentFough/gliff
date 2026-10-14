@@ -55,11 +55,56 @@ pub struct Rect {
     pub height: i32,
 }
 
+/// What the capture ring is made of, from `--capture` or `GLIFF_CAPTURE`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CaptureMode {
+    /// GBM dmabufs, dropping to wl_shm when the compositor offers no dmabuf,
+    /// the render node cannot be opened or allocated on, or (with
+    /// `prefer_linear` and `shm_fallback`) no format is linear.
+    #[default]
+    Auto,
+    /// dmabufs only: no wl_shm fallback of any kind.
+    Dmabuf,
+    /// wl_shm only, without touching the render node: the compositor reads
+    /// each frame back for us. For a dmabuf that allocates but is never
+    /// filled (QEMU virtio-gpu with virgl, a GPU the compositor does not
+    /// render on). Only the CPU video pipeline can read these frames.
+    Shm,
+}
+
+impl CaptureMode {
+    /// `auto`, `dmabuf` or `shm` from the CLI, else `GLIFF_CAPTURE`, else
+    /// `Auto`.
+    pub fn resolve(cli: Option<&str>) -> Self {
+        let parse = |s: &str, from: &str| match s {
+            "auto" => Some(Self::Auto),
+            "dmabuf" => Some(Self::Dmabuf),
+            "shm" => Some(Self::Shm),
+            other => {
+                tracing::warn!(
+                    value = other,
+                    "{from} is not `auto`, `dmabuf` or `shm`; ignoring"
+                );
+                None
+            }
+        };
+        if let Some(mode) = cli.and_then(|s| parse(s, "--capture")) {
+            return mode;
+        }
+        std::env::var("GLIFF_CAPTURE")
+            .ok()
+            .and_then(|s| parse(&s, "GLIFF_CAPTURE"))
+            .unwrap_or_default()
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct CaptureConfig {
     pub target: Target,
     /// Output name, e.g. `HDMI-A-1` or `HEADLESS-2`.
     pub output: String,
+    /// What the ring is made of; see [`CaptureMode`].
+    pub mode: CaptureMode,
     /// GBM device for dmabufs; when it cannot be opened capture uses wl_shm.
     pub render_node: PathBuf,
     /// Ring size; 3 keeps one frame in flight while one is consumed.
@@ -89,6 +134,7 @@ impl CaptureConfig {
         Self {
             target: Target::default(),
             output: output.into(),
+            mode: CaptureMode::Auto,
             render_node: render_node(None),
             buffers: 3,
             prefer_linear: true,
@@ -328,9 +374,13 @@ pub fn list_outputs(target: &Target) -> Result<Vec<OutputInfo>> {
     thread::list_outputs(target)
 }
 
-/// Protocol names the capture path needs, for probing.
+/// Protocol names the capture path needs, for probing. The ring also needs
+/// one of [`BUFFER_GLOBALS`].
 pub const REQUIRED_GLOBALS: &[&str] = &[
     "ext_output_image_capture_source_manager_v1",
     "ext_image_copy_capture_manager_v1",
-    "zwp_linux_dmabuf_v1",
 ];
+
+/// Protocol names a capture ring can be made of: dmabufs, or wl_shm where
+/// the compositor offers no dmabuf or `CaptureMode::Shm` asks for it.
+pub const BUFFER_GLOBALS: &[&str] = &["zwp_linux_dmabuf_v1", "wl_shm"];

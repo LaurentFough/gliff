@@ -114,6 +114,11 @@ gliff --server-bin 'gliff-server --low-bandwidth' user@host
   through `--server-bin 'env XDG_RUNTIME_DIR=/run/user/1000 gliff-server'`.
 - To rule out a driver problem, force the CPU on your end with
   `gliff --video cpu user@host`.
+- If the window connects but stays black, the remote GPU may allocate
+  capture buffers it never fills (a VM's virtio-gpu with virgl, or a GPU the
+  compositor does not render on). Have the compositor read the frames back
+  instead: `gliff --server-bin 'gliff-server --capture shm' user@host`.
+  The server then encodes on the CPU.
 - Screens wider than 4096 pixels are streamed at a reduced size and scaled
   back up.
 
