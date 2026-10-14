@@ -19,8 +19,9 @@ use ash::vk;
 use crate::compute::{Recombine, Split};
 use crate::device::{Commands, Gpu, Timeline};
 use crate::image::{DmabufPlane, ExportedDmabuf, HostBuffer, Image};
+use crate::vkenc::{self, VkH264Encoder};
 use crate::Result;
-use gliff_va::{EncoderSettings, H264Decoder, H264Encoder};
+use gliff_va::{EncodedPacket, EncoderSettings, H264Decoder, H264Encoder};
 
 pub struct EncodedFrame {
     pub main: Vec<u8>,
@@ -28,19 +29,42 @@ pub struct EncodedFrame {
     pub keyframe: bool,
 }
 
-/// One H.264 stream: the VA-API encoder and its input surface as the
-/// split shader sees it.
-struct Stream {
-    enc: H264Encoder,
-    /// The encoder's input surface, imported into Vulkan.
-    target: Image,
-    /// A Vulkan-owned image the shader writes when the driver refused
-    /// STORAGE on the imported surface; copied into `target` afterwards.
-    scratch: Option<Image>,
+/// One H.264 stream: the encoder and its input image as the split shader
+/// sees it.
+enum Stream {
+    /// VA-API encode. The shader writes the encoder's input surface,
+    /// imported into Vulkan, or a scratch image copied into it when the
+    /// driver refused STORAGE on the import.
+    Va {
+        enc: Box<H264Encoder>,
+        target: Image,
+        scratch: Option<Image>,
+    },
+    /// Vulkan Video encode. Its input image cannot take STORAGE, so the
+    /// shader writes a scratch image that is copied in.
+    Vk {
+        enc: Box<VkH264Encoder>,
+        scratch: Image,
+    },
+}
+
+enum Pending {
+    Va(gliff_va::PendingEncode),
+    Vk(vkenc::PendingEncode),
 }
 
 impl Stream {
-    fn new(gpu: &Arc<Gpu>, settings: &EncoderSettings) -> Result<Self> {
+    /// `index` picks the encode queue on the Vulkan path (0 main, 1 aux).
+    fn new(gpu: &Arc<Gpu>, settings: &EncoderSettings, index: usize) -> Result<Self> {
+        if !gpu.can_va_encode() && gpu.video_encode.is_some() {
+            let enc = VkH264Encoder::new(gpu, settings.clone(), index)?;
+            let input = enc.input();
+            let scratch = Image::nv12(gpu, input.width, input.height)?;
+            return Ok(Self::Vk {
+                enc: Box::new(enc),
+                scratch,
+            });
+        }
         let enc = H264Encoder::new(&gpu.va, &gpu.va_caps, settings.clone())?;
         let desc = enc.input().export()?;
         let (target, scratch) = match Image::import_nv12(gpu, &desc, true) {
@@ -52,8 +76,8 @@ impl Stream {
                 (target, Some(scratch))
             }
         };
-        Ok(Self {
-            enc,
+        Ok(Self::Va {
+            enc: Box::new(enc),
             target,
             scratch,
         })
@@ -61,28 +85,75 @@ impl Stream {
 
     /// The image the split shader writes.
     fn shader_output(&self) -> &Image {
-        self.scratch.as_ref().unwrap_or(&self.target)
+        match self {
+            Self::Va {
+                target, scratch, ..
+            } => scratch.as_ref().unwrap_or(target),
+            Self::Vk { scratch, .. } => scratch,
+        }
     }
 
     /// Before the split: take the shader's output back from VA-API, or
     /// ready the scratch image.
     fn record_acquire(&self, cmd: vk::CommandBuffer) {
-        match &self.scratch {
-            None => self.target.acquire_foreign(cmd, vk::ImageLayout::GENERAL),
-            Some(s) => s.transition(cmd, vk::ImageLayout::GENERAL),
+        match self {
+            Self::Va {
+                target,
+                scratch: None,
+                ..
+            } => target.acquire_foreign(cmd, vk::ImageLayout::GENERAL),
+            Self::Va {
+                scratch: Some(s), ..
+            }
+            | Self::Vk { scratch: s, .. } => s.transition(cmd, vk::ImageLayout::GENERAL),
         }
     }
 
-    /// After the split: move a scratch image into the surface if needed,
-    /// then hand the surface to VA-API.
+    /// After the split: move a scratch image into the encoder's input if
+    /// needed, then hand a VA-API surface to VA-API. The Vulkan encoder's
+    /// input stays in TRANSFER_DST for the encode submission to take.
     fn record_release(&self, cmd: vk::CommandBuffer) {
-        if let Some(s) = &self.scratch {
-            s.transition(cmd, vk::ImageLayout::TRANSFER_SRC_OPTIMAL);
-            self.target
-                .acquire_foreign(cmd, vk::ImageLayout::TRANSFER_DST_OPTIMAL);
-            self.target.copy_nv12_from(cmd, s);
+        match self {
+            Self::Va {
+                target, scratch, ..
+            } => {
+                if let Some(s) = scratch {
+                    s.transition(cmd, vk::ImageLayout::TRANSFER_SRC_OPTIMAL);
+                    target.acquire_foreign(cmd, vk::ImageLayout::TRANSFER_DST_OPTIMAL);
+                    target.copy_nv12_from(cmd, s);
+                }
+                target.release_foreign(cmd);
+            }
+            Self::Vk { enc, scratch } => {
+                scratch.transition(cmd, vk::ImageLayout::TRANSFER_SRC_OPTIMAL);
+                let input = enc.input();
+                input.discard();
+                input.transition(cmd, vk::ImageLayout::TRANSFER_DST_OPTIMAL);
+                input.copy_nv12_from(cmd, scratch);
+            }
         }
-        self.target.release_foreign(cmd);
+    }
+
+    fn set_rate(&mut self, bitrate: u32, framerate: u32, vbv_ms: u32) {
+        match self {
+            Self::Va { enc, .. } => enc.set_rate(bitrate, framerate, vbv_ms),
+            Self::Vk { enc, .. } => enc.set_rate(bitrate, framerate, vbv_ms),
+        }
+    }
+
+    fn submit(&mut self, force_keyframe: bool) -> Result<Pending> {
+        Ok(match self {
+            Self::Va { enc, .. } => Pending::Va(enc.submit(force_keyframe)?),
+            Self::Vk { enc, .. } => Pending::Vk(enc.submit(force_keyframe)?),
+        })
+    }
+
+    fn finish(&mut self, pending: Pending) -> Result<EncodedPacket> {
+        Ok(match (self, pending) {
+            (Self::Va { enc, .. }, Pending::Va(p)) => enc.finish(p)?,
+            (Self::Vk { enc, .. }, Pending::Vk(p)) => enc.finish(p)?,
+            _ => unreachable!("a stream finishes what it submitted"),
+        })
     }
 }
 
@@ -102,13 +173,18 @@ pub struct Encoder {
 impl Encoder {
     /// The largest size the device encodes, as (width, height).
     pub fn max_size(gpu: &Gpu) -> Result<(u32, u32)> {
+        if !gpu.can_va_encode() {
+            if let Some(max) = VkH264Encoder::max_coded_extent(gpu) {
+                return Ok(max);
+            }
+        }
         Ok(H264Encoder::max_coded_extent(&gpu.va_caps))
     }
 
     pub fn new(gpu: &Arc<Gpu>, settings: EncoderSettings, dual: bool) -> Result<Self> {
-        let main = Stream::new(gpu, &settings)?;
+        let main = Stream::new(gpu, &settings, 0)?;
         let aux = if dual {
-            Some(Stream::new(gpu, &settings)?)
+            Some(Stream::new(gpu, &settings, 1)?)
         } else {
             None
         };
@@ -140,9 +216,9 @@ impl Encoder {
         self.settings.bitrate = bitrate;
         self.settings.framerate = framerate;
         self.settings.vbv_ms = vbv_ms;
-        self.main.enc.set_rate(bitrate, framerate, vbv_ms);
+        self.main.set_rate(bitrate, framerate, vbv_ms);
         if let Some(a) = &mut self.aux {
-            a.enc.set_rate(bitrate, framerate, vbv_ms);
+            a.set_rate(bitrate, framerate, vbv_ms);
         }
     }
 
@@ -188,7 +264,8 @@ impl Encoder {
         let (w, h) = (self.settings.width, self.settings.height);
         let (split, main, aux) = (&self.split, &self.main, self.aux.as_ref());
         // The split blocks until it is done: the encoder reads the surfaces
-        // through VA-API, which knows nothing of Vulkan's fences.
+        // through VA-API, which knows nothing of Vulkan's fences, or on the
+        // Vulkan encode queue, which then needs no semaphore.
         self.compute
             .run(self.timeline.semaphore, None, None, true, |cmd| {
                 src.transition(cmd, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
@@ -208,14 +285,14 @@ impl Encoder {
             })?;
         // Submit both encodes, then wait: the main stream's readback overlaps
         // the aux encode on the GPU.
-        let main_pending = self.main.enc.submit(force_keyframe)?;
+        let main_pending = self.main.submit(force_keyframe)?;
         let aux_pending = match &mut self.aux {
-            Some(a) => Some(a.enc.submit(force_keyframe)?),
+            Some(a) => Some(a.submit(force_keyframe)?),
             None => None,
         };
-        let main = self.main.enc.finish(main_pending)?;
+        let main = self.main.finish(main_pending)?;
         let aux = match (&mut self.aux, aux_pending) {
-            (Some(a), Some(pending)) => Some(a.enc.finish(pending)?),
+            (Some(a), Some(pending)) => Some(a.finish(pending)?),
             _ => None,
         };
         Ok(EncodedFrame {

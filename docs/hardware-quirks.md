@@ -17,7 +17,10 @@ needed. The detailed findings come from AMD:
 The same path also runs on Intel Panther Lake (see the Intel section).
 
 `gliff-probe gpu` prints the Vulkan device, the VA-API driver and its H.264
-capabilities; `gliff-probe surfaces` proves the hand-off between the two.
+capabilities, and which API encodes: `PASS VA-API H.264 encode`, or
+`PASS Vulkan Video H.264 encode` where the VA-API driver has no encoder
+(NVIDIA). `gliff-probe surfaces` proves the hand-off between Vulkan and
+VA-API, so it needs the VA-API codec.
 
 ## Confirmed on AMD (RADV + radeonsi)
 
@@ -101,10 +104,37 @@ that probe order, when a new generation fails:
 - **Coded buffer status.** `VA_CODED_BUF_STATUS_*` bits are logged; a
   `BAD_BITSTREAM` status fails the encode and the server falls back to CPU.
 
+## NVIDIA (proprietary driver, Vulkan Video)
+
+Found on a GeForce RTX 5070 Ti, driver 610.57.04, Hyprland on DP-1 at
+3440x1440.
+
+- **No VA-API encoder.** `nvidia-vaapi-driver` exposes NVDEC only, so the
+  server encodes through Vulkan Video (`VK_KHR_video_encode_h264`, in
+  `gliff-vk/src/vkenc.rs`) when the VA-API driver has no encode entrypoint.
+  The bitstream matches the VA-API encoder's. Two encode queues, so main and
+  aux encode on separate queues. 3440x1440 Dual420 encodes in about 4.5 ms
+  a frame, against about 175 ms on the CPU tier (Ryzen 7 3700X).
+- **The rate control needs the H.264 layer info.** A
+  `VkVideoEncodeRateControlLayerInfoKHR` without a chained
+  `VkVideoEncodeH264RateControlLayerInfoKHR` makes `vkEndCommandBuffer`
+  fail with `VK_ERROR_INITIALIZATION_FAILED`, even for the DISABLED and VBR
+  modes. The validation layers report nothing, and the spec makes it
+  optional. The driver prefers CBR with an endless regular flat GOP at every
+  quality level.
+- **The encoder input refuses STORAGE.** No `VIDEO_ENCODE_SRC` format allows
+  it, so the split writes a scratch NV12 image that is copied into the
+  encoder's input.
+- **Capture offers only tiled modifiers.** Hyprland lists the NVIDIA block
+  linear modifiers and no linear one, and `gbm_bo_map` fails on them
+  (`ENOENT`), so the CPU tier captures into wl_shm buffers instead and the
+  compositor does the readback. The GPU tier imports the tiled dmabuf.
+- **NVDEC decode does not work yet.** Its exported surfaces are two dmabuf
+  objects, which the decoder import does not take (`gliff-probe roundtrip`
+  stops at the first decode). Only the server side was tested here.
+
 ## Not yet tested anywhere
 - Intel generations before Panther Lake.
-- NVIDIA has no VA-API encoder; both ends take the CPU tier there. Decode
-  through `nvidia-vaapi-driver` is untried.
 - Baseline-profile streams (the CPU tier's output) through the VA-API High
   decode config: radeonsi accepts them, and so does iHD on Panther Lake
   (the e2e cpu-server -> gpu-client case); other drivers are unverified.
@@ -184,6 +214,46 @@ position = "auto", scale = ... })`, which applies at runtime. `output create
 headless` and `output remove` are hyprctl commands and work with both config
 types. The server reads back the mode Hyprland applied instead of assuming
 the request took effect.
+
+## Hyper-V guests (no render node)
+
+A Hyper-V guest has only the `hyperv_drm` display node (`/dev/dri/card1`)
+and no `/dev/dri/renderD*`. Hyprland renders in software there and does not
+offer `zwp_linux_dmabuf_v1`, so there is nothing to allocate a dmabuf on or
+hand one to. The capture thread then logs one warning naming the reason (no
+dmabuf global, or the GBM device could not be opened on the render node) and
+allocates its ring as wl_shm buffers over memfds; the compositor copies each
+frame into them. The server sees the missing render node before opening
+Vulkan or VA-API and takes the CPU (OpenH264) tier with its own warning.
+Without wl_shm either, capture fails with an error naming both. Observed on
+gliff 0.3.1 guests, where the session previously ended with "compositor does
+not offer zwp_linux_dmabuf_v1".
+
+QEMU guests with `virtio-vga` and no 3D (virgl off) are a variant: they have
+a render node and Hyprland offers dmabuf, but GBM cannot allocate on it
+(`DRM_IOCTL_MODE_CREATE_DUMB failed: Permission denied`). A GBM allocation
+failure drops the ring to wl_shm the same way, with one warning. Confirmed
+on such a guest (Hyprland 0.56.2 on llvmpipe, 12 vCPUs without AVX2): the
+ring falls back, the compositor fills the wl_shm buffers, and a mirrored or
+headless session streams a correct picture on the CPU tier.
+
+### A dmabuf that allocates but is never filled: `--capture shm`
+
+Two cases get past allocation and still show nothing: the same QEMU guest
+with `--render-node /dev/dri/card1` (the primary node allocates dumb
+buffers, but Hyprland never writes a frame into them) and virtio-gpu with
+virgl on, where the dmabuf fills with zeros because the rendered pixels live
+host-side (#49). A GPU the compositor does not render on behaves the same
+(NVIDIA-primary hybrids, #41). Nothing automatic can tell these apart from a
+black screen, so `gliff-server --capture shm` (or `GLIFF_CAPTURE=shm`)
+skips the render node altogether and captures into wl_shm from the start;
+the server then takes the CPU tier, since only it can read those frames.
+`--capture dmabuf` is the opposite: no wl_shm fallback of any kind, for
+telling a capture failure apart from a fallback. `gliff-probe --capture shm
+capture` and `gliff-probe --video cpu --capture shm pipeline` exercise the
+same path. Note that an idle output renders no new frame, so `gliff-probe
+capture` on a static screen can time out where the server, which keeps
+requesting, gets frames; a headless output renders reliably.
 
 ## Known limitations recorded from code review (not yet fixed)
 
