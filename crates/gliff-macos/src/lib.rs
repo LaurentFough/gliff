@@ -10,9 +10,9 @@ mod encoder;
 #[cfg(any(target_os = "macos", test))]
 mod host_bridge;
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", test))]
 mod client;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", test))]
 mod clipboard;
 #[cfg(target_os = "macos")]
 mod server;

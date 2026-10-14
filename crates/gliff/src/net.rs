@@ -14,7 +14,7 @@ use bytes::Bytes;
 use gliff_proto::clipboard::CHUNK;
 use gliff_proto::{
     features, is_incompatible, version_mismatch, ChromaMode, ClientCaps, ClientMsg, ClipboardFile,
-    ClipboardMsg, Codec, ServerMsg, VideoPipeline, PROTOCOL_VERSION,
+    ClipboardMsg, Codec, ServerMsg, VideoPipeline, FEATURE_CURSOR_IN_VIDEO, PROTOCOL_VERSION,
 };
 use gliff_sw::VideoMode;
 use gliff_transport::clipboard::progress::Progress;
@@ -54,6 +54,7 @@ pub enum Status {
         view_width: u32,
         view_height: u32,
         fps_cap: u32,
+        cursor_in_video: bool,
     },
     Stats {
         fps: f32,
@@ -276,7 +277,10 @@ where
         } else {
             vec![ChromaMode::Single420]
         },
-        features: features(),
+        features: features()
+            .into_iter()
+            .chain([FEATURE_CURSOR_IN_VIDEO.to_string()])
+            .collect(),
     };
     let _ = tokio::time::timeout(FIRST_KEYMAP_WAIT, keymap.wait_for(|k| !k.is_empty())).await;
     let first_keymap = keymap.borrow_and_update().clone();
@@ -296,6 +300,7 @@ where
     // it before anything else (even GPU setup) so the server's round-trip
     // estimate is seeded ahead of the first frame ack.
     let mut got_ack = false;
+    let mut cursor_in_video = false;
     let (mut width, mut height, mut chroma, mut scale_milli, pipeline, mut view, mut fps_cap) = loop {
         match reader.read_msg::<ServerMsg>().await? {
             ServerMsg::HelloAck {
@@ -306,6 +311,7 @@ where
                         Incompatible(version_mismatch(PROTOCOL_VERSION, version).into()).into(),
                     );
                 }
+                cursor_in_video = features.iter().any(|f| f == FEATURE_CURSOR_IN_VIDEO);
                 tracing::debug!(?features, "server features");
                 got_ack = true;
             }
@@ -348,6 +354,7 @@ where
         view_width: view.0,
         view_height: view.1,
         fps_cap,
+        cursor_in_video,
     });
     let decode_on = match (&decoder, &gpu) {
         (VideoDecoder::Gpu(_), Some(g)) => g.name.as_str(),
@@ -661,6 +668,7 @@ where
                                 view_width: view.0,
                                 view_height: view.1,
                                 fps_cap,
+                                cursor_in_video,
                             });
                         }
                         tracing::warn!(error = %e, "decode error; requesting keyframe");
@@ -697,6 +705,7 @@ where
                     view_width,
                     view_height,
                     fps_cap,
+                    cursor_in_video,
                 });
             }
             ServerMsg::CursorShape {

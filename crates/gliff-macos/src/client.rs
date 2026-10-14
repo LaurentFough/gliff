@@ -1,11 +1,14 @@
 use anyhow::{bail, ensure, Context, Result};
 use bytes::Bytes;
+#[cfg(target_os = "macos")]
 use clap::Parser;
 use gliff_proto::{
     features, is_incompatible, ChromaMode, ClientCaps, ClientMsg, Codec, ServerMsg,
     FEATURE_CURSOR_IN_VIDEO, PROTOCOL_VERSION,
 };
-use gliff_transport::{spawn_ssh, Framed, SshTarget};
+use gliff_transport::Framed;
+#[cfg(target_os = "macos")]
+use gliff_transport::{spawn_ssh, SshTarget};
 use serde_json::{json, Value};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -13,6 +16,7 @@ use tokio::sync::mpsc;
 
 use crate::{keys, native};
 
+#[cfg(target_os = "macos")]
 #[derive(Parser)]
 #[command(name = "gliff", version, about = "Remote desktop over SSH")]
 struct Cli {
@@ -40,6 +44,7 @@ struct Cli {
     check_frames: Option<u32>,
 }
 
+#[cfg(target_os = "macos")]
 pub fn client_main() -> Result<()> {
     let cli = Cli::parse();
     tracing_subscriber::fmt()
@@ -195,6 +200,8 @@ where
     let mut frames = 0;
     let mut got_hello = false;
     let mut idle = tokio::time::interval(Duration::from_millis(100));
+    let mut heartbeat = tokio::time::interval(Duration::from_secs(5));
+    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut last_id = 0;
     let clipboard =
         crate::clipboard::Bridge::new(gliff_transport::clipboard::Side::Client, display_tx.clone());
@@ -203,6 +210,11 @@ where
     let result: Result<()> = async {
     loop {
         tokio::select! {
+            _ = heartbeat.tick() => {
+                // An idle Linux desktop sends no video after refinement.
+                // Ask for a reply so the response timeout measures liveness.
+                out.send((ClientMsg::Ping { t: now_ms() }, Bytes::new())).await?;
+            }
             _ = &mut deadline => bail!("server stopped responding for 20 seconds"),
             result = &mut writes => { result??; bail!("network writer stopped"); }
             ev = event_rx.recv(), if helper.is_some() => {
@@ -458,6 +470,71 @@ mod tests {
             })
             .await
     }
+    #[tokio::test(start_paused = true)]
+    async fn idle_connection_stays_alive_with_pong_replies() -> Result<()> {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (client, server) = tokio::io::duplex(65536);
+                let (client_rd, client_wr) = tokio::io::split(client);
+                let (server_rd, server_wr) = tokio::io::split(server);
+                let peer = tokio::task::spawn_local(async move {
+                    let mut rd = Framed::new(server_rd);
+                    let mut wr = Framed::new(server_wr);
+                    rd.read_msg::<ClientMsg>().await?;
+                    wr.write_msg(&ServerMsg::HelloAck {
+                        version: PROTOCOL_VERSION,
+                        session: gliff_proto::SessionInfo {
+                            headless: false,
+                            output: "idle".into(),
+                        },
+                        outputs: vec![],
+                        features: vec![],
+                    })
+                    .await?;
+                    let started = tokio::time::Instant::now();
+                    let mut pings = 0;
+                    while let ClientMsg::Ping { t } = rd.read_msg::<ClientMsg>().await? {
+                        wr.write_msg(&ServerMsg::Pong {
+                            t,
+                            server_now_ms: now_ms(),
+                        })
+                        .await?;
+                        pings += 1;
+                        if started.elapsed() >= Duration::from_secs(30) {
+                            return Ok::<_, anyhow::Error>(pings);
+                        }
+                    }
+                    anyhow::bail!("unexpected idle input")
+                });
+                let result = session(client_rd, client_wr, "idle", Some(1)).await;
+                assert!(result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("connection closed"));
+                assert!(peer.await?? >= 7);
+                Ok(())
+            })
+            .await
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn silent_peer_still_times_out() -> Result<()> {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (client, _silent_peer) = tokio::io::duplex(65536);
+                let (rd, wr) = tokio::io::split(client);
+                let started = tokio::time::Instant::now();
+                let result = session(rd, wr, "silent", Some(1)).await;
+                assert!(result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("stopped responding"));
+                assert_eq!(started.elapsed(), Duration::from_secs(20));
+                Ok(())
+            })
+            .await
+    }
+
     #[test]
     fn native_positions_become_evdev_and_pointer_messages() {
         assert_eq!(

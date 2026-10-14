@@ -101,6 +101,12 @@ pub fn spawn(mode: &str, args: &[String]) -> Result<tokio::process::Child> {
         .spawn()?)
 }
 
+// Protocol tests run without launching a native window on Linux.
+#[cfg(all(test, not(target_os = "macos")))]
+pub fn spawn(_mode: &str, _args: &[String]) -> Result<tokio::process::Child> {
+    anyhow::bail!("native windows require macOS")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

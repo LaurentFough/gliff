@@ -360,7 +360,10 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate {
 }
 
 final class RemoteView: NSView {
-    var image: CGImage?
+    var image: CGImage? {
+        didSet { window?.invalidateCursorRects(for: self) }
+    }
+    private let invisibleCursor = NSCursor(image: NSImage(size: NSSize(width: 1, height: 1)), hotSpot: .zero)
     var scale: Double = 1
     var pressed: Set<UInt16> = []
     var buttons: Set<Int> = []
@@ -375,6 +378,10 @@ final class RemoteView: NSView {
         let area = NSTrackingArea(rect: .zero, options: [.activeInKeyWindow, .inVisibleRect, .mouseMoved, .mouseEnteredAndExited], owner: self)
         addTrackingArea(area); tracking = area
         super.updateTrackingAreas()
+    }
+    override func resetCursorRects() {
+        super.resetCursorRects()
+        if image != nil { addCursorRect(pictureRect, cursor: invisibleCursor) }
     }
     var pictureRect: NSRect {
         guard let image = image else { return .zero }

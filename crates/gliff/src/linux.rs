@@ -139,6 +139,7 @@ struct Session {
     /// The server is streaming: set by its Connected status, cleared when
     /// the connection drops.
     connected: Cell<bool>,
+    cursor_in_video: Cell<bool>,
     /// Size of the stream the server is sending, from the last decoded frame.
     stream_size: Cell<(u32, u32)>,
     /// The full-quality fit size the stream is drawn into; equals the stream
@@ -174,6 +175,7 @@ impl Session {
             gave_up: Cell::new(false),
             remembered: Cell::new(false),
             connected: Cell::new(false),
+            cursor_in_video: Cell::new(false),
             stream_size: Cell::new((0, 0)),
             stream_view: Cell::new((0, 0)),
             server_view: Cell::new((0, 0)),
@@ -1123,7 +1125,12 @@ fn poll_status(ui: Rc<App>, s: Rc<Session>, rx: Receiver<Status>, generation: u6
                     view_width,
                     view_height,
                     fps_cap,
+                    cursor_in_video,
                 } => {
+                    s.cursor_in_video.set(cursor_in_video);
+                    if cursor_in_video {
+                        *s.cursor.borrow_mut() = Some(hidden_cursor());
+                    }
                     s.server_view.set((view_width, view_height));
                     s.fps_cap.set(fps_cap);
                     s.resize_requested.set((0, 0));
@@ -1143,6 +1150,7 @@ fn poll_status(ui: Rc<App>, s: Rc<Session>, rx: Receiver<Status>, generation: u6
                     // background session is resized when it is shown.
                     if is_active(&ui, &s) {
                         request_resize(&ui);
+                        ui.video.set_cursor(s.cursor.borrow().as_ref());
                     }
                 }
                 Status::Stats {
@@ -1238,11 +1246,21 @@ fn poll_status(ui: Rc<App>, s: Rc<Session>, rx: Receiver<Status>, generation: u6
 /// Hyprland sends when it has no cursor image to share) falls back to the
 /// default pointer so the user is never left without one.
 fn set_remote_cursor(ui: &App, s: &Rc<Session>, image: CursorImage) {
-    let cursor = remote_cursor(image);
+    let cursor = if s.cursor_in_video.get() {
+        Some(hidden_cursor())
+    } else {
+        remote_cursor(image)
+    };
     if is_active(ui, s) {
         ui.video.set_cursor(cursor.as_ref());
     }
     *s.cursor.borrow_mut() = cursor;
+}
+
+fn hidden_cursor() -> gdk::Cursor {
+    let bytes = glib::Bytes::from_owned(vec![0u8; 4]);
+    let texture = gdk::MemoryTexture::new(1, 1, gdk::MemoryFormat::B8g8r8a8, &bytes, 4);
+    gdk::Cursor::from_texture(&texture, 0, 0, None)
 }
 
 struct CursorImage<'a> {

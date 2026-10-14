@@ -149,6 +149,7 @@ async fn send(native: &Native, cmd: Value) -> Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
 pub fn native_commands(commands: mpsc::Sender<Value>) -> Native {
     let (tx, mut rx) = mpsc::channel::<(u8, Vec<u8>)>(8);
     tokio::task::spawn_local(async move {
