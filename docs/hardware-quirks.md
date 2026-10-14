@@ -17,7 +17,10 @@ needed. The detailed findings come from AMD:
 The same path also runs on Intel Panther Lake (see the Intel section).
 
 `gliff-probe gpu` prints the Vulkan device, the VA-API driver and its H.264
-capabilities; `gliff-probe surfaces` proves the hand-off between the two.
+capabilities, and which API encodes: `PASS VA-API H.264 encode`, or
+`PASS Vulkan Video H.264 encode` where the VA-API driver has no encoder
+(NVIDIA). `gliff-probe surfaces` proves the hand-off between Vulkan and
+VA-API, so it needs the VA-API codec.
 
 ## Confirmed on AMD (RADV + radeonsi)
 
@@ -101,10 +104,37 @@ that probe order, when a new generation fails:
 - **Coded buffer status.** `VA_CODED_BUF_STATUS_*` bits are logged; a
   `BAD_BITSTREAM` status fails the encode and the server falls back to CPU.
 
+## NVIDIA (proprietary driver, Vulkan Video)
+
+Found on a GeForce RTX 5070 Ti, driver 610.57.04, Hyprland on DP-1 at
+3440x1440.
+
+- **No VA-API encoder.** `nvidia-vaapi-driver` exposes NVDEC only, so the
+  server encodes through Vulkan Video (`VK_KHR_video_encode_h264`, in
+  `gliff-vk/src/vkenc.rs`) when the VA-API driver has no encode entrypoint.
+  The bitstream matches the VA-API encoder's. Two encode queues, so main and
+  aux encode on separate queues. 3440x1440 Dual420 encodes in about 4.5 ms
+  a frame, against about 175 ms on the CPU tier (Ryzen 7 3700X).
+- **The rate control needs the H.264 layer info.** A
+  `VkVideoEncodeRateControlLayerInfoKHR` without a chained
+  `VkVideoEncodeH264RateControlLayerInfoKHR` makes `vkEndCommandBuffer`
+  fail with `VK_ERROR_INITIALIZATION_FAILED`, even for the DISABLED and VBR
+  modes. The validation layers report nothing, and the spec makes it
+  optional. The driver prefers CBR with an endless regular flat GOP at every
+  quality level.
+- **The encoder input refuses STORAGE.** No `VIDEO_ENCODE_SRC` format allows
+  it, so the split writes a scratch NV12 image that is copied into the
+  encoder's input.
+- **Capture offers only tiled modifiers.** Hyprland lists the NVIDIA block
+  linear modifiers and no linear one, and `gbm_bo_map` fails on them
+  (`ENOENT`), so the CPU tier captures into wl_shm buffers instead and the
+  compositor does the readback. The GPU tier imports the tiled dmabuf.
+- **NVDEC decode does not work yet.** Its exported surfaces are two dmabuf
+  objects, which the decoder import does not take (`gliff-probe roundtrip`
+  stops at the first decode). Only the server side was tested here.
+
 ## Not yet tested anywhere
 - Intel generations before Panther Lake.
-- NVIDIA has no VA-API encoder; both ends take the CPU tier there. Decode
-  through `nvidia-vaapi-driver` is untried.
 - Baseline-profile streams (the CPU tier's output) through the VA-API High
   decode config: radeonsi accepts them, and so does iHD on Panther Lake
   (the e2e cpu-server -> gpu-client case); other drivers are unverified.

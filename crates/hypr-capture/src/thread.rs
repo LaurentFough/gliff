@@ -47,6 +47,8 @@ pub enum Cmd {
     /// Abandon the in-flight capture and start a fresh one with full
     /// damage, for a first frame the compositor never completed.
     Recapture,
+    /// Replace the capture ring after a GPU encode failure.
+    UseShm,
     Release {
         index: usize,
         generation: u64,
@@ -405,6 +407,27 @@ impl LoopState for State {
                 if let Some((frame, _)) = self.in_flight.take() {
                     // Its slot was never marked busy, so it is reused.
                     frame.destroy();
+                }
+                self.want_frame = true;
+                self.maybe_capture();
+            }
+            Cmd::UseShm => {
+                if self.cfg.mode == CaptureMode::Dmabuf {
+                    self.emit(CaptureEvent::Error(
+                        "--capture dmabuf forbids CPU capture fallback".into(),
+                    ));
+                    self.stop();
+                    return;
+                }
+                if let Some((frame, _)) = self.in_flight.take() {
+                    frame.destroy();
+                }
+                self.cfg.mode = CaptureMode::Shm;
+                self.gbm = None;
+                if let Err(e) = self.allocate_ring() {
+                    self.emit(CaptureEvent::Error(e.to_string()));
+                    self.stop();
+                    return;
                 }
                 self.want_frame = true;
                 self.maybe_capture();

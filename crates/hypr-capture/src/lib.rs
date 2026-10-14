@@ -217,7 +217,16 @@ impl CaptureBuffer {
         let mapped = bo
             .map(&device, 0, 0, w, h, |m| f(m.buffer(), m.stride()))
             .map_err(|_| Error::Gbm("buffer belongs to another device".into()))?
-            .map_err(|e| Error::Gbm(format!("map: {e}")))?;
+            .map_err(|e| {
+                // Which modifier refused the map is the useful part, and some
+                // drivers fail without setting errno, where `{e}` reads
+                // "Success".
+                let why = match e.raw_os_error() {
+                    Some(0) | None => "the driver refused it".to_string(),
+                    _ => e.to_string(),
+                };
+                Error::Gbm(format!("map: {why} (modifier {:#x})", self.info.modifier))
+            })?;
         Ok(mapped)
     }
 
@@ -352,6 +361,14 @@ impl Capturer {
     pub fn recapture(&self) -> Result<()> {
         self.cmd
             .send(thread::Cmd::Recapture)
+            .map_err(|_| Error::ThreadGone)
+    }
+
+    /// Capture subsequent frames into shared memory for CPU encoding.
+    /// Outstanding dmabuf frames may still arrive; callers must discard them.
+    pub fn use_shm(&self) -> Result<()> {
+        self.cmd
+            .send(thread::Cmd::UseShm)
             .map_err(|_| Error::ThreadGone)
     }
 
