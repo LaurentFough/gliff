@@ -111,6 +111,8 @@ that probe order, when a new generation fails:
 - Native 4:4:4 encode (HEVC 4:4:4 on Intel) to retire the dual-stream split.
 - Tiled capture buffers. The capture ring prefers linear modifiers and the
   dmabuf import passes the modifier through, but only linear has been run.
+  The GPU tier takes a tiled ring when no linear modifier is offered (only
+  the CPU tier switches to wl_shm then).
 - Multiple GPUs / non-renderD128 nodes: `--render-node` matches the DRM
   device number to the Vulkan physical device and opens the VA display on
   the same node, untested with two GPUs.
@@ -203,6 +205,14 @@ QEMU guests with `virtio-vga` and no 3D (virgl off) are a variant: they have
 a render node and Hyprland offers dmabuf, but GBM cannot allocate on it
 (`DRM_IOCTL_MODE_CREATE_DUMB failed: Permission denied`). A GBM allocation
 failure drops the ring to wl_shm the same way, with one warning.
+
+Only the CPU tier also opts into wl_shm when the compositor offers dmabuf
+but no linear modifier; the GPU tier keeps the dmabuf ring and imports the
+tiled buffers. A GPU session can still be handed a wl_shm frame later, when
+GBM fails to allocate the ring again after a resize. The GPU cannot
+import it, so the session drops to the CPU tier at that point, sends the
+client a new StreamConfig and restarts from a keyframe, instead of failing
+every frame from then on.
 
 ## Known limitations recorded from code review (not yet fixed)
 
