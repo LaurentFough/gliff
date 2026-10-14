@@ -363,7 +363,7 @@ final class RemoteView: NSView {
     var image: CGImage? {
         didSet { window?.invalidateCursorRects(for: self) }
     }
-    private let invisibleCursor = NSCursor(image: NSImage(size: NSSize(width: 1, height: 1)), hotSpot: .zero)
+    private let invisibleCursor = NSCursor(image: NSImage(size: NSSize(width: 1, height: 1), flipped: false, drawingHandler: { _ in true }), hotSpot: .zero)
     var scale: Double = 1
     var pressed: Set<UInt16> = []
     var buttons: Set<Int> = []
