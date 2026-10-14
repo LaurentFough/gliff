@@ -221,9 +221,14 @@ impl Gpu {
         Ok(unsafe { self.device.allocate_memory(&info, None) }?)
     }
 
-    /// How many memory planes an image of `format` with `modifier` has, or
-    /// `None` when the driver does not list the modifier for the format.
-    pub(crate) fn modifier_memory_planes(&self, format: vk::Format, modifier: u64) -> Option<u32> {
+    /// How many memory planes an image of `format` with `modifier` has, and
+    /// the features the driver gives it, or `None` when the driver does not
+    /// list the modifier for the format.
+    pub(crate) fn modifier_properties(
+        &self,
+        format: vk::Format,
+        modifier: u64,
+    ) -> Option<(u32, vk::FormatFeatureFlags)> {
         // SAFETY: two-call pattern on a valid physical device; the list is
         // sized from the first call before the second fills it.
         unsafe {
@@ -243,7 +248,12 @@ impl Gpu {
             entries
                 .iter()
                 .find(|e| e.drm_format_modifier == modifier)
-                .map(|e| e.drm_format_modifier_plane_count)
+                .map(|e| {
+                    (
+                        e.drm_format_modifier_plane_count,
+                        e.drm_format_modifier_tiling_features,
+                    )
+                })
         }
     }
 

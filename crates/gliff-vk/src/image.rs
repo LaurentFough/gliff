@@ -30,7 +30,8 @@ pub struct DmabufPlane<'a> {
 pub struct Image {
     gpu: Arc<Gpu>,
     pub(crate) image: vk::Image,
-    memory: vk::DeviceMemory,
+    /// One allocation, or one per plane for a disjoint import.
+    memory: Vec<vk::DeviceMemory>,
     pub format: vk::Format,
     pub width: u32,
     pub height: u32,
@@ -82,7 +83,7 @@ impl Image {
         let mut img = Self {
             gpu: gpu.clone(),
             image,
-            memory,
+            memory: vec![memory],
             format: NV12,
             width,
             height,
@@ -163,7 +164,7 @@ impl Image {
         let mut img = Self {
             gpu: gpu.clone(),
             image,
-            memory,
+            memory: vec![memory],
             format: vk::Format::B8G8R8A8_UNORM,
             width,
             height,
@@ -216,7 +217,7 @@ impl Image {
         let mut img = Self {
             gpu: gpu.clone(),
             image,
-            memory,
+            memory: vec![memory],
             format,
             width,
             height,
@@ -250,7 +251,7 @@ impl Image {
         // SAFETY: the memory was allocated exportable; the fd is owned by us.
         unsafe {
             let info = vk::MemoryGetFdInfoKHR::default()
-                .memory(self.memory)
+                .memory(self.memory[0])
                 .handle_type(vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT);
             let fd = self.gpu.external_fd.get_memory_fd(&info)?;
             let fd = OwnedFd::from_raw_fd(fd);
@@ -315,7 +316,7 @@ impl Image {
         let mut img = Self {
             gpu: gpu.clone(),
             image,
-            memory,
+            memory: vec![memory],
             format,
             width: plane.width,
             height: plane.height,
@@ -341,32 +342,46 @@ impl Image {
         desc: &PrimeDescriptor,
         storage: bool,
     ) -> Result<Self> {
-        if desc.objects.len() != 1 {
-            return Err(Error::Unsupported(format!(
-                "surface exported as {} dmabuf objects; one is supported",
-                desc.objects.len()
-            )));
-        }
         if desc.planes.len() != 2 {
             return Err(Error::Unsupported(format!(
                 "surface exported with {} planes; NV12 has two",
                 desc.planes.len()
             )));
         }
-        let memory_planes = gpu
-            .modifier_memory_planes(NV12, desc.modifier)
-            .ok_or_else(|| {
-                Error::Unsupported(format!(
-                    "NV12 with modifier {:#x} is not importable",
-                    desc.modifier
-                ))
-            })?;
+        let (memory_planes, features) =
+            gpu.modifier_properties(NV12, desc.modifier)
+                .ok_or_else(|| {
+                    Error::Unsupported(format!(
+                        "NV12 with modifier {:#x} is not importable",
+                        desc.modifier
+                    ))
+                })?;
         if memory_planes != 2 {
             return Err(Error::Unsupported(format!(
                 "NV12 with modifier {:#x} has {memory_planes} memory planes",
                 desc.modifier
             )));
         }
+        // Mesa exports both planes in one object. NVIDIA exports each plane
+        // as its own object, which Vulkan imports as a DISJOINT image with
+        // one memory binding per plane.
+        let disjoint = match desc.objects.len() {
+            1 => false,
+            2 if desc.planes.iter().enumerate().all(|(i, p)| p.object == i) => {
+                if !features.contains(vk::FormatFeatureFlags::DISJOINT) {
+                    return Err(Error::Unsupported(format!(
+                        "NV12 with modifier {:#x} is exported per plane but cannot be imported disjoint",
+                        desc.modifier
+                    )));
+                }
+                true
+            }
+            n => {
+                return Err(Error::Unsupported(format!(
+                    "surface exported as {n} dmabuf objects; one, or one per plane, is supported"
+                )))
+            }
+        };
         let layouts: Vec<vk::SubresourceLayout> = desc
             .planes
             .iter()
@@ -390,8 +405,16 @@ impl Image {
             .plane_layouts(&layouts);
         let mut external = vk::ExternalMemoryImageCreateInfo::default()
             .handle_types(vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT);
+        // A modifier image created MUTABLE_FORMAT must list its view formats,
+        // and for a multi-planar image each must match one of its planes.
+        let view_formats = [vk::Format::R8_UNORM, vk::Format::R8G8_UNORM];
+        let mut format_list = vk::ImageFormatListCreateInfo::default().view_formats(&view_formats);
+        let mut flags = vk::ImageCreateFlags::MUTABLE_FORMAT | vk::ImageCreateFlags::EXTENDED_USAGE;
+        if disjoint {
+            flags |= vk::ImageCreateFlags::DISJOINT;
+        }
         let mut info = vk::ImageCreateInfo::default()
-            .flags(vk::ImageCreateFlags::MUTABLE_FORMAT | vk::ImageCreateFlags::EXTENDED_USAGE)
+            .flags(flags)
             .image_type(vk::ImageType::TYPE_2D)
             .format(NV12)
             .extent(vk::Extent3D {
@@ -406,13 +429,20 @@ impl Image {
             .usage(usage)
             .initial_layout(vk::ImageLayout::UNDEFINED)
             .push_next(&mut explicit)
-            .push_next(&mut external);
+            .push_next(&mut external)
+            .push_next(&mut format_list);
         if families.len() > 1 {
             info = info
                 .sharing_mode(vk::SharingMode::CONCURRENT)
                 .queue_family_indices(&families);
         }
-        let (image, memory) = Self::create_imported(gpu, &info, desc.objects[0].as_fd())?;
+        let (image, memory) = if disjoint {
+            let fds: Vec<BorrowedFd> = desc.objects.iter().map(|o| o.as_fd()).collect();
+            Self::create_imported_disjoint(gpu, &info, &fds)?
+        } else {
+            let (image, memory) = Self::create_imported(gpu, &info, desc.objects[0].as_fd())?;
+            (image, vec![memory])
+        };
         let mut img = Self {
             gpu: gpu.clone(),
             image,
@@ -447,52 +477,16 @@ impl Image {
         info: &vk::ImageCreateInfo,
         fd: BorrowedFd,
     ) -> Result<(vk::Image, vk::DeviceMemory)> {
-        // SAFETY: the fd is duplicated for Vulkan, which takes ownership of
-        // the duplicate on a successful import.
+        // SAFETY: a valid create info; on failure the image is destroyed
+        // before returning.
         unsafe {
             let image = gpu.device.create_image(info, None)?;
             let reqs = gpu.device.get_image_memory_requirements(image);
-            let mut fd_props = vk::MemoryFdPropertiesKHR::default();
-            if let Err(e) = gpu.external_fd.get_memory_fd_properties(
-                vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT,
-                fd.as_raw_fd(),
-                &mut fd_props,
-            ) {
-                gpu.device.destroy_image(image, None);
-                return Err(e.into());
-            }
-            let dup = match libc_dup(fd) {
-                Ok(d) => d,
+            let memory = match Self::import_memory(gpu, reqs, fd, Some(image)) {
+                Ok(m) => m,
                 Err(e) => {
                     gpu.device.destroy_image(image, None);
                     return Err(e);
-                }
-            };
-            let mut import = vk::ImportMemoryFdInfoKHR::default()
-                .handle_type(vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT)
-                .fd(dup.as_raw_fd());
-            let mut dedicated = vk::MemoryDedicatedAllocateInfo::default().image(image);
-            let type_bits = reqs.memory_type_bits & fd_props.memory_type_bits;
-            let type_index = match gpu.memory_type(type_bits, vk::MemoryPropertyFlags::empty()) {
-                Ok(i) => i,
-                Err(e) => {
-                    gpu.device.destroy_image(image, None);
-                    return Err(e);
-                }
-            };
-            let alloc = vk::MemoryAllocateInfo::default()
-                .allocation_size(reqs.size)
-                .memory_type_index(type_index)
-                .push_next(&mut import)
-                .push_next(&mut dedicated);
-            let memory = match gpu.device.allocate_memory(&alloc, None) {
-                Ok(m) => {
-                    std::mem::forget(dup);
-                    m
-                }
-                Err(e) => {
-                    gpu.device.destroy_image(image, None);
-                    return Err(e.into());
                 }
             };
             if let Err(e) = gpu.device.bind_image_memory(image, memory, 0) {
@@ -501,6 +495,115 @@ impl Image {
                 return Err(e.into());
             }
             Ok((image, memory))
+        }
+    }
+
+    /// Create a DISJOINT `info` and bind plane `i` to the dmabuf `fds[i]`.
+    /// Drivers that export each plane of a surface as its own object
+    /// (NVIDIA's VA-API driver) need this.
+    fn create_imported_disjoint(
+        gpu: &Arc<Gpu>,
+        info: &vk::ImageCreateInfo,
+        fds: &[BorrowedFd],
+    ) -> Result<(vk::Image, Vec<vk::DeviceMemory>)> {
+        const ASPECTS: [vk::ImageAspectFlags; 3] = [
+            vk::ImageAspectFlags::MEMORY_PLANE_0_EXT,
+            vk::ImageAspectFlags::MEMORY_PLANE_1_EXT,
+            vk::ImageAspectFlags::MEMORY_PLANE_2_EXT,
+        ];
+        if fds.len() > ASPECTS.len() {
+            return Err(Error::Unsupported(format!(
+                "{} memory planes; at most {} are supported",
+                fds.len(),
+                ASPECTS.len()
+            )));
+        }
+        // SAFETY: a valid create info; each plane's memory is imported for
+        // that plane's requirements, and on failure everything created so
+        // far is released before returning.
+        unsafe {
+            let image = gpu.device.create_image(info, None)?;
+            let mut memory = Vec::with_capacity(fds.len());
+            let release = |memory: &[vk::DeviceMemory]| {
+                gpu.device.destroy_image(image, None);
+                for &m in memory {
+                    gpu.device.free_memory(m, None);
+                }
+            };
+            for (fd, &aspect) in fds.iter().zip(&ASPECTS) {
+                let mut plane =
+                    vk::ImagePlaneMemoryRequirementsInfo::default().plane_aspect(aspect);
+                let req_info = vk::ImageMemoryRequirementsInfo2::default()
+                    .image(image)
+                    .push_next(&mut plane);
+                let mut reqs = vk::MemoryRequirements2::default();
+                gpu.device
+                    .get_image_memory_requirements2(&req_info, &mut reqs);
+                match Self::import_memory(gpu, reqs.memory_requirements, *fd, None) {
+                    Ok(m) => memory.push(m),
+                    Err(e) => {
+                        release(&memory);
+                        return Err(e);
+                    }
+                }
+            }
+            let mut planes: Vec<vk::BindImagePlaneMemoryInfo> = ASPECTS[..fds.len()]
+                .iter()
+                .map(|&a| vk::BindImagePlaneMemoryInfo::default().plane_aspect(a))
+                .collect();
+            let binds: Vec<vk::BindImageMemoryInfo> = planes
+                .iter_mut()
+                .zip(&memory)
+                .map(|(plane, &m)| {
+                    vk::BindImageMemoryInfo::default()
+                        .image(image)
+                        .memory(m)
+                        .push_next(plane)
+                })
+                .collect();
+            if let Err(e) = gpu.device.bind_image_memory2(&binds) {
+                release(&memory);
+                return Err(e.into());
+            }
+            Ok((image, memory))
+        }
+    }
+
+    /// Import a dmabuf as device memory for `reqs`, dedicated to `image`
+    /// when given. The fd is duplicated; Vulkan owns the duplicate.
+    fn import_memory(
+        gpu: &Arc<Gpu>,
+        reqs: vk::MemoryRequirements,
+        fd: BorrowedFd,
+        dedicated_to: Option<vk::Image>,
+    ) -> Result<vk::DeviceMemory> {
+        // SAFETY: the fd is valid for the call; Vulkan takes ownership of the
+        // duplicate only when the allocation succeeds.
+        unsafe {
+            let mut fd_props = vk::MemoryFdPropertiesKHR::default();
+            gpu.external_fd.get_memory_fd_properties(
+                vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT,
+                fd.as_raw_fd(),
+                &mut fd_props,
+            )?;
+            let dup = libc_dup(fd)?;
+            let type_bits = reqs.memory_type_bits & fd_props.memory_type_bits;
+            let type_index = gpu.memory_type(type_bits, vk::MemoryPropertyFlags::empty())?;
+            let mut import = vk::ImportMemoryFdInfoKHR::default()
+                .handle_type(vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT)
+                .fd(dup.as_raw_fd());
+            let mut alloc = vk::MemoryAllocateInfo::default()
+                .allocation_size(reqs.size)
+                .memory_type_index(type_index)
+                .push_next(&mut import);
+            let mut dedicated;
+            if let Some(image) = dedicated_to {
+                dedicated = vk::MemoryDedicatedAllocateInfo::default().image(image);
+                alloc = alloc.push_next(&mut dedicated);
+            }
+            let memory = gpu.device.allocate_memory(&alloc, None)?;
+            std::mem::forget(dup);
+            Ok(memory)
         }
     }
 
@@ -734,7 +837,9 @@ impl Drop for Image {
                 self.gpu.device.destroy_image_view(v, None);
             }
             self.gpu.device.destroy_image(self.image, None);
-            self.gpu.device.free_memory(self.memory, None);
+            for m in self.memory.drain(..) {
+                self.gpu.device.free_memory(m, None);
+            }
         }
     }
 }
