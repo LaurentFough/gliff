@@ -23,7 +23,7 @@ use gliff_transport::clipboard::{outbound_channel, Side, Transfers};
 use gliff_transport::Framed;
 use gliff_vk::{DmabufPlane, EncodedFrame, Encoder, EncoderSettings, Gpu};
 
-use crate::rate::{Ladder, LinkEstimator, RateController};
+use crate::rate::{cpu_rebuild_due, Ladder, LinkEstimator, RateController};
 use crate::writer::Writer;
 use hypr_capture::{CaptureConfig, CaptureEvent, CapturedFrame, Capturer};
 use hypr_input::{Axis as InAxis, Clipboard, ClipboardEvent, Input, InputCmd, InputConfig};
@@ -1269,16 +1269,19 @@ impl VideoEncoder {
     /// only) the rate-control buffer window, from the next frame on. The
     /// CPU encoder has no VBV knob; OpenH264 manages its own buffer. It
     /// also cannot change its rate live — every change re-creates the
-    /// encoders and costs a keyframe — so small bitrate moves (the
-    /// controller's ~8%/s growth steps) are skipped until they add up to
-    /// 10%, bounding rebuilds to roughly one per second while growing.
+    /// encoders and costs a keyframe — so `cpu_rebuild_due` paces the
+    /// rebuilds: a congestion cut at once, other moves only when large and
+    /// at most every two seconds.
     fn set_rate(&mut self, bitrate: u32, framerate: u32, vbv_ms: u32) {
         match self {
             Self::Gpu(enc) => enc.set_rate(bitrate, framerate, vbv_ms),
             Self::Cpu(enc) => {
                 let s = enc.settings();
-                let moved = (bitrate as f64 - s.bitrate as f64).abs() / s.bitrate.max(1) as f64;
-                if moved >= 0.10 || framerate != s.framerate {
+                if cpu_rebuild_due(
+                    (s.bitrate, s.framerate),
+                    (bitrate, framerate),
+                    enc.rebuilt_at().elapsed(),
+                ) {
                     enc.set_rate(bitrate, framerate);
                 }
             }
