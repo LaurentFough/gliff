@@ -85,8 +85,9 @@ tiers independently, so every pairing can be tested on one machine.
   checks, the capture pipeline, both Dual420 and Single420 server-plus-client
   streams, the CPU tier matrix (cpu<->cpu and each mixed pairing), the
   clipboard in both directions (as text, as a 1 MiB binary item and as a
-  copied directory tree), a mirrored-output resize, and a keymap sent
-  mid-session. It needs a Hyprland session, so it is not a CI unit test; run
+  copied directory tree), a mirrored-output resize, a keymap sent
+  mid-session, and the GTK client's shortcut inhibit across repeated focus
+  changes. It needs a Hyprland session, so it is not a CI unit test; run
   it on a target machine. Without the GPU tier it skips the GPU cases and
   still runs the CPU cases.
 - **`scripts/bench.sh`** runs a server and `stream-bench` in a nested

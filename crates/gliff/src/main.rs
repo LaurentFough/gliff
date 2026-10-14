@@ -1705,6 +1705,17 @@ fn install_input_handlers(
 
     // While the video has focus, route system shortcuts (Super, Alt-Tab, ...)
     // to the remote session instead of the local compositor.
+    // The compositor answers asynchronously, and may refuse.
+    window.connect_realize(|window| {
+        if let Some(toplevel) = window.surface().and_downcast::<gdk::Toplevel>() {
+            toplevel.connect_shortcuts_inhibited_notify(|t| {
+                tracing::info!(
+                    inhibited = t.is_shortcuts_inhibited(),
+                    "compositor shortcut inhibit"
+                );
+            });
+        }
+    });
     let focus = gtk::EventControllerFocus::new();
     {
         let window = window.clone();
@@ -1717,13 +1728,6 @@ fn install_input_handlers(
             tracing::debug!("video focused; inhibiting system shortcuts");
             if let Some(toplevel) = window.surface().and_downcast::<gdk::Toplevel>() {
                 toplevel.inhibit_system_shortcuts(None::<&gdk::Event>);
-                // The compositor answers asynchronously, and may refuse.
-                toplevel.connect_shortcuts_inhibited_notify(|t| {
-                    tracing::info!(
-                        inhibited = t.is_shortcuts_inhibited(),
-                        "compositor shortcut inhibit"
-                    );
-                });
             }
             if let Some(hint) = &hint {
                 if !ui.capture_hinted.replace(true) {
