@@ -108,6 +108,77 @@ impl Image {
         Ok(img)
     }
 
+    /// Create an NV12 image for Vulkan Video (encoder input or DPB), bound
+    /// to the video profiles in `profiles`. Its one whole-image view carries
+    /// only the video usages, as the spec requires of a picture resource.
+    pub(crate) fn video_nv12(
+        gpu: &Arc<Gpu>,
+        width: u32,
+        height: u32,
+        usage: vk::ImageUsageFlags,
+        profiles: &mut vk::VideoProfileListInfoKHR,
+    ) -> Result<Self> {
+        let families = gpu.families.all();
+        let mut info = vk::ImageCreateInfo::default()
+            .image_type(vk::ImageType::TYPE_2D)
+            .format(NV12)
+            .extent(vk::Extent3D {
+                width,
+                height,
+                depth: 1,
+            })
+            .mip_levels(1)
+            .array_layers(1)
+            .samples(vk::SampleCountFlags::TYPE_1)
+            .tiling(vk::ImageTiling::OPTIMAL)
+            .usage(usage)
+            .initial_layout(vk::ImageLayout::UNDEFINED)
+            .push_next(profiles);
+        if families.len() > 1 {
+            info = info
+                .sharing_mode(vk::SharingMode::CONCURRENT)
+                .queue_family_indices(&families);
+        }
+        // SAFETY: valid create info; memory is bound before any use.
+        let (image, memory) = unsafe {
+            let image = gpu.device.create_image(&info, None)?;
+            let reqs = gpu.device.get_image_memory_requirements(image);
+            let memory = match gpu.allocate(reqs, vk::MemoryPropertyFlags::DEVICE_LOCAL, None) {
+                Ok(m) => m,
+                Err(e) => {
+                    gpu.device.destroy_image(image, None);
+                    return Err(e);
+                }
+            };
+            gpu.device.bind_image_memory(image, memory, 0)?;
+            (image, memory)
+        };
+        let mut img = Self {
+            gpu: gpu.clone(),
+            image,
+            memory: vec![memory],
+            format: NV12,
+            width,
+            height,
+            layers: 1,
+            layer_views: Vec::new(),
+            plane_views: Vec::new(),
+            layout: vk::ImageLayout::UNDEFINED.into(),
+        };
+        let video_usage = usage
+            & (vk::ImageUsageFlags::VIDEO_ENCODE_SRC_KHR
+                | vk::ImageUsageFlags::VIDEO_ENCODE_DPB_KHR);
+        img.layer_views
+            .push(img.view(NV12, vk::ImageAspectFlags::COLOR, 0, video_usage)?);
+        Ok(img)
+    }
+
+    /// Forget the contents: the next transition starts from UNDEFINED, which
+    /// any queue may record whatever layout another queue left behind.
+    pub(crate) fn discard(&self) {
+        self.layout.set(vk::ImageLayout::UNDEFINED);
+    }
+
     /// Create a BGRA image whose memory is exportable as a linear dmabuf
     /// (the client's display output).
     pub(crate) fn exportable_bgra(gpu: &Arc<Gpu>, width: u32, height: u32) -> Result<Self> {
@@ -871,9 +942,33 @@ pub struct HostBuffer {
 
 impl HostBuffer {
     pub(crate) fn new(gpu: &Arc<Gpu>, size: usize, usage: vk::BufferUsageFlags) -> Result<Self> {
-        let info = vk::BufferCreateInfo::default()
-            .size(size as u64)
-            .usage(usage);
+        Self::with_info(
+            gpu,
+            size,
+            vk::BufferCreateInfo::default()
+                .size(size as u64)
+                .usage(usage),
+        )
+    }
+
+    /// A bitstream buffer bound to the video profiles in `profiles`.
+    pub(crate) fn video(
+        gpu: &Arc<Gpu>,
+        size: usize,
+        usage: vk::BufferUsageFlags,
+        profiles: &mut vk::VideoProfileListInfoKHR,
+    ) -> Result<Self> {
+        Self::with_info(
+            gpu,
+            size,
+            vk::BufferCreateInfo::default()
+                .size(size as u64)
+                .usage(usage)
+                .push_next(profiles),
+        )
+    }
+
+    fn with_info(gpu: &Arc<Gpu>, size: usize, info: vk::BufferCreateInfo) -> Result<Self> {
         // SAFETY: valid create info; the mapping lives as long as the buffer.
         let (buffer, memory, ptr) = unsafe {
             let buffer = gpu.device.create_buffer(&info, None)?;

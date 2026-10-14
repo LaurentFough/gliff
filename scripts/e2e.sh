@@ -69,13 +69,21 @@ damage() { for i in $(seq 1 80); do hyprctl notify 1 200 0 "e2e $i" >/dev/null 2
 
 echo "== 1. probe checks =="
 $PROBE --instance "$NEST_SIG" protocols 2>/dev/null | grep -q "^PASS" || fail "protocols"
-if $PROBE gpu 2>/dev/null | grep -q "^PASS VA-API H.264 encode"; then
+PROBE_GPU=$($PROBE gpu 2>/dev/null || true)
+# The GPU checks below (surfaces, round trip) go through the VA-API codec, so
+# they key on a VA-API encoder, not on the GPU tier as such: a machine that
+# encodes through Vulkan Video runs the server's GPU tier but not these.
+if echo "$PROBE_GPU" | grep -q "^PASS VA-API H.264 encode"; then
     HAS_GPU=1
     CLIENT_VIDEO=gpu
 else
     HAS_GPU=0
     CLIENT_VIDEO=cpu
-    echo "   no GPU tier on this machine; GPU checks are skipped"
+    if echo "$PROBE_GPU" | grep -q "^PASS Vulkan Video H.264 encode"; then
+        echo "   Vulkan Video encodes here, VA-API does not; the VA-API GPU checks are skipped"
+    else
+        echo "   no GPU tier on this machine; GPU checks are skipped"
+    fi
 fi
 if [ "$HAS_GPU" = 1 ]; then
     $PROBE surfaces 2>/dev/null | grep -q "^PASS Vulkan split" || fail "VA-API surface hand-off"
