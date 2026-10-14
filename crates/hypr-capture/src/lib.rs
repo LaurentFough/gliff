@@ -316,6 +316,14 @@ impl Capturer {
             .map_err(|_| Error::ThreadGone)
     }
 
+    /// Capture subsequent frames into shared memory for CPU encoding.
+    /// Outstanding dmabuf frames may still arrive; callers must discard them.
+    pub fn use_shm(&self) -> Result<()> {
+        self.cmd
+            .send(thread::Cmd::UseShm)
+            .map_err(|_| Error::ThreadGone)
+    }
+
     pub fn stop(&self) {
         let _ = self.cmd.send(thread::Cmd::Stop);
     }

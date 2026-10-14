@@ -47,6 +47,8 @@ pub enum Cmd {
     /// Abandon the in-flight capture and start a fresh one with full
     /// damage, for a first frame the compositor never completed.
     Recapture,
+    /// Replace the ring with wl_shm after the GPU encoder failed.
+    UseShm,
     Release {
         index: usize,
         generation: u64,
@@ -108,6 +110,7 @@ struct State {
     ring: Vec<RingSlot>,
     ring_generation: u64,
     ring_format: Option<(u32, u64)>,
+    force_shm: bool,
     in_flight: Option<(ExtImageCopyCaptureFrameV1, usize)>,
     pending_damage: Vec<Rect>,
     pending_presentation: u64,
@@ -201,6 +204,7 @@ fn run(
         ring: Vec::new(),
         ring_generation: 0,
         ring_format: None,
+        force_shm: false,
         in_flight: None,
         pending_damage: Vec::new(),
         pending_presentation: 0,
@@ -237,6 +241,26 @@ fn run(
     let _ = state.conn.roundtrip();
     std::mem::swap(&mut state.sink, sink);
     result
+}
+
+/// Choose the CPU-readable ring, including an explicit GPU-to-CPU fallback.
+fn shm_ring_format(
+    force_shm: bool,
+    dmabuf_modifiers: Option<&[u64]>,
+    offered: &[u32],
+) -> Option<(u32, wl_shm::Format)> {
+    if !force_shm && dmabuf_modifiers == Some(&[u64::from(DrmModifier::Linear)][..]) {
+        return None;
+    }
+    [
+        (DrmFourcc::Xrgb8888, wl_shm::Format::Xrgb8888),
+        (DrmFourcc::Argb8888, wl_shm::Format::Argb8888),
+        (DrmFourcc::Xbgr8888, wl_shm::Format::Xbgr8888),
+        (DrmFourcc::Abgr8888, wl_shm::Format::Abgr8888),
+    ]
+    .into_iter()
+    .find(|(_, shm)| offered.contains(&u32::from(*shm)))
+    .map(|(drm, shm)| (drm as u32, shm))
 }
 
 fn run_loop(
@@ -322,6 +346,21 @@ impl LoopState for State {
                 self.want_frame = true;
                 self.maybe_capture();
             }
+            Cmd::UseShm => {
+                if let Some((frame, _)) = self.in_flight.take() {
+                    frame.destroy();
+                }
+                self.force_shm = true;
+                self.cfg.prefer_linear = true;
+                self.cfg.shm_fallback = true;
+                if let Err(e) = self.allocate_ring() {
+                    self.emit(CaptureEvent::Error(e.to_string()));
+                    self.stop();
+                    return;
+                }
+                self.want_frame = true;
+                self.maybe_capture();
+            }
             Cmd::Release { index, generation } => {
                 if generation == self.ring_generation {
                     if let Some(slot) = self.ring.get_mut(index) {
@@ -400,24 +439,20 @@ impl State {
         if !self.cfg.prefer_linear || !self.cfg.shm_fallback || self.shm.is_none() {
             return None;
         }
-        let linear = u64::from(DrmModifier::Linear);
-        if let Some((_, mods)) = self.choose_format() {
-            if mods == [linear] {
-                return None;
-            }
-        }
-        [
-            (DrmFourcc::Xrgb8888, wl_shm::Format::Xrgb8888),
-            (DrmFourcc::Argb8888, wl_shm::Format::Argb8888),
-            (DrmFourcc::Xbgr8888, wl_shm::Format::Xbgr8888),
-            (DrmFourcc::Abgr8888, wl_shm::Format::Abgr8888),
-        ]
-        .into_iter()
-        .find(|(_, shm)| self.constraints.shm_formats.contains(&u32::from(*shm)))
-        .map(|(drm, shm)| (drm as u32, shm))
+        let choice = self.choose_format();
+        shm_ring_format(
+            self.force_shm,
+            choice.as_ref().map(|(_, mods)| mods.as_slice()),
+            &self.constraints.shm_formats,
+        )
     }
 
     fn allocate_ring(&mut self) -> Result<()> {
+        if self.force_shm && self.choose_shm_format().is_none() {
+            return Err(Error::Capture(
+                "GPU fallback requires a usable wl_shm format".into(),
+            ));
+        }
         if self.constraints.width == 0 || self.constraints.height == 0 {
             // A new headless output has no mode yet. Wait for the
             // constraints that come with its first mode instead of
@@ -1079,3 +1114,20 @@ delegate_noop!(State: ignore WlPointer);
 delegate_noop!(State: ExtOutputImageCaptureSourceManagerV1);
 delegate_noop!(State: ExtImageCaptureSourceV1);
 delegate_noop!(State: ExtImageCopyCaptureManagerV1);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gpu_failure_forces_cpu_readable_capture_for_linear_and_tiled_buffers() {
+        let offered = [wl_shm::Format::Xrgb8888 as u32];
+        let linear = [u64::from(DrmModifier::Linear)];
+        let tiled = [0x0300_0000_0000_0001];
+        assert_eq!(shm_ring_format(false, Some(&linear), &offered), None);
+        let expected = Some((DrmFourcc::Xrgb8888 as u32, wl_shm::Format::Xrgb8888));
+        assert_eq!(shm_ring_format(true, Some(&linear), &offered), expected);
+        assert_eq!(shm_ring_format(true, Some(&tiled), &offered), expected);
+        assert_eq!(shm_ring_format(true, Some(&tiled), &[]), None);
+    }
+}
