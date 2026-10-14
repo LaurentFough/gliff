@@ -1,7 +1,8 @@
 //! Screen and cursor capture from Hyprland through `ext-image-copy-capture-v1`
 //! into GBM-allocated dmabufs, or wl_shm buffers when the compositor offers
-//! no linear dmabuf the CPU could map (NVIDIA), or no dmabuf at all, or there
-//! is no render node to allocate on (Hyper-V guests).
+//! no linear dmabuf the CPU could map (NVIDIA) and the caller opts in, or no
+//! dmabuf at all, or there is no render node to allocate on (Hyper-V guests),
+//! or GBM cannot allocate on it (QEMU guests without virgl).
 //!
 //! The capture runs on its own thread with a `calloop` loop; the owner sends
 //! commands through [`Capturer`] and receives [`CaptureEvent`]s through a
@@ -60,7 +61,8 @@ pub struct CaptureConfig {
     pub target: Target,
     /// Output name, e.g. `HDMI-A-1` or `HEADLESS-2`.
     pub output: String,
-    /// GBM device for dmabufs; when it cannot be opened capture uses wl_shm.
+    /// GBM device for dmabufs; when it cannot be opened, or cannot allocate
+    /// the ring, capture uses wl_shm.
     pub render_node: PathBuf,
     /// Ring size; 3 keeps one frame in flight while one is consumed.
     pub buffers: usize,
