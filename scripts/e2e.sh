@@ -15,6 +15,8 @@
 #   8. a 1 MiB binary clipboard item in both directions (chunked)
 #   9. copied files (a directory tree) in both directions, via the spool
 #  10. a keymap sent mid-session is the one the compositor serves its clients
+#  11. a keymap change mid-session reaches clients behind an input method
+#      (fcitx5), when fcitx5 and foot are installed
 #
 # Exits non-zero on the first failure.
 set -uo pipefail
@@ -248,5 +250,33 @@ kill "$kdp" "$ksp" 2>/dev/null
 grep -q "^PASS" "$kout" || fail "client keymap not served ($(tr '\n' ' ' <"$kout"); client said: $(tail -3 "$keyf" | tr '\n' ' '))"
 rm -f "$keyf" "$kout"
 echo "   client keymap PASS"
+
+echo "== 11. keymap change mid-session reaches clients behind an input method =="
+# Omarchy runs fcitx5: with an input method active, Hyprland routes keys
+# through its keyboard grab, which kept the first keymap of a virtual
+# keyboard. The probe types evdev 16 under us ("q") then under fr ("a").
+if command -v fcitx5 >/dev/null && command -v foot >/dev/null && command -v dbus-run-session >/dev/null; then
+    typed=$(mktemp); klog=$(mktemp); imhome=$(mktemp -d)
+    XDG_CONFIG_HOME="$imhome/config" XDG_CACHE_HOME="$imhome/cache" XDG_DATA_HOME="$imhome/data" setsid dbus-run-session -- sh -c "fcitx5 --disable notificationitem >/tmp/gliff-e2e-fcitx.log 2>&1 & sleep 3; foot -T e2e-typed sh -c 'cat > $typed'" >/dev/null 2>&1 &
+    imp=$!; PIDS+=("$imp"); sleep 5
+    # Earlier steps leave the pointer elsewhere: focus the terminal, put the
+    # pointer on it (focus follows the pointer) and mirror its monitor.
+    read -r taddr tx ty tw th tmon < <(hyprctl clients -j | python3 -c "import sys,json; c=next(c for c in json.load(sys.stdin) if c['title']=='e2e-typed'); print(c['address'], *c['at'], *c['size'], c['monitor'])")
+    tout=$(hyprctl monitors -j | python3 -c "import sys,json; print(next(m['name'] for m in json.load(sys.stdin) if m['id']==$tmon))")
+    hyprctl dispatch "hl.dsp.focus({ window = \"address:$taddr\" })" >/dev/null 2>&1
+    hyprctl dispatch "hl.dsp.cursor.move({ x = $((tx + tw / 2)), y = $((ty + th / 2)) })" >/dev/null 2>&1
+    "$SERVER" --listen 127.0.0.1:9050 --output "$tout" --instance "$NEST_SIG" >/tmp/gliff-e2e-server.log 2>&1 &
+    isp=$!; PIDS+=("$isp"); sleep 2
+    damage & idp=$!; PIDS+=("$idp")
+    GLIFF_SEND_KEYMAP_SWITCH=1 timeout 20 $PROBE --video "$CLIENT_VIDEO" serve-test --connect 127.0.0.1:9050 --frames 12 >"$klog" 2>&1 \
+        || fail "keymap switch client ($(tail -n 4 "$klog" | tr '\n' ' '))"
+    sleep 1
+    kill "$idp" "$isp" 2>/dev/null; kill -- -"$imp" 2>/dev/null
+    got=$(tr '\n' ' ' <"$typed"); rm -f "$typed" "$klog"; rm -rf "$imhome"
+    [ "$got" = "q a " ] || fail "keymap switch behind an input method: typed '$got', want 'q a '"
+    echo "   keymap switch behind an input method PASS"
+else
+    echo "   skipped (needs fcitx5, foot and dbus-run-session)"
+fi
 
 echo "E2E PASS: all checks passed"

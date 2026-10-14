@@ -3,6 +3,7 @@ use std::fs::File;
 use std::io::Write;
 use std::os::fd::AsFd;
 use std::sync::mpsc;
+use std::time::{Duration, Instant};
 
 use calloop::channel::{self, Sender};
 use nix::sys::memfd::{memfd_create, MFdFlags};
@@ -23,18 +24,28 @@ use hypr_wl::{now_ms, LoopState, Outputs, Seat};
 
 const KEYMAP_FORMAT_XKB_V1: u32 = 1;
 
+/// How long a keyboard replaced by a keymap change lives on. Destroying it at
+/// once, while an input method (fcitx5) may still be handling its last keys,
+/// left a stray modifier on those keys.
+const RETIRED_KEYBOARD_GRACE: Duration = Duration::from_secs(1);
+
 struct State {
     sink: EventSink,
     conn: Connection,
     outputs: Outputs,
     seat: Seat,
+    qh: QueueHandle<State>,
+    kb_mgr: ZwpVirtualKeyboardManagerV1,
+    seat_proxy: WlSeat,
     keyboard: ZwpVirtualKeyboardV1,
+    /// Keyboards replaced by a keymap change, with when, until their grace
+    /// period is over.
+    retired: Vec<(Instant, ZwpVirtualKeyboardV1)>,
     pointer: ZwlrVirtualPointerV1,
     /// Kept for rebinding: Hyprland stops honouring a bound virtual pointer
     /// once its output changes mode (a headless resize freezes the cursor
     /// for good), while a freshly created binding on the same output works.
     ptr_mgr: ZwlrVirtualPointerManagerV1,
-    qh: QueueHandle<State>,
     wl_seat: WlSeat,
     /// The output `pointer` is bound to.
     bound: Option<WlOutput>,
@@ -125,10 +136,13 @@ fn run(
         conn: conn.clone(),
         outputs,
         seat,
+        qh: qh.clone(),
+        kb_mgr,
+        seat_proxy: seat_proxy.clone(),
         keyboard,
+        retired: Vec::new(),
         pointer: ptr_mgr.create_virtual_pointer(Some(&seat_proxy), &qh, ()),
         ptr_mgr,
-        qh: qh.clone(),
         wl_seat: seat_proxy.clone(),
         bound: None,
         binding: Binding::new((1, 1, 1, 0), (1, 1)),
@@ -144,6 +158,9 @@ fn run(
     }
     state.release_all();
     state.keyboard.destroy();
+    for (_, keyboard) in state.retired.drain(..) {
+        keyboard.destroy();
+    }
     state.pointer.destroy();
     let _ = state.conn.flush();
     std::mem::swap(&mut state.sink, sink);
@@ -191,16 +208,30 @@ impl State {
     }
 
     fn upload_keymap(&mut self) -> Result<()> {
+        Self::upload_keymap_to(&self.keyboard, &self.keys.text)
+    }
+
+    fn upload_keymap_to(keyboard: &ZwpVirtualKeyboardV1, text: &str) -> Result<()> {
         let fd = memfd_create(c"gliff-keymap", MFdFlags::MFD_CLOEXEC)
             .map_err(|e| Error::Input(format!("memfd: {e}")))?;
         let mut file = File::from(fd);
-        file.write_all(self.keys.text.as_bytes())?;
+        file.write_all(text.as_bytes())?;
         file.write_all(&[0])?;
         file.flush()?;
-        let size = self.keys.text.len() as u32 + 1;
-        self.keyboard
-            .keymap(KEYMAP_FORMAT_XKB_V1, file.as_fd(), size);
+        let size = text.len() as u32 + 1;
+        keyboard.keymap(KEYMAP_FORMAT_XKB_V1, file.as_fd(), size);
         Ok(())
+    }
+
+    fn destroy_retired_keyboards(&mut self) {
+        let now = Instant::now();
+        self.retired.retain(|(since, keyboard)| {
+            let keep = now.duration_since(*since) < RETIRED_KEYBOARD_GRACE;
+            if !keep {
+                keyboard.destroy();
+            }
+            keep
+        });
     }
 
     fn release_all(&mut self) {
@@ -261,6 +292,7 @@ impl LoopState for State {
     type Cmd = InputCmd;
 
     fn on_cmd(&mut self, cmd: InputCmd) {
+        self.destroy_retired_keyboards();
         let t = now_ms();
         match cmd {
             InputCmd::Key { code, pressed } => {
@@ -320,13 +352,36 @@ impl LoopState for State {
                 }
                 self.pointer.frame();
             }
+            InputCmd::SetKeymap(text) if text == self.keys.text => {}
             InputCmd::SetKeymap(text) => match KeyState::from_text(&text) {
                 Ok(mut ks) => {
                     let (dep, lat, lock, group) =
                         ks.carry_over(&self.keys, self.pressed_keys.iter().copied());
-                    self.keys = ks;
-                    if let Err(e) = self.upload_keymap() {
+                    // A new keyboard rather than a new keymap on this one: with
+                    // an input method active (fcitx5 on Omarchy) Hyprland routes
+                    // keys through its keyboard grab, which keeps the first
+                    // keymap it saw from a keyboard and so ignores a re-upload.
+                    let keyboard =
+                        self.kb_mgr
+                            .create_virtual_keyboard(&self.seat_proxy, &self.qh, ());
+                    if let Err(e) = Self::upload_keymap_to(&keyboard, &ks.text) {
+                        keyboard.destroy();
                         self.emit(InputEvent::Error(e.to_string()));
+                        return;
+                    }
+                    // Held keys belong to a Wayland keyboard, not just its
+                    // XKB state. Release the retiring device before replaying
+                    // them on its replacement, so later key-ups reach their
+                    // owner and retirement cannot release a newly held key.
+                    for &code in &self.pressed_keys {
+                        self.keyboard.key(t, code, 0);
+                    }
+                    self.keyboard.modifiers(0, 0, 0, 0);
+                    let old = std::mem::replace(&mut self.keyboard, keyboard);
+                    self.retired.push((Instant::now(), old));
+                    self.keys = ks;
+                    for &code in &self.pressed_keys {
+                        self.keyboard.key(t, code, 1);
                     }
                     self.keyboard.modifiers(dep, lat, lock, group);
                 }
@@ -395,7 +450,132 @@ delegate_noop!(State: ZwlrVirtualPointerV1);
 
 #[cfg(test)]
 mod tests {
-    use super::Binding;
+    use super::*;
+    use std::io::Read;
+    use std::os::unix::net::UnixStream;
+    use wayland_client::Proxy;
+
+    struct Registry;
+    impl Dispatch<WlRegistry, ()> for Registry {
+        fn event(
+            _: &mut Self,
+            _: &WlRegistry,
+            _: wayland_client::protocol::wl_registry::Event,
+            _: &(),
+            _: &Connection,
+            _: &QueueHandle<Self>,
+        ) {
+        }
+    }
+
+    // Decode the actual outgoing Wayland key requests, including their device
+    // IDs. No compositor is needed: the socket peer records requests only.
+    fn key_requests(peer: &mut UnixStream) -> Vec<(u32, u32, bool)> {
+        let mut bytes = Vec::new();
+        let mut buf = [0; 4096];
+        loop {
+            match peer.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => bytes.extend_from_slice(&buf[..n]),
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(e) => panic!("read Wayland requests: {e}"),
+            }
+        }
+        let mut keys = Vec::new();
+        let mut at = 0;
+        while at < bytes.len() {
+            let word = |offset| u32::from_ne_bytes(bytes[offset..offset + 4].try_into().unwrap());
+            let id = word(at);
+            let header = word(at + 4);
+            let size = (header >> 16) as usize;
+            assert!(size >= 8 && at + size <= bytes.len());
+            if header & 0xffff == 1 && size == 20 {
+                keys.push((id, word(at + 12), word(at + 16) != 0));
+            }
+            at += size;
+        }
+        keys
+    }
+
+    #[test]
+    fn held_keys_move_to_the_replacement_keyboard() {
+        let (socket, mut peer) = UnixStream::pair().unwrap();
+        peer.set_nonblocking(true).unwrap();
+        let conn = Connection::from_socket(socket).unwrap();
+        let registry_queue = conn.new_event_queue::<Registry>();
+        let registry = conn.display().get_registry(&registry_queue.handle(), ());
+        let queue = conn.new_event_queue::<State>();
+        let qh = queue.handle();
+        let kb_mgr: ZwpVirtualKeyboardManagerV1 = registry.bind(1, 1, &qh, ());
+        let seat_proxy: WlSeat = registry.bind(2, 1, &qh, ());
+        let ptr_mgr: ZwlrVirtualPointerManagerV1 = registry.bind(3, 2, &qh, ());
+        let keyboard = kb_mgr.create_virtual_keyboard(&seat_proxy, &qh, ());
+        let old_id = keyboard.id().protocol_id();
+        let mut state = State {
+            sink: Box::new(|_| {}),
+            conn: conn.clone(),
+            outputs: Outputs::default(),
+            seat: Seat::default(),
+            qh: qh.clone(),
+            kb_mgr,
+            seat_proxy: seat_proxy.clone(),
+            keyboard,
+            retired: Vec::new(),
+            pointer: ptr_mgr.create_virtual_pointer(Some(&seat_proxy), &qh, ()),
+            keys: KeyState::default_us().unwrap(),
+            pressed_keys: BTreeSet::new(),
+            pressed_buttons: BTreeSet::new(),
+            ptr_mgr,
+            wl_seat: seat_proxy.clone(),
+            bound: None,
+            binding: Binding::new((1, 1, 1, 0), (1, 1)),
+            quit: false,
+        };
+        state.upload_keymap().unwrap();
+        state.on_cmd(InputCmd::Key {
+            code: 42,
+            pressed: true,
+        });
+        state.on_cmd(InputCmd::Key {
+            code: 16,
+            pressed: true,
+        });
+        key_requests(&mut peer);
+        let text = crate::keymap_from_names(&crate::KeymapNames {
+            layout: "fr".into(),
+            ..Default::default()
+        })
+        .unwrap();
+        state.on_cmd(InputCmd::SetKeymap(text));
+        let new_id = state.keyboard.id().protocol_id();
+        assert_ne!(old_id, new_id);
+        assert_eq!(
+            key_requests(&mut peer),
+            vec![
+                (old_id, 16, false),
+                (old_id, 42, false),
+                (new_id, 16, true),
+                (new_id, 42, true),
+            ]
+        );
+        state.on_cmd(InputCmd::Key {
+            code: 16,
+            pressed: false,
+        });
+        state.on_cmd(InputCmd::Key {
+            code: 42,
+            pressed: false,
+        });
+        assert_eq!(
+            key_requests(&mut peer),
+            vec![(new_id, 16, false), (new_id, 42, false)]
+        );
+        state.retired[0].0 -= RETIRED_KEYBOARD_GRACE;
+        state.destroy_retired_keyboards();
+        conn.flush().unwrap();
+        assert!(key_requests(&mut peer).is_empty());
+        assert!(state.retired.is_empty());
+    }
 
     // 2560x1440 at scale 1.25 has a logical size of 2048x1152, which only
     // the server knows: wl_output.scale is an integer and reports something
