@@ -156,7 +156,18 @@ where
         .await?;
 
     let (cap_tx, mut cap_rx) = mpsc::unbounded_channel();
-    let capturer = start_capture(&cfg.target, &output.name, &cfg.render_node, cap_tx)?;
+    // Only the CPU tier captures into wl_shm when no linear dmabuf is
+    // offered: the GPU tier imports tiled dmabufs too. Capture without a
+    // dmabuf at all still lands on wl_shm, which `encode_and_send` handles
+    // by dropping to the CPU tier.
+    let shm_fallback = matches!(video, VideoTier::Cpu);
+    let capturer = start_capture(
+        &cfg.target,
+        &output.name,
+        &cfg.render_node,
+        shm_fallback,
+        cap_tx,
+    )?;
 
     let input = start_input(&cfg.target, &output.name, &keymap)?;
     input.send(output.logical_extent()).ok();
@@ -959,17 +970,30 @@ impl Session {
     /// rejected the geometry; the caller sends the StreamConfig on success.
     fn apply_stream_params(&mut self) -> Result<bool> {
         self.update_fps_cmd();
-        let level = self.ladder.level();
+        let want = self.level_stream();
         let chroma = self.active_chroma();
-        let want = EncoderSettings::fit_extent(
-            ((self.base_stream.0 as f32 * level.scale) as u32).max(2) & !1,
-            ((self.base_stream.1 as f32 * level.scale) as u32).max(2) & !1,
-            self.encoder_max,
-        );
         if want == self.stream && chroma == self.chroma {
             self.apply_rate();
             return Ok(true);
         }
+        Ok(self.rebuild_encoder(want, chroma))
+    }
+
+    /// The active stream size: the full-quality fit size scaled by the
+    /// ladder level, within the encoder's maximum.
+    fn level_stream(&self) -> (u32, u32) {
+        let scale = self.ladder.level().scale;
+        EncoderSettings::fit_extent(
+            ((self.base_stream.0 as f32 * scale) as u32).max(2) & !1,
+            ((self.base_stream.1 as f32 * scale) as u32).max(2) & !1,
+            self.encoder_max,
+        )
+    }
+
+    /// Create the current tier's encoder for `want` and `chroma` and
+    /// restart from a keyframe. Returns false, keeping the current encoder,
+    /// when the encoder rejected the geometry.
+    fn rebuild_encoder(&mut self, want: (u32, u32), chroma: ChromaMode) -> bool {
         let streams = if chroma == ChromaMode::Dual420 { 2 } else { 1 };
         self.ctl
             .reconfigure(want.0 as u64 * want.1 as u64, streams, MAX_FPS);
@@ -1005,13 +1029,36 @@ impl Session {
                 // once, even when nothing changes on screen.
                 self.refines = 0;
                 self.next_refine_at = Instant::now();
-                Ok(true)
+                true
             }
             Err(e) => {
                 tracing::warn!(error = %e, width = want.0, height = want.1, "encoder rejected the size; keeping the current one");
-                Ok(false)
+                false
             }
         }
+    }
+
+    /// Drop to the CPU tier for the rest of the session, when the GPU path
+    /// cannot run: its first encode failed, or capture landed on wl_shm,
+    /// which the GPU cannot import. This can happen at any point, so the
+    /// stream is refitted to the CPU encoder's maximum and the client gets
+    /// a StreamConfig; the next frame is a keyframe with fresh parameter
+    /// sets, which the client's decoder takes like any other.
+    fn fall_back_to_cpu(&mut self) -> Result<()> {
+        self.video = VideoTier::Cpu;
+        self.encoder_max = gliff_sw::Encoder::MAX_SIZE;
+        self.base_stream =
+            EncoderSettings::fit_extent(self.base_stream.0, self.base_stream.1, self.encoder_max);
+        self.update_fps_cmd();
+        let (want, chroma) = (self.level_stream(), self.active_chroma());
+        anyhow::ensure!(
+            self.rebuild_encoder(want, chroma),
+            "cannot create the CPU encoder at {}x{}",
+            want.0,
+            want.1
+        );
+        self.send_config();
+        Ok(())
     }
 
     /// Fold one encode's duration into the sustainable-fps estimate and
@@ -1047,26 +1094,26 @@ impl Session {
     /// `app_limited` marks a send that does not use the capacity we have
     /// (a refinement pass), so it cannot lower the rate estimate.
     fn encode_and_send(&mut self, frame: &CapturedFrame, app_limited: bool) -> Result<usize> {
-        let (width, height) = self.stream;
+        // A ring reallocation (a resize) may land on wl_shm at any point,
+        // not only at the start; the CPU tier can read it.
+        if frame.buffer.is_shm() && matches!(self.video, VideoTier::Gpu(_)) {
+            tracing::warn!("capture fell back to wl_shm, which the GPU cannot import; falling back to the CPU pipeline");
+            self.fall_back_to_cpu()?;
+        }
         let key = std::mem::take(&mut self.want_keyframe);
         let t0 = Instant::now();
         let encoded = match self.encoder.encode(frame, self.stream, key) {
             Ok(e) => e,
             Err(e) if matches!(self.video, VideoTier::Gpu(_)) && !self.gpu_encoded => {
                 tracing::warn!(error = %format!("{e:#}"), "the first GPU encode failed; falling back to the CPU pipeline");
-                self.video = VideoTier::Cpu;
-                self.encoder_max = gliff_sw::Encoder::MAX_SIZE;
-                self.encoder = VideoEncoder::new(
-                    &self.video,
-                    &self.settings,
-                    self.chroma == ChromaMode::Dual420,
-                )?;
-                self.send_config();
+                self.fall_back_to_cpu()?;
+                self.want_keyframe = false;
                 self.encoder.encode(frame, self.stream, true)?
             }
             Err(e) => return Err(e),
         };
         self.gpu_encoded = true;
+        let (width, height) = self.stream;
         let enc_us = t0.elapsed().as_micros();
         let aux = encoded.aux.unwrap_or_default();
         let msg = ServerMsg::VideoFrame {
@@ -1127,7 +1174,8 @@ impl VideoTier {
     /// Open the requested tier. In `Gpu` mode a machine without Vulkan
     /// compute or a VA-API H.264 encoder falls back to the CPU instead of
     /// failing; a GPU whose encoder cannot then be created falls back in
-    /// `VideoStart`, and one whose first encode fails in `encode_and_send`.
+    /// `VideoStart`, and one whose first encode fails, or whose capture
+    /// lands on wl_shm, in `encode_and_send`.
     fn open(mode: VideoMode, render_node: &std::path::Path) -> Self {
         if mode == VideoMode::Cpu {
             tracing::info!("using the CPU video pipeline as requested");
@@ -1515,11 +1563,13 @@ fn start_capture(
     target: &Target,
     output: &str,
     render_node: &std::path::Path,
+    shm_fallback: bool,
     tx: UnboundedSender<Incoming>,
 ) -> Result<Capturer> {
     let mut cc = CaptureConfig::new(output.to_string());
     cc.target = target.clone();
     cc.render_node = render_node.to_path_buf();
+    cc.shm_fallback = shm_fallback;
     cc.cursor = true;
     // One extra ring slot: the session pins the last sent frame for
     // still-picture refinement.
