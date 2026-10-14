@@ -30,13 +30,54 @@ struct State {
     seat: Seat,
     keyboard: ZwpVirtualKeyboardV1,
     pointer: ZwlrVirtualPointerV1,
+    /// Kept for rebinding: Hyprland stops honouring a bound virtual pointer
+    /// once its output changes mode (a headless resize freezes the cursor
+    /// for good), while a freshly created binding on the same output works.
+    ptr_mgr: ZwlrVirtualPointerManagerV1,
+    qh: QueueHandle<State>,
+    wl_seat: WlSeat,
+    /// The output `pointer` is bound to.
+    bound: Option<WlOutput>,
+    /// Rebind trigger and motion extent; see [`Binding`].
+    binding: Binding,
     keys: KeyState,
     pressed_keys: BTreeSet<u32>,
     pressed_buttons: BTreeSet<u32>,
-    extent: (u32, u32),
     quit: bool,
 }
 
+/// Tracks the bound output's mode (the rebind trigger) and the
+/// extent used for absolute motion. Free of Wayland objects so the
+/// SetExtent / wl_output-done ordering can be unit-tested.
+struct Binding {
+    /// Physical width, height, integer scale and transform, per `wl_output`.
+    mode: (i32, i32, i32, u32),
+    /// Extent for absolute motion. Owned by the server's `SetExtent`
+    /// (fractional-scale aware); a `wl_output` burst must never
+    /// overwrite it.
+    extent: (u32, u32),
+}
+
+impl Binding {
+    fn new(mode: (i32, i32, i32, u32), extent: (u32, u32)) -> Self {
+        Self { mode, extent }
+    }
+
+    /// Record the server-supplied extent, the sole authority for motion.
+    fn set_extent(&mut self, width: u32, height: u32) {
+        self.extent = (width.max(1), height.max(1));
+    }
+
+    /// A `wl_output` burst for the bound output finished with this mode. Returns whether the pointer binding must be re-created; never
+    /// touches `extent`.
+    fn on_done(&mut self, mode: (i32, i32, i32, u32)) -> bool {
+        if mode == self.mode {
+            return false;
+        }
+        self.mode = mode;
+        true
+    }
+}
 pub fn spawn(
     cfg: InputConfig,
     sink: EventSink,
@@ -86,24 +127,18 @@ fn run(
         seat,
         keyboard,
         pointer: ptr_mgr.create_virtual_pointer(Some(&seat_proxy), &qh, ()),
+        ptr_mgr,
+        qh: qh.clone(),
+        wl_seat: seat_proxy.clone(),
+        bound: None,
+        binding: Binding::new((1, 1, 1, 0), (1, 1)),
         keys,
         pressed_keys: BTreeSet::new(),
         pressed_buttons: BTreeSet::new(),
-        extent: (1, 1),
         quit: false,
     };
     std::mem::swap(&mut state.sink, sink);
-    let result = input_loop(
-        &mut state,
-        conn,
-        queue,
-        rx,
-        ready_tx,
-        &cfg,
-        &qh,
-        &ptr_mgr,
-        &seat_proxy,
-    );
+    let result = input_loop(&mut state, conn, queue, rx, ready_tx, &cfg);
     if let Err(e) = &result {
         state.emit(InputEvent::Error(e.to_string()));
     }
@@ -115,7 +150,6 @@ fn run(
     result
 }
 
-#[allow(clippy::too_many_arguments)]
 fn input_loop(
     state: &mut State,
     conn: Connection,
@@ -123,20 +157,29 @@ fn input_loop(
     rx: channel::Channel<InputCmd>,
     ready_tx: mpsc::Sender<Result<()>>,
     cfg: &InputConfig,
-    qh: &QueueHandle<State>,
-    ptr_mgr: &ZwlrVirtualPointerManagerV1,
-    seat_proxy: &WlSeat,
 ) -> Result<()> {
     queue.roundtrip(state)?;
     queue.roundtrip(state)?;
 
     let (output, info) = state.outputs.find(&cfg.output)?;
-    state.extent = info.logical_size();
-    let bound = ptr_mgr.create_virtual_pointer_with_output(Some(seat_proxy), Some(&output), qh, ());
+    // Placeholder extent until the server's first SetExtent arrives with the
+    // fractional-scale aware size (it is sent at session start).
+    let logical = info.logical_size();
+    state.binding = Binding::new(
+        (info.width, info.height, info.scale, info.transform),
+        logical,
+    );
+    let bound = state.ptr_mgr.create_virtual_pointer_with_output(
+        Some(&state.wl_seat),
+        Some(&output),
+        &state.qh,
+        (),
+    );
     let old = std::mem::replace(&mut state.pointer, bound);
     old.destroy();
+    state.bound = Some(output);
     state.upload_keymap()?;
-    tracing::info!(output = %info.name, extent = ?state.extent, "input ready");
+    tracing::info!(output = %info.name, extent = ?state.binding.extent, "input ready");
     state.emit(InputEvent::Ready);
     let _ = ready_tx.send(Ok(()));
     Ok(hypr_wl::run_loop(conn, queue, rx, state)?)
@@ -172,6 +215,46 @@ impl State {
         }
         self.pointer.frame();
     }
+
+    /// A `wl_output` burst for the bound output finished. Hyprland (0.56,
+    /// and current main) silently stops delivering a bound virtual pointer's
+    /// motion after the output's mode changes — the pointer stays frozen
+    /// while a freshly created binding on the same output works. Re-bind
+    /// whenever the physical mode, scale or transform changed.
+    fn on_output_done(&mut self, output: &WlOutput) {
+        if self.bound.as_ref() != Some(output) {
+            return;
+        }
+        let Some((_, info)) = self.outputs.list.iter().find(|(o, _)| o == output) else {
+            return;
+        };
+        let mode = (info.width, info.height, info.scale, info.transform);
+        // A mode and scale can change together without changing logical size.
+        // Keep motion extent with the server, which knows fractional scales.
+        if !self.binding.on_done(mode) {
+            return;
+        }
+        let bound = self.ptr_mgr.create_virtual_pointer_with_output(
+            Some(&self.wl_seat),
+            Some(output),
+            &self.qh,
+            (),
+        );
+        let old = std::mem::replace(&mut self.pointer, bound);
+        old.destroy();
+        // Buttons held across the swap belong to the new device now.
+        let t = now_ms();
+        for &b in &self.pressed_buttons {
+            self.pointer.button(t, b, wl_pointer::ButtonState::Pressed);
+        }
+        self.pointer.frame();
+        let _ = self.conn.flush();
+        tracing::info!(
+            mode = ?mode,
+            extent = ?self.binding.extent,
+            "bound output mode changed; virtual pointer re-bound"
+        );
+    }
 }
 
 impl LoopState for State {
@@ -192,7 +275,7 @@ impl LoopState for State {
                 }
             }
             InputCmd::Motion { x, y } => {
-                let (w, h) = self.extent;
+                let (w, h) = self.binding.extent;
                 let xi = x.clamp(0.0, (w.saturating_sub(1)) as f64).round() as u32;
                 let yi = y.clamp(0.0, (h.saturating_sub(1)) as f64).round() as u32;
                 self.pointer.motion_absolute(t, xi, yi, w, h);
@@ -249,7 +332,7 @@ impl LoopState for State {
                 }
                 Err(e) => self.emit(InputEvent::Error(e.to_string())),
             },
-            InputCmd::SetExtent { width, height } => self.extent = (width.max(1), height.max(1)),
+            InputCmd::SetExtent { width, height } => self.binding.set_extent(width, height),
             InputCmd::ReleaseAll => self.release_all(),
             InputCmd::Stop => self.stop(),
         }
@@ -286,7 +369,9 @@ impl Dispatch<WlOutput, ()> for State {
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
-        s.outputs.handle(o, e);
+        if s.outputs.handle(o, e) {
+            s.on_output_done(o);
+        }
     }
 }
 
@@ -307,3 +392,51 @@ delegate_noop!(State: ZwpVirtualKeyboardManagerV1);
 delegate_noop!(State: ZwpVirtualKeyboardV1);
 delegate_noop!(State: ZwlrVirtualPointerManagerV1);
 delegate_noop!(State: ZwlrVirtualPointerV1);
+
+#[cfg(test)]
+mod tests {
+    use super::Binding;
+
+    // 2560x1440 at scale 1.25 has a logical size of 2048x1152, which only
+    // the server knows: wl_output.scale is an integer and reports something
+    // else (2560x1440 for scale 1, 1280x720 for scale 2).
+    const SERVER: (u32, u32) = (2048, 1152);
+
+    #[test]
+    fn server_extent_survives_a_late_wl_output_done() {
+        let mut b = Binding::new((2560, 1440, 1, 0), (2560, 1440));
+        b.set_extent(SERVER.0, SERVER.1);
+        assert!(b.on_done((1280, 720, 1, 0)));
+        assert_eq!(b.extent, SERVER);
+    }
+
+    #[test]
+    fn server_extent_after_an_early_wl_output_done_wins() {
+        let mut b = Binding::new((2560, 1440, 1, 0), (2560, 1440));
+        assert!(b.on_done((1280, 720, 1, 0)));
+        b.set_extent(SERVER.0, SERVER.1);
+        assert_eq!(b.extent, SERVER);
+    }
+
+    #[test]
+    fn unchanged_mode_does_not_rebind() {
+        let mut b = Binding::new((2560, 1440, 1, 0), (2560, 1440));
+        assert!(!b.on_done((2560, 1440, 1, 0)));
+    }
+
+    #[test]
+    fn extent_is_never_empty() {
+        let mut b = Binding::new((4, 4, 1, 0), (4, 4));
+        b.set_extent(0, 0);
+        assert_eq!(b.extent, (1, 1));
+    }
+    #[test]
+    fn mode_changes_rebind_even_when_logical_size_is_unchanged() {
+        let mut b = Binding::new((1280, 720, 1, 0), (1280, 720));
+        assert!(b.on_done((2560, 1440, 2, 0)));
+        assert_eq!(b.extent, (1280, 720));
+        assert!(!b.on_done((2560, 1440, 2, 0)));
+        assert!(b.on_done((2560, 1440, 2, 2)));
+        assert!(b.on_done((2560, 1440, 1, 2)));
+    }
+}
