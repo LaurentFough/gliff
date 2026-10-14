@@ -1349,10 +1349,11 @@ impl VideoEncoder {
     ) -> Result<EncodedFrame> {
         match self {
             Self::Gpu(enc) => {
+                // `encode_and_send` drops to the CPU tier before a wl_shm
+                // frame can get here.
                 anyhow::ensure!(
                     !frame.buffer.is_shm(),
-                    "the GPU tier needs dmabuf capture, but capture fell back to wl_shm (no linear \
-                     dmabuf, no dmabuf global or no render node); run with --video cpu"
+                    "a wl_shm frame reached the GPU encoder"
                 );
                 let info = &frame.buffer.info;
                 let fourcc = drm_fourcc::DrmFourcc::try_from(info.fourcc).map_err(|_| {
