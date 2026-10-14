@@ -100,3 +100,27 @@ impl Drop for ShmBuffer {
         self.pool.destroy();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn layout_packs_four_bytes_per_pixel() {
+        let l = ShmLayout::new(1920, 1080).unwrap();
+        assert_eq!((l.width, l.height, l.stride), (1920, 1080, 7680));
+        assert_eq!(
+            (l.size, l.row_bytes, l.len),
+            (7680 * 1080, 7680, 7680 * 1080)
+        );
+    }
+
+    #[test]
+    fn layout_rejects_sizes_wl_shm_cannot_take() {
+        // The pool size overflows i32, the stride overflows u32, and the
+        // height alone does not fit in an i32.
+        assert!(ShmLayout::new(65536, 65536).is_err());
+        assert!(ShmLayout::new(u32::MAX, 1).is_err());
+        assert!(ShmLayout::new(1, u32::MAX).is_err());
+    }
+}
