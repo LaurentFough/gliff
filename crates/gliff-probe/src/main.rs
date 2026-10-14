@@ -17,7 +17,7 @@ use wayland_client::{Connection, Dispatch, QueueHandle};
 use gliff_proto::color::{bgra_to_yuv444, downscale_bgra, psnr, yuv444_to_bgra};
 use gliff_sw::VideoMode;
 use gliff_vk::{Decoder, DmabufPlane, EncodedFrame, Encoder, EncoderSettings, Gpu};
-use hypr_capture::{CaptureConfig, CaptureEvent, Capturer};
+use hypr_capture::{CaptureConfig, CaptureEvent, CaptureMode, Capturer};
 use hypr_input::{keys, Input, InputConfig, InputEvent};
 use hypr_wl::Target;
 
@@ -42,6 +42,12 @@ struct Cli {
     /// Overrides the GLIFF_VIDEO environment variable.
     #[arg(long, global = true, value_parser = ["gpu", "cpu"])]
     video: Option<String>,
+    /// Capture buffers for `capture` and `pipeline`: `auto` (dmabufs, with
+    /// the server's wl_shm fallbacks), `dmabuf` or `shm` (the compositor
+    /// reads each frame back; CPU pipeline only).
+    /// Overrides the GLIFF_CAPTURE environment variable.
+    #[arg(long, global = true, value_parser = ["auto", "dmabuf", "shm"])]
+    capture: Option<String>,
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -180,6 +186,7 @@ fn main() -> Result<()> {
     };
     let node = hypr_capture::render_node(cli.render_node.as_deref());
     let video = VideoMode::resolve(cli.video.as_deref());
+    let capture_mode = CaptureMode::resolve(cli.capture.as_deref());
     match cli.cmd {
         Cmd::Protocols => protocols(&target)?,
         Cmd::Outputs => outputs(&target)?,
@@ -198,13 +205,13 @@ fn main() -> Result<()> {
             output,
             png,
             cursor,
-        } => capture(&target, &node, output, &png, cursor)?,
+        } => capture(&target, &node, capture_mode, output, &png, cursor)?,
         Cmd::Input {
             output,
             text,
             click,
         } => input(&target, output, &text, click)?,
-        Cmd::Pipeline { output } => pipeline(&target, &node, output, video)?,
+        Cmd::Pipeline { output } => pipeline(&target, &node, capture_mode, output, video)?,
         Cmd::ServeTest { connect, frames } => serve_test(&node, &connect, frames, video)?,
         Cmd::StreamBench {
             connect,
@@ -288,6 +295,23 @@ fn protocols(target: &Target) -> Result<()> {
         all &= ok;
         status(ok, name);
     }
+    // The ring needs one of these: dmabufs, or wl_shm where the compositor
+    // offers no dmabuf (Hyper-V) or `--capture shm` asks for it.
+    let dmabuf = hypr_wl::has_global(&globals, hypr_capture::BUFFER_GLOBALS[0]);
+    let shm = hypr_wl::has_global(&globals, hypr_capture::BUFFER_GLOBALS[1]);
+    all &= dmabuf || shm;
+    status(
+        dmabuf || shm,
+        &format!(
+            "capture buffers: {}",
+            match (dmabuf, shm) {
+                (true, true) => "zwp_linux_dmabuf_v1 (wl_shm as the fallback)",
+                (true, false) => "zwp_linux_dmabuf_v1 only (no wl_shm fallback)",
+                (false, true) => "wl_shm only (no zwp_linux_dmabuf_v1; CPU pipeline)",
+                (false, false) => "neither zwp_linux_dmabuf_v1 nor wl_shm",
+            }
+        ),
+    );
     let clipboard = hypr_wl::has_global(&globals, "ext_data_control_manager_v1")
         || hypr_wl::has_global(&globals, "zwlr_data_control_manager_v1");
     status(
@@ -363,6 +387,7 @@ fn pick_output(target: &Target, output: Option<String>) -> Result<String> {
 fn capture(
     target: &Target,
     node: &std::path::Path,
+    mode: CaptureMode,
     output: Option<String>,
     png_path: &std::path::Path,
     cursor: bool,
@@ -371,6 +396,7 @@ fn capture(
     let mut cfg = CaptureConfig::new(output.clone());
     cfg.target = target.clone();
     cfg.render_node = node.to_path_buf();
+    cfg.mode = mode;
     cfg.cursor = cursor;
     let (tx, rx) = mpsc::channel();
     let capturer = Capturer::start(
@@ -1523,18 +1549,23 @@ fn reference_for(src: &[u8], w: usize, h: usize, dual: bool) -> Vec<u8> {
 fn pipeline(
     target: &Target,
     node: &std::path::Path,
+    mode: CaptureMode,
     output: Option<String>,
     video: VideoMode,
 ) -> Result<()> {
+    if mode == CaptureMode::Shm && video == VideoMode::Gpu {
+        bail!("--capture shm frames can only go through the CPU pipeline; add --video cpu");
+    }
     let output = pick_output(target, output)?;
     let mut cfg = CaptureConfig::new(output.clone());
     cfg.target = target.clone();
     cfg.render_node = node.to_path_buf();
-    cfg.cursor = false;
-    // Capture the way the tier under test captures: the GPU tier imports the
-    // dmabuf as it is, so it must not get a wl_shm buffer, while the CPU tier
-    // maps the frame and keeps the fallback (NVIDIA offers no linear dmabuf).
+    cfg.mode = mode;
+    // Capture the way the tier under test captures, as the server does: the
+    // GPU tier imports the dmabuf as it is and must not get a wl_shm buffer,
+    // while the CPU tier maps the frame and keeps the fallback.
     cfg.shm_fallback = video != VideoMode::Gpu;
+    cfg.cursor = false;
     let (tx, rx) = mpsc::channel();
     let capturer = Capturer::start(
         cfg,
@@ -1562,21 +1593,26 @@ fn pipeline(
             "no frame captured (a headless output renders reliably; a physical KVM output may not)"
         )
     })?;
+    if video == VideoMode::Gpu && frame.buffer.is_shm() {
+        bail!(
+            "the GPU tier needs dmabuf capture, but capture fell back to wl_shm; \
+             this is what the server refuses too (run with --video cpu)"
+        );
+    }
     let info = &frame.buffer.info;
     // Even dimensions, as `read_bgra` crops to for the 4:2:0 path.
     let (w, h) = (info.width & !1, info.height & !1);
     let fourcc = drm_fourcc::DrmFourcc::try_from(info.fourcc)
         .map_err(|_| anyhow!("captured fourcc {:#x} is not a DRM format", info.fourcc))?;
     println!(
-        "  captured {w}x{h} {fourcc:?} modifier {:#x} from {output}",
-        info.modifier
+        "  captured {w}x{h} {fourcc:?} modifier {:#x} {} from {output}",
+        info.modifier,
+        if frame.buffer.is_shm() {
+            "(wl_shm)"
+        } else {
+            "(dmabuf)"
+        }
     );
-    if video == VideoMode::Gpu && frame.buffer.is_shm() {
-        bail!(
-            "the GPU tier needs dmabuf capture, but capture fell back to wl_shm; \
-             this is what the server refuses too"
-        );
-    }
     // The CPU reference for the PSNR, when the frame maps at all: a tiled
     // capture buffer (NVIDIA, GPU tier) is not CPU-readable, which is why the
     // CPU tier captures into wl_shm instead.

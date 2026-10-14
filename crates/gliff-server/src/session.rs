@@ -25,7 +25,7 @@ use gliff_vk::{DmabufPlane, EncodedFrame, Encoder, EncoderSettings, Gpu};
 
 use crate::rate::{cpu_rebuild_due, Ladder, LinkEstimator, RateController};
 use crate::writer::Writer;
-use hypr_capture::{CaptureConfig, CaptureEvent, CapturedFrame, Capturer};
+use hypr_capture::{CaptureConfig, CaptureEvent, CaptureMode, CapturedFrame, Capturer};
 use hypr_input::{Axis as InAxis, Clipboard, ClipboardEvent, Input, InputCmd, InputConfig};
 use hypr_wl::Target;
 
@@ -41,6 +41,8 @@ pub struct Config {
     pub video: VideoMode,
     /// Dual-stream 4:4:4 on the CPU tier too (it defaults to Single420).
     pub full_chroma: bool,
+    /// What the capture ring is made of; `Shm` implies the CPU tier.
+    pub capture: CaptureMode,
 }
 
 /// Events from the capture thread.
@@ -102,7 +104,7 @@ where
     let output = setup_output(&instance, &cfg, &caps)?;
     tracing::info!(output = %output.name, output.width, output.height, headless = output.is_headless(), "session output ready");
 
-    let video = VideoTier::open(cfg.video, &cfg.render_node);
+    let video = VideoTier::open(cfg.video, cfg.capture, &cfg.render_node);
     let codec = Codec::H264;
     writer
         .write_msg(&ServerMsg::HelloAck {
@@ -163,6 +165,7 @@ where
         &cfg.target,
         &output.name,
         &cfg.render_node,
+        cfg.capture,
         allow_shm,
         cap_tx,
     )?;
@@ -1190,9 +1193,19 @@ impl VideoTier {
     /// compute or a VA-API H.264 encoder falls back to the CPU instead of
     /// failing; a GPU whose encoder cannot then be created falls back in
     /// `VideoStart`, and one whose first encode fails in `encode_and_send`.
-    fn open(mode: VideoMode, render_node: &std::path::Path) -> Self {
+    fn open(mode: VideoMode, capture: CaptureMode, render_node: &std::path::Path) -> Self {
         if mode == VideoMode::Cpu {
             tracing::info!("using the CPU video pipeline as requested");
+            return Self::Cpu;
+        }
+        if capture == CaptureMode::Shm {
+            // Only the CPU pipeline can read a wl_shm frame.
+            tracing::info!("using the CPU video pipeline for wl_shm capture");
+            return Self::Cpu;
+        }
+        if !render_node.exists() {
+            // Hyper-V guests have only a display node and no render node.
+            tracing::warn!(render_node = %render_node.display(), "no render node; falling back to the CPU pipeline");
             return Self::Cpu;
         }
         match Gpu::open(Some(render_node)) {
@@ -1363,8 +1376,8 @@ impl VideoEncoder {
             Self::Gpu(enc) => {
                 anyhow::ensure!(
                     !frame.buffer.is_shm(),
-                    "the GPU tier needs dmabuf capture, but the compositor offered no linear \
-                     dmabuf and capture fell back to wl_shm; run with --video cpu"
+                    "the GPU tier needs dmabuf capture, but capture fell back to wl_shm (no linear \
+                     dmabuf, no dmabuf global or no render node); run with --video cpu"
                 );
                 let info = &frame.buffer.info;
                 let fourcc = drm_fourcc::DrmFourcc::try_from(info.fourcc).map_err(|_| {
@@ -1575,6 +1588,7 @@ fn start_capture(
     target: &Target,
     output: &str,
     render_node: &std::path::Path,
+    capture: CaptureMode,
     allow_shm: bool,
     tx: UnboundedSender<Incoming>,
 ) -> Result<Capturer> {
@@ -1582,6 +1596,7 @@ fn start_capture(
     cc.target = target.clone();
     cc.render_node = render_node.to_path_buf();
     cc.shm_fallback = allow_shm;
+    cc.mode = capture;
     cc.cursor = true;
     // One extra ring slot: the session pins the last sent frame for
     // still-picture refinement.
