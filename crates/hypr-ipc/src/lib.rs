@@ -184,7 +184,10 @@ impl Instance {
 /// even for the encoder. A scale with no small denominator is left alone.
 pub fn clean_mode(width: u32, height: u32, scale: f32) -> (u32, u32) {
     let s = f64::from(scale);
-    let Some(q) = (1..=8u32).find(|q| (s * f64::from(*q)).fract().abs() < 1e-4) else {
+    let Some(q) = (1..=8u32).find(|q| {
+        let numerator = s * f64::from(*q);
+        (numerator - numerator.round()).abs() < 1e-4
+    }) else {
         return (width, height);
     };
     let p = (s * f64::from(q)).round() as u32;
@@ -298,6 +301,9 @@ mod tests {
         // 1.5 = 3/2 and 2.5 = 5/2.
         assert_eq!(clean_mode(1001, 701, 1.5), (996, 696));
         assert_eq!(clean_mode(1083, 2341, 2.5), (1080, 2340));
+        // f32 rounds these scales slightly below their exact fractions.
+        assert_eq!(clean_mode(1366, 768, 1.4), (1358, 756));
+        assert_eq!(clean_mode(1366, 768, 1.8), (1350, 756));
         for (w, h, s) in [(1366, 768, 1.25), (1290, 1925, 3.0), (1001, 701, 1.5)] {
             let (cw, ch) = clean_mode(w, h, s);
             assert_eq!((f64::from(cw) / f64::from(s)).fract(), 0.0);
