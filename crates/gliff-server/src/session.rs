@@ -622,6 +622,7 @@ impl Session {
         if !self.output.is_headless() {
             return self.fit_mirror(width, height);
         }
+        let (width, height) = hypr_ipc::clean_mode(width, height, scale);
         let same_size = (width, height) == (self.output.width, self.output.height);
         let same_scale = (scale - self.output.scale).abs() < 0.01;
         if same_size && same_scale {
