@@ -782,9 +782,48 @@ impl LinkEstimator {
     }
 }
 
+/// The shortest time between two rebuilds of the CPU encoder for a rate
+/// change that is not a congestion cut.
+pub const CPU_REBUILD_INTERVAL: Duration = Duration::from_secs(2);
+
+/// Whether the CPU encoder should be rebuilt for a new target. OpenH264
+/// fixes its rate at creation, so every rebuild sends a keyframe, and a
+/// keyframe at screen-content bitrates blurs fine text. The commanded frame
+/// rate follows the measured encode time and swings by a third from frame
+/// to frame on a busy CPU: rebuilding on every swing made one frame in three
+/// a keyframe. So a cut of a quarter or more (congestion) applies at once,
+/// and otherwise only a move of 10% in bitrate or 25% in frame rate does,
+/// at most once per [`CPU_REBUILD_INTERVAL`].
+pub fn cpu_rebuild_due(current: (u32, u32), wanted: (u32, u32), since_rebuild: Duration) -> bool {
+    let ((bitrate, framerate), (new_bitrate, new_framerate)) = (current, wanted);
+    let relative = |a: u32, b: u32| (b as f64 - a as f64).abs() / a.max(1) as f64;
+    if (new_bitrate as f64) <= bitrate as f64 * 0.75 {
+        return true;
+    }
+    since_rebuild >= CPU_REBUILD_INTERVAL
+        && (relative(bitrate, new_bitrate) >= 0.10 || relative(framerate, new_framerate) >= 0.25)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cpu_rebuilds_are_paced_except_for_congestion() {
+        let soon = Duration::from_millis(300);
+        let later = CPU_REBUILD_INTERVAL;
+        // The frame rate swings that rebuilt the encoder on every frame.
+        assert!(!cpu_rebuild_due((22_000_000, 30), (22_000_000, 25), soon));
+        assert!(!cpu_rebuild_due((22_000_000, 30), (22_000_000, 35), soon));
+        // A small move never rebuilds, however long it has been.
+        assert!(!cpu_rebuild_due((22_000_000, 30), (21_000_000, 27), later));
+        // A real move rebuilds once the interval has passed.
+        assert!(cpu_rebuild_due((22_000_000, 30), (22_000_000, 20), later));
+        assert!(cpu_rebuild_due((3_000_000, 30), (21_000_000, 30), later));
+        assert!(!cpu_rebuild_due((3_000_000, 30), (21_000_000, 30), soon));
+        // A congestion cut applies at once.
+        assert!(cpu_rebuild_due((22_000_000, 30), (15_000_000, 30), soon));
+    }
 
     const MS: Duration = Duration::from_millis(1);
 

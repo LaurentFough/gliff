@@ -238,14 +238,14 @@ Every crate with `unsafe` documents the safety requirements at each block.
   `gtk::Picture`. GTK imports the dmabuf itself (through its GL/Vulkan renderer
   or, failing that, a CPU map), so the client needs no GL code and no fallback
   path of its own. The CPU tier hands GTK a memory texture from a small pool
-  of pixel buffers instead. The frame is drawn at a whole number of device
-  pixels per stream pixel: the largest that fits the widget (`paintable::layout`),
-  else a fractional shrink. GTK cannot enlarge a texture sharply on a HiDPI
-  surface (its scaled-texture node renders through an offscreen at logical
-  resolution), so the client asks the decoder for that integer zoom and the
-  recombine shader, or a CPU row copy, replicates each pixel into a zoom x zoom
-  block; GTK then draws the device-sized texture 1:1. In fullscreen the header
-  leaves the layout and slides in over the picture at the top edge.
+  of pixel buffers instead. `paintable::layout` fits the frame to the widget
+  using the GDK surface's fractional device scale. The client asks the
+  decoder for the integer part of any enlargement: the recombine shader,
+  or a CPU row copy, replicates pixels for that zoom and GTK handles the
+  remaining fractional fit. This preserves sharp integer zooms while filling
+  mirrored windows whose size is not an integer multiple of the stream.
+  The picture and pointer mapping share the same layout. In fullscreen the
+  header leaves the layout and slides in over the picture at the top edge.
 
 - **Theme.** `theme.rs` reads Omarchy 4's `colors.toml` with the same lenient
   line parser and fallback chain as `omarchy-theme-color`, and emits a `:root`

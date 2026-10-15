@@ -229,6 +229,8 @@ pub struct Encoder {
     aux: Option<H264Encoder>,
     settings: EncoderSettings,
     frames: u64,
+    /// When the encoders were last created; every creation costs a keyframe.
+    rebuilt_at: std::time::Instant,
 }
 
 impl Encoder {
@@ -243,11 +245,17 @@ impl Encoder {
             aux,
             settings,
             frames: 0,
+            rebuilt_at: std::time::Instant::now(),
         })
     }
 
     pub fn settings(&self) -> &EncoderSettings {
         &self.settings
+    }
+
+    /// When the encoders were last created, which sent a keyframe.
+    pub fn rebuilt_at(&self) -> std::time::Instant {
+        self.rebuilt_at
     }
 
     /// Change the target bitrate of both streams from the next frame on.
@@ -269,6 +277,7 @@ impl Encoder {
             Ok(fresh) => {
                 self.main = fresh.main;
                 self.aux = fresh.aux;
+                self.rebuilt_at = fresh.rebuilt_at;
             }
             Err(e) => tracing::warn!(error = %e, bitrate, "could not re-create the encoder"),
         }

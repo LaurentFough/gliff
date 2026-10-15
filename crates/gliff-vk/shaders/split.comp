@@ -14,10 +14,16 @@ layout(set = 0, binding = 1, r8)  uniform writeonly image2D main_y;
 layout(set = 0, binding = 2, rg8) uniform writeonly image2D main_uv;
 layout(set = 0, binding = 3, r8)  uniform writeonly image2D aux_y;
 layout(set = 0, binding = 4, rg8) uniform writeonly image2D aux_uv;
-layout(push_constant) uniform Push { int width; int height; int has_aux; } pc;
+layout(push_constant) uniform Push { int width; int height; int has_aux; int transform; } pc;
 
 vec3 px(int x, int y) {
     vec2 uv = (vec2(clamp(x, 0, pc.width - 1), clamp(y, 0, pc.height - 1)) + 0.5) / vec2(pc.width, pc.height);
+    if ((pc.transform & 4) != 0) uv.x = 1.0 - uv.x;
+    switch (pc.transform & 3) {
+        case 1: uv = vec2(uv.y, 1.0 - uv.x); break;
+        case 2: uv = 1.0 - uv; break;
+        case 3: uv = vec2(1.0 - uv.y, uv.x); break;
+    }
     return texture(src, uv).rgb * 255.0;
 }
 

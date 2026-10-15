@@ -36,6 +36,10 @@ fn clipboard() -> Option<gdk::Clipboard> {
     gdk::Display::default().map(|d| d.clipboard())
 }
 
+fn sensitive_selection(mimes: &[String]) -> bool {
+    mimes.iter().any(|m| m == "x-kde-passwordManagerHint")
+}
+
 fn holds_remote_offer(cb: &gdk::Clipboard) -> bool {
     cb.content().is_some_and(|p| p.is::<RemoteProvider>())
 }
@@ -71,7 +75,8 @@ pub fn watch_local(senders: impl Fn() -> Vec<UnboundedSender<ToWorker>> + 'stati
             .collect();
         let cb = cb.clone();
         glib::MainContext::default().spawn_local(async move {
-            let files = if offers_files(&mimes) {
+            let sensitive = sensitive_selection(&mimes);
+            let files = if !sensitive && offers_files(&mimes) {
                 local_files(&cb, &mimes).await
             } else {
                 LocalFiles::default()
@@ -81,7 +86,11 @@ pub fn watch_local(senders: impl Fn() -> Vec<UnboundedSender<ToWorker>> + 'stati
             }
             for tx in txs {
                 let _ = tx.send(ToWorker::LocalOffer {
-                    mime_types: forwardable_mimes(&mimes),
+                    mime_types: if sensitive {
+                        Vec::new()
+                    } else {
+                        forwardable_mimes(&mimes)
+                    },
                     files: files.clone(),
                 });
             }
@@ -155,6 +164,14 @@ pub fn read_local(mime_type: String, reply: Sender<std::io::Result<Bytes>>) {
             .iter()
             .map(|m| m.to_string())
             .collect();
+        if sensitive_selection(&available) {
+            let _ = reply
+                .send(Err(std::io::Error::other(
+                    "clipboard selection is marked sensitive",
+                )))
+                .await;
+            return;
+        }
         let Some(actual) = resolve_mime(&mime_type, &available) else {
             let error = std::io::Error::other(format!("clipboard has no {mime_type}"));
             let _ = reply.send(Err(error)).await;
@@ -406,5 +423,70 @@ impl TransferBars {
             self.list.remove(&row.root);
         }
         self.list.set_visible(!rows.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "requires an isolated Wayland session; run by scripts/e2e.sh"]
+    fn password_manager_selection_cannot_be_offered_or_read() {
+        gtk::init().unwrap();
+        let context = glib::MainContext::default();
+        let _owner = context.acquire().unwrap();
+        let cb = clipboard().unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        watch_local(move || vec![tx.clone()]);
+        let provider = gdk::ContentProvider::new_union(&[
+            gdk::ContentProvider::for_bytes(
+                "text/plain",
+                &glib::Bytes::from_static(b"private-password"),
+            ),
+            gdk::ContentProvider::for_bytes(
+                "text/uri-list",
+                &glib::Bytes::from_static(b"file:///private-secret\r\n"),
+            ),
+            gdk::ContentProvider::for_bytes(
+                "x-kde-passwordManagerHint",
+                &glib::Bytes::from_static(b"secret"),
+            ),
+        ]);
+        cb.set_content(Some(&provider)).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        let offer = loop {
+            context.iteration(false);
+            if let Ok(offer) = rx.try_recv() {
+                break offer;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "sensitive offer was not cleared"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        match offer {
+            ToWorker::LocalOffer { mime_types, files } => {
+                assert!(mime_types.is_empty());
+                assert!(files.entries.is_empty());
+            }
+            _ => panic!("expected a cleared offer"),
+        }
+        // A request racing the cleared offer must not read the live secret.
+        let (reply, mut read) = tokio::sync::mpsc::channel(2);
+        read_local("text/plain".into(), reply);
+        let result = loop {
+            context.iteration(false);
+            if let Ok(result) = read.try_recv() {
+                break result;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "clipboard read was not refused"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        assert!(result.is_err());
     }
 }

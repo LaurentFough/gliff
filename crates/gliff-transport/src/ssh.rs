@@ -97,6 +97,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn host_cannot_supply_ssh_options() {
+        let target = SshTarget::new("-oProxyCommand=touch /tmp/unwanted");
+        let cmd = ssh_command(&target);
+        let args: Vec<_> = cmd
+            .as_std()
+            .get_args()
+            .map(|a| a.to_str().unwrap())
+            .collect();
+        let host = args.iter().position(|a| *a == target.host).unwrap();
+        assert_eq!(args[host - 1], "--");
+    }
+
+    #[test]
     fn target_cannot_add_options_and_gui_prompts_are_opt_in() {
         let mut target = SshTarget::new("-oProxyCommand=untrusted");
         target.ssh_args = vec!["-p".into(), "2222".into()];

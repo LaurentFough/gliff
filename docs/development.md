@@ -39,6 +39,13 @@ To run under the Khronos validation layer:
 VK_INSTANCE_LAYERS=VK_LAYER_KHRONOS_validation gliff-probe roundtrip
 ```
 
+For slow CPU-server / GPU-client decode problems, test the mixed path with
+packet delays and compare its decoded pixels with the reference:
+
+```
+gliff-probe --video cpu roundtrip --single --decode gpu --frame-delay-ms 300 --frames 20
+```
+
 ## macOS
 
 On macOS, `bin/build` builds the native client and host with the shared
@@ -67,7 +74,9 @@ gliff --connect 127.0.0.1:9000
 ```
 
 `--listen` and `--connect` have no authentication and are for development
-only. `--video cpu` (or `GLIFF_VIDEO=cpu`) on either end forces the CPU tier,
+only. Listeners resolve to loopback addresses unless `--allow-remote` is
+explicitly supplied; that flag exposes an unauthenticated desktop.
+`--video cpu` (or `GLIFF_VIDEO=cpu`) on either end forces the CPU tier,
 and `--full-chroma` on a CPU server keeps 4:4:4. Server and client pick their
 tiers independently, so every pairing can be tested on one machine.
 
@@ -103,9 +112,10 @@ tiers independently, so every pairing can be tested on one machine.
 - **`scripts/e2e.sh`** boots a nested Hyprland and asserts PASS across the probe
   checks, the capture pipeline, both Dual420 and Single420 server-plus-client
   streams, the CPU tier matrix (cpu<->cpu and each mixed pairing), the
-  clipboard in both directions (as text, as a 1 MiB binary item and as a
-  copied directory tree), a mirrored-output resize, and a keymap sent
-  mid-session. It needs a Hyprland session, so it is not a CI unit test; run
+  rotated-output capture on both video tiers, clipboard in both directions (as text, as a 1 MiB binary item and as a
+  copied directory tree), a mirrored-output resize, a keymap sent
+  mid-session, and the GTK client's shortcut inhibit across repeated focus
+  changes. It needs a Hyprland session, so it is not a CI unit test; run
   it on a target machine. Without the GPU tier it skips the GPU cases and
   still runs the CPU cases.
 - **`scripts/bench.sh`** runs a server and `stream-bench` in a nested
@@ -128,13 +138,26 @@ entry and the icon from `pkgbuild/`.
 The version is set in one place, `[workspace.package]` in `Cargo.toml`;
 `pkgbuild/PKGBUILD` reads it from there.
 
-1. Set the version in `Cargo.toml`, then run `cargo build` to update
-   `Cargo.lock`.
-2. Commit the two files as "Release gliff 0.2.0".
-3. Tag the commit `v0.2.0` and push the commit and the tag.
+1. Set the next version in `Cargo.toml`, then run `cargo check --workspace`
+   to update `Cargo.lock`.
+2. Run `scripts/check.sh`. For video changes, also run `scripts/e2e.sh`
+   inside a Hyprland session before releasing.
+3. Commit `Cargo.toml` and `Cargo.lock` as "Release gliff X.Y.Z", tag that
+   commit `vX.Y.Z`, and push the commit and tag to `origin`.
 
-CI checks that the tag matches the version, runs the checks, builds and
-notarizes the Mac packages, and publishes the GitHub release. Configure the
-maintainer signing credentials described in [macos.md](macos.md) before
-pushing a release tag. The Omarchy Package Repository watches the tags and
-opens the pull request that updates its recipe.
+The tag starts `.github/workflows/ci.yml`. Only after formatting, Clippy,
+tests and both Mac builds pass does CI check that the tag matches the workspace
+version and publish a GitHub release with generated notes and notarized Mac
+packages. Configure the maintainer signing credentials described in
+[macos.md](macos.md) before pushing a release tag. Review and edit the release
+notes on GitHub to describe the changes users will notice.
+
+The Omarchy Package Repository watches Gliff's `v*` tags. Its hourly
+unattended update workflow opens a package update PR, builds and tests the
+package for x86_64 and aarch64, and auto-merges it after the required checks
+pass. That merge starts package publishing. No manual version bump in
+`omarchy-pkgs` is needed for a normal release.
+
+Verify that the tagged CI run and GitHub release succeeded, then check the
+package update PR and publishing run in `omacom/omarchy-pkgs`. A green
+source release alone does not mean the package has finished publishing.

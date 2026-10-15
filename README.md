@@ -41,8 +41,8 @@ currently decode on the CPU.
 Install gliff on both machines: your machine runs `gliff`, the remote one
 runs `gliff-server`.
 
-Install gliff from the [Omarchy Package Repository
-(OPR)](https://github.com/omacom/omarchy-pkgs):
+Gliff is currently available on the **edge** channel of the [Omarchy Package
+Repository (OPR)](https://github.com/omacom/omarchy-pkgs):
 
 ```
 omarchy pkg add gliff
@@ -93,11 +93,16 @@ if SSH uses a different port, or `--disable` to stop advertising. Discovery
 lists computers; selecting **Connect** starts the SSH and desktop session.
 SSH host confirmation and authentication use native prompts on the Mac.
 
-On Arch without the OPR, build and install the package from a checkout:
+If your channel reports `target not found: gliff`, or you use Arch without
+OPR, build and install the package from source:
 
 ```
+git clone https://github.com/omacom/gliff.git
+cd gliff
 bin/install
 ```
+
+This uses the current checkout, including fixes newer than the last release.
 
 To build from source, see [docs/development.md](docs/development.md).
 
@@ -140,6 +145,11 @@ without moving the pointer. `--release-hotkey` changes that key (`ctrl+alt+q`,
 until you paste. A paste that takes more than a second shows its progress
 with a cancel button. Pasted files are kept in `~/.cache/gliff/clipboard`.
 
+Clipboard sharing trusts every connected host: a host can request the
+advertised clipboard contents without a local paste. Use `gliff --no-clipboard`
+to disable sharing in both directions when connecting to an untrusted host.
+Local selections marked `x-kde-passwordManagerHint` are not shared.
+
 **Slow links.** gliff measures the link and lowers the frame rate, then the
 colour detail, then the resolution, and raises them again when there is
 room. Two flags change the video, and you pass them to the server through
@@ -156,11 +166,17 @@ gliff --server-bin 'gliff-server --low-bandwidth' user@host
   drivers and both video paths, and prints PASS or FAIL for each.
 - If ssh cannot find `gliff-server`, give its path:
   `gliff --server-bin /path/to/gliff-server user@host`.
-- The server needs the remote user's running Hyprland session. If the ssh
-  session does not have `XDG_RUNTIME_DIR` or `WAYLAND_DISPLAY`, set them
-  through `--server-bin 'env XDG_RUNTIME_DIR=/run/user/1000 gliff-server'`.
+- The server needs the remote user's running Hyprland session, which it
+  finds under `XDG_RUNTIME_DIR`, or `/run/user/<uid>` when ssh does not set
+  it. If the session is elsewhere, set it through
+  `--server-bin 'env XDG_RUNTIME_DIR=/path gliff-server'`.
 - To rule out a driver problem, force the CPU on your end with
   `gliff --video cpu user@host`.
+- If the window connects but stays black, the remote GPU may allocate
+  capture buffers it never fills (a VM's virtio-gpu with virgl, or a GPU the
+  compositor does not render on). Have the compositor read the frames back
+  instead: `gliff --server-bin 'gliff-server --capture shm' user@host`.
+  The server then encodes on the CPU.
 - Linux streams reduce screens wider than 4096 pixels. Mac hosting is capped
   at 1920×1200 and 30 fps.
 

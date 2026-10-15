@@ -17,7 +17,7 @@ use wayland_client::{Connection, Dispatch, QueueHandle};
 use gliff_proto::color::{bgra_to_yuv444, downscale_bgra, psnr, yuv444_to_bgra};
 use gliff_sw::VideoMode;
 use gliff_vk::{Decoder, DmabufPlane, EncodedFrame, Encoder, EncoderSettings, Gpu};
-use hypr_capture::{CaptureConfig, CaptureEvent, Capturer};
+use hypr_capture::{CaptureConfig, CaptureEvent, CaptureMode, Capturer};
 use hypr_input::{keys, Input, InputConfig, InputEvent};
 use hypr_wl::Target;
 
@@ -42,6 +42,12 @@ struct Cli {
     /// Overrides the GLIFF_VIDEO environment variable.
     #[arg(long, global = true, value_parser = ["gpu", "cpu"])]
     video: Option<String>,
+    /// Capture buffers for `capture` and `pipeline`: `auto` (dmabufs, with
+    /// the server's wl_shm fallbacks), `dmabuf` or `shm` (the compositor
+    /// reads each frame back; CPU pipeline only).
+    /// Overrides the GLIFF_CAPTURE environment variable.
+    #[arg(long, global = true, value_parser = ["auto", "dmabuf", "shm"])]
+    capture: Option<String>,
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -84,6 +90,12 @@ enum Cmd {
         /// restore it, to exercise the live rate-control update.
         #[arg(long)]
         adapt: bool,
+        /// Decode on a different tier to exercise mixed CPU/GPU streams.
+        #[arg(long, value_parser = ["cpu", "gpu"])]
+        decode: Option<String>,
+        /// Delay each encoded packet before decoding, to model a slow server.
+        #[arg(long, default_value_t = 0)]
+        frame_delay_ms: u64,
     },
     /// Capture one frame of an output and write it as PNG
     Capture {
@@ -182,8 +194,9 @@ fn main() -> Result<()> {
         display: cli.display.clone(),
         instance: cli.instance.clone(),
     };
-    let node = hypr_capture::render_node(cli.render_node.as_deref());
+    let node = hypr_capture::render_node_for_target(cli.render_node.as_deref(), &target);
     let video = VideoMode::resolve(cli.video.as_deref());
+    let capture_mode = CaptureMode::resolve(cli.capture.as_deref());
     match cli.cmd {
         Cmd::Protocols => protocols(&target)?,
         Cmd::Outputs => outputs(&target)?,
@@ -197,18 +210,37 @@ fn main() -> Result<()> {
             single,
             bitrate,
             adapt,
-        } => roundtrip(&node, width, height, frames, !single, bitrate, adapt, video)?,
+            decode,
+            frame_delay_ms,
+        } => roundtrip(
+            &node,
+            width,
+            height,
+            frames,
+            !single,
+            bitrate,
+            adapt,
+            video,
+            decode.map(|v| {
+                if v == "gpu" {
+                    VideoMode::Gpu
+                } else {
+                    VideoMode::Cpu
+                }
+            }),
+            frame_delay_ms,
+        )?,
         Cmd::Capture {
             output,
             png,
             cursor,
-        } => capture(&target, &node, output, &png, cursor)?,
+        } => capture(&target, &node, capture_mode, output, &png, cursor)?,
         Cmd::Input {
             output,
             text,
             click,
         } => input(&target, output, &text, click)?,
-        Cmd::Pipeline { output } => pipeline(&target, &node, output, video)?,
+        Cmd::Pipeline { output } => pipeline(&target, &node, capture_mode, output, video)?,
         Cmd::ServeTest {
             connect,
             frames,
@@ -251,14 +283,36 @@ fn main() -> Result<()> {
                 }
             };
             if gpu_ok && video == VideoMode::Gpu {
-                if let Err(e) = roundtrip(&node, 640, 360, 10, true, None, false, VideoMode::Gpu) {
+                if let Err(e) = roundtrip(
+                    &node,
+                    640,
+                    360,
+                    10,
+                    true,
+                    None,
+                    false,
+                    VideoMode::Gpu,
+                    None,
+                    0,
+                ) {
                     status(
                         false,
                         &format!("GPU round trip failed ({e:#}); the CPU pipeline will be used"),
                     );
                 }
             }
-            roundtrip(&node, 640, 360, 10, true, None, false, VideoMode::Cpu)?;
+            roundtrip(
+                &node,
+                640,
+                360,
+                10,
+                true,
+                None,
+                false,
+                VideoMode::Cpu,
+                None,
+                0,
+            )?;
         }
     }
     Ok(())
@@ -297,6 +351,23 @@ fn protocols(target: &Target) -> Result<()> {
         all &= ok;
         status(ok, name);
     }
+    // The ring needs one of these: dmabufs, or wl_shm where the compositor
+    // offers no dmabuf (Hyper-V) or `--capture shm` asks for it.
+    let dmabuf = hypr_wl::has_global(&globals, hypr_capture::BUFFER_GLOBALS[0]);
+    let shm = hypr_wl::has_global(&globals, hypr_capture::BUFFER_GLOBALS[1]);
+    all &= dmabuf || shm;
+    status(
+        dmabuf || shm,
+        &format!(
+            "capture buffers: {}",
+            match (dmabuf, shm) {
+                (true, true) => "zwp_linux_dmabuf_v1 (wl_shm as the fallback)",
+                (true, false) => "zwp_linux_dmabuf_v1 only (no wl_shm fallback)",
+                (false, true) => "wl_shm only (no zwp_linux_dmabuf_v1; CPU pipeline)",
+                (false, false) => "neither zwp_linux_dmabuf_v1 nor wl_shm",
+            }
+        ),
+    );
     let clipboard = hypr_wl::has_global(&globals, "ext_data_control_manager_v1")
         || hypr_wl::has_global(&globals, "zwlr_data_control_manager_v1");
     status(
@@ -372,15 +443,16 @@ fn pick_output(target: &Target, output: Option<String>) -> Result<String> {
 fn capture(
     target: &Target,
     node: &std::path::Path,
+    mode: CaptureMode,
     output: Option<String>,
     png_path: &std::path::Path,
     cursor: bool,
 ) -> Result<()> {
     let output = pick_output(target, output)?;
     let mut cfg = CaptureConfig::new(output.clone());
-    cfg.use_shm = true;
     cfg.target = target.clone();
     cfg.render_node = node.to_path_buf();
+    cfg.mode = mode;
     cfg.cursor = cursor;
     let (tx, rx) = mpsc::channel();
     let capturer = Capturer::start(
@@ -411,7 +483,7 @@ fn capture(
                 );
             }
             CaptureEvent::Frame(frame) => {
-                let image = frame.buffer.read_bgra()?;
+                let image = frame.read_bgra()?;
                 let (w, h) = (image.width as u32, image.height as u32);
                 let rgb: Vec<u8> = image
                     .pixels
@@ -596,6 +668,14 @@ fn serve_test(
         let mut send_keymap = std::env::var("GLIFF_SEND_KEYMAP_OPTIONS").ok().map(|options| {
             hypr_input::keymap_from_names(&hypr_input::KeymapNames { layout: "us".into(), options: Some(options), ..Default::default() })
         }).transpose()?;
+        // GLIFF_SEND_KEYMAP_SWITCH types evdev key 16 and Return twice, each
+        // right behind a keymap change: first under us (Q, so "q"), then under
+        // fr (A, so "a"). A remote that keeps the first keymap types "q" twice.
+        let mut keymap_switch = if std::env::var_os("GLIFF_SEND_KEYMAP_SWITCH").is_some() {
+            ["us", "fr"].iter().map(|layout| hypr_input::keymap_from_names(&hypr_input::KeymapNames { layout: (*layout).into(), ..Default::default() })).collect::<Result<Vec<_>, _>>()?
+        } else {
+            Vec::new()
+        };
         let recv_file = std::env::var("GLIFF_RECV_CLIP_FILE").ok();
         let recv_dir = std::env::var("GLIFF_RECV_CLIP_DIR").ok().map(PathBuf::from);
         let mut clip_recv: Vec<u8> = Vec::new();
@@ -651,6 +731,15 @@ fn serve_test(
                             writer.write_msg(&ClientMsg::Keymap { keymap }).await?;
                             writer.write_msg(&ClientMsg::Key { keycode: KEY_LEFTSHIFT, pressed: true }).await?;
                             writer.write_msg(&ClientMsg::Key { keycode: KEY_LEFTSHIFT, pressed: false }).await?;
+                        }
+                    }
+                    if (got == 4 || got == 6) && !keymap_switch.is_empty() {
+                        const KEY_Q: u32 = 16;
+                        const KEY_ENTER: u32 = 28;
+                        writer.write_msg(&ClientMsg::Keymap { keymap: keymap_switch.remove(0) }).await?;
+                        for keycode in [KEY_Q, KEY_ENTER] {
+                            writer.write_msg(&ClientMsg::Key { keycode, pressed: true }).await?;
+                            writer.write_msg(&ClientMsg::Key { keycode, pressed: false }).await?;
                         }
                     }
                     if got == 3 { writer.write_msg(&ClientMsg::Resize { width: 800, height: 600, scale: 2.0 }).await?; }
@@ -1174,6 +1263,11 @@ fn gpu_info(node: &std::path::Path) -> Result<()> {
         gpu.va.vendor, gpu.va.version.0, gpu.va.version.1
     );
     print_caps(&gpu.va_caps);
+    print_encode(&gpu);
+    match gpu.va_caps.can_decode() {
+        Ok(()) => status(true, "VA-API H.264 decode"),
+        Err(e) => status(false, &format!("VA-API H.264 decode: {e}")),
+    }
     Ok(())
 }
 
@@ -1188,13 +1282,45 @@ fn print_caps(caps: &gliff_va::Caps) {
             caps.max_height
         );
     }
-    match caps.can_encode() {
-        Ok(()) => status(true, "VA-API H.264 encode"),
-        Err(e) => status(false, &format!("VA-API H.264 encode: {e}")),
+}
+
+/// Which API encodes H.264 here, if either. The VA-API line keeps its own
+/// PASS (`e2e.sh` keys the VA-API-only checks on it), but a VA-API driver
+/// without an encoder is not a failure when Vulkan Video encodes instead:
+/// that is the normal NVIDIA case, and a bare FAIL there reads as if the
+/// GPU tier were unavailable.
+fn print_encode(gpu: &Gpu) {
+    let vk = gpu.vk_encode_info();
+    let va = gpu.va_caps.can_encode();
+    match (&va, &vk) {
+        (Ok(()), _) => status(true, "VA-API H.264 encode"),
+        (Err(e), Some(_)) => println!("  va-api H.264 encode: {e}; Vulkan Video encodes instead"),
+        (Err(e), None) => status(false, &format!("VA-API H.264 encode: {e}")),
     }
-    match caps.can_decode() {
-        Ok(()) => status(true, "VA-API H.264 decode"),
-        Err(e) => status(false, &format!("VA-API H.264 decode: {e}")),
+    match (&vk, va.is_ok()) {
+        (Some(info), false) => status(
+            true,
+            &format!(
+                "Vulkan Video H.264 encode: maximum {}x{}, {} encode queue(s), {} {}",
+                info.max_extent.0,
+                info.max_extent.1,
+                info.queues,
+                info.std_header,
+                info.std_header_version
+            ),
+        ),
+        // The VA-API encoder is the one the pipeline picks; say the fallback
+        // is there without a second PASS line for an encoder nothing uses.
+        (Some(info), true) => println!(
+            "  vulkan video: H.264 encode also available (maximum {}x{}), unused while VA-API encodes",
+            info.max_extent.0, info.max_extent.1
+        ),
+        (None, false) => status(
+            false,
+            "Vulkan Video H.264 encode: no encoder (no VK_KHR_video_encode_h264 H.264 profile, \
+             or GLIFF_VK_ENCODE=0); the CPU tier will be used",
+        ),
+        (None, true) => {}
     }
 }
 
@@ -1282,6 +1408,8 @@ fn roundtrip(
     bitrate: Option<u32>,
     adapt: bool,
     video: VideoMode,
+    decode: Option<VideoMode>,
+    frame_delay_ms: u64,
 ) -> Result<()> {
     let bitrate = bitrate.unwrap_or(4 * EncoderSettings::default_bitrate(width, height, 60));
     let settings = EncoderSettings {
@@ -1291,31 +1419,32 @@ fn roundtrip(
         framerate: 60,
         vbv_ms: EncoderSettings::DEFAULT_VBV_MS,
     };
-    let (mut encoder, mut decoder) = match video {
-        VideoMode::Gpu => {
-            let gpu = Gpu::open(Some(node))?;
-            println!("  {} ({}) dual={dual}", gpu.name, gpu.driver);
-            (
-                ProbeEncoder::Gpu(Box::new(
-                    Encoder::new(&gpu, settings, dual).context("vulkan encoder")?,
-                )),
-                ProbeDecoder::Gpu(Box::new(
-                    Decoder::new(&gpu, dual, width, height).context("vulkan decoder")?,
-                )),
-            )
-        }
-        VideoMode::Cpu => {
-            println!("  cpu (OpenH264) dual={dual}");
-            (
-                ProbeEncoder::Cpu(Box::new(
-                    gliff_sw::Encoder::new(sw_settings(width, height, bitrate), dual)
-                        .context("cpu encoder")?,
-                )),
-                ProbeDecoder::Cpu(Box::new(
-                    gliff_sw::Decoder::new(dual).context("cpu decoder")?,
-                )),
-            )
-        }
+    let decode = decode.unwrap_or(video);
+    let gpu = if video == VideoMode::Gpu || decode == VideoMode::Gpu {
+        Some(Gpu::open(Some(node))?)
+    } else {
+        None
+    };
+    println!("  encode={video:?} decode={decode:?} dual={dual} frame_delay_ms={frame_delay_ms}");
+    let mut encoder = match video {
+        VideoMode::Gpu => ProbeEncoder::Gpu(Box::new(Encoder::new(
+            gpu.as_ref().unwrap(),
+            settings,
+            dual,
+        )?)),
+        VideoMode::Cpu => ProbeEncoder::Cpu(Box::new(gliff_sw::Encoder::new(
+            sw_settings(width, height, bitrate),
+            dual,
+        )?)),
+    };
+    let mut decoder = match decode {
+        VideoMode::Gpu => ProbeDecoder::Gpu(Box::new(Decoder::new(
+            gpu.as_ref().unwrap(),
+            dual,
+            width,
+            height,
+        )?)),
+        VideoMode::Cpu => ProbeDecoder::Cpu(Box::new(gliff_sw::Decoder::new(dual)?)),
     };
     let (w, h) = (width as usize, height as usize);
     let mut min_psnr = f64::MAX;
@@ -1343,6 +1472,9 @@ fn roundtrip(
         let enc_ms = t0.elapsed().as_secs_f64() * 1000.0;
         let aux = packet.aux.as_deref().unwrap_or(&[]);
         total_bytes += packet.main.len() + aux.len();
+        if frame_delay_ms > 0 {
+            std::thread::sleep(Duration::from_millis(frame_delay_ms));
+        }
         let t1 = std::time::Instant::now();
         let out = decoder
             .decode_to_bgra(&packet.main, aux)
@@ -1497,14 +1629,22 @@ fn reference_for(src: &[u8], w: usize, h: usize, dual: bool) -> Vec<u8> {
 fn pipeline(
     target: &Target,
     node: &std::path::Path,
+    mode: CaptureMode,
     output: Option<String>,
     video: VideoMode,
 ) -> Result<()> {
+    if mode == CaptureMode::Shm && video == VideoMode::Gpu {
+        bail!("--capture shm frames can only go through the CPU pipeline; add --video cpu");
+    }
     let output = pick_output(target, output)?;
     let mut cfg = CaptureConfig::new(output.clone());
-    cfg.use_shm = video == VideoMode::Cpu;
     cfg.target = target.clone();
     cfg.render_node = node.to_path_buf();
+    cfg.mode = mode;
+    // Capture the way the tier under test captures, as the server does: the
+    // GPU tier imports the dmabuf as it is and must not get a wl_shm buffer,
+    // while the CPU tier maps the frame and keeps the fallback.
+    cfg.shm_fallback = video != VideoMode::Gpu;
     cfg.cursor = false;
     let (tx, rx) = mpsc::channel();
     let capturer = Capturer::start(
@@ -1533,15 +1673,37 @@ fn pipeline(
             "no frame captured (a headless output renders reliably; a physical KVM output may not)"
         )
     })?;
-    let reference = frame.buffer.read_bgra()?;
-    let (w, h) = (reference.width as u32, reference.height as u32);
+    if video == VideoMode::Gpu && frame.buffer.is_shm() {
+        bail!(
+            "the GPU tier needs dmabuf capture, but capture fell back to wl_shm; \
+             this is what the server refuses too (run with --video cpu)"
+        );
+    }
     let info = &frame.buffer.info;
+    // Even dimensions, as `read_bgra` crops to for the 4:2:0 path.
+    let (w, h) = frame.extent();
     let fourcc = drm_fourcc::DrmFourcc::try_from(info.fourcc)
         .map_err(|_| anyhow!("captured fourcc {:#x} is not a DRM format", info.fourcc))?;
     println!(
-        "  captured {w}x{h} {fourcc:?} modifier {:#x} from {output}",
-        info.modifier
+        "  captured {w}x{h} {fourcc:?} modifier {:#x} {} from {output}",
+        info.modifier,
+        if frame.buffer.is_shm() {
+            "(wl_shm)"
+        } else {
+            "(dmabuf)"
+        }
     );
+    // The CPU reference for the PSNR, when the frame maps at all: a tiled
+    // capture buffer (NVIDIA, GPU tier) is not CPU-readable, which is why the
+    // CPU tier captures into wl_shm instead.
+    let reference = match frame.read_bgra() {
+        Ok(r) => Some(r),
+        Err(e) if video == VideoMode::Gpu => {
+            println!("  no CPU reference for this frame: {e}; the PSNR is skipped");
+            None
+        }
+        Err(e) => return Err(e).context("read the captured frame"),
+    };
     let plane = DmabufPlane {
         fd: info.fd.as_fd(),
         width: info.width,
@@ -1594,8 +1756,13 @@ fn pipeline(
     };
     let t0 = std::time::Instant::now();
     let packet = match &mut encoder {
-        ProbeEncoder::Gpu(enc) => enc.encode_dmabuf(1, &plane, true).context("encode")?,
+        ProbeEncoder::Gpu(enc) => enc
+            .encode_dmabuf_transformed(1, &plane, frame.transform, true)
+            .context("encode")?,
         ProbeEncoder::Cpu(enc) => {
+            let reference = reference
+                .as_ref()
+                .ok_or_else(|| anyhow!("the CPU tier needs a mappable capture buffer"))?;
             let pixels = if scaled {
                 downscale_bgra(
                     &reference.pixels,
@@ -1639,6 +1806,16 @@ fn pipeline(
     let dec_ms = t1.elapsed().as_secs_f64() * 1000.0;
     drop(frame);
     drop(capturer);
+
+    let Some(reference) = reference else {
+        println!("  decoded {dec_ms:.1} ms");
+        status(
+            true,
+            "Dual420 4:4:4 GPU pipeline on a captured frame (ran; no PSNR without a \
+             CPU-mappable capture buffer)",
+        );
+        return Ok(());
+    };
 
     // What the CPU reference path makes of the same pixels, so only coding
     // loss and shader rounding count. A scaled stream is compared with a
