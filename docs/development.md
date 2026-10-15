@@ -116,8 +116,12 @@ tiers independently, so every pairing can be tested on one machine.
   copied directory tree), a mirrored-output resize, a keymap sent
   mid-session, and the GTK client's shortcut inhibit across repeated focus
   changes. It needs a Hyprland session, so it is not a CI unit test; run
-  it on a target machine. Without the GPU tier it skips the GPU cases and
-  still runs the CPU cases.
+  it on a target machine. Encoder and decoder support are detected separately:
+  Vulkan Video encoding is exercised even without a VA-API encoder, and
+  unsupported GPU cases are skipped while the CPU cases still run. Failed
+  capture and stream probes retain their full output in the reported log file.
+  If a nested output stays at 0x0 before capture, check the compositor's buffer
+  allocation; see the [NVIDIA nested-output issue](hardware-quirks.md#nvidia-nested-headless-outputs).
 - **`scripts/bench.sh`** runs a server and `stream-bench` in a nested
   Hyprland over a shaped link: `BENCH_PRESET=lan|dsl|satellite`, a
   token-bucket TCP proxy (`scripts/throttle-proxy.py`) or `tc netem` in an

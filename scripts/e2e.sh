@@ -20,14 +20,13 @@
 #
 # Exits non-zero on the first failure.
 set -uo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/.." || exit 1
 
 fail() { echo "E2E FAIL: $*" >&2; cleanup; exit 1; }
 PIDS=()
 NEST_SIG=""
 cleanup() {
     for p in "${PIDS[@]:-}"; do kill "$p" 2>/dev/null || true; done
-    [ -n "$NEST_SIG" ] && pkill -9 -f "Hyprland .*e2e-hypr.lua" 2>/dev/null || true
 }
 trap cleanup EXIT
 
@@ -56,13 +55,15 @@ hl.config({
 })
 HYPR
 before=$(ls "$XDG_RUNTIME_DIR/hypr" 2>/dev/null)
-WAYLAND_DISPLAY="$WAYLAND_DISPLAY" HYPRLAND_INSTANCE_SIGNATURE= setsid Hyprland -c "$CONF" >/tmp/gliff-e2e-hypr.log 2>&1 &
+WAYLAND_DISPLAY="$WAYLAND_DISPLAY" HYPRLAND_INSTANCE_SIGNATURE='' setsid Hyprland -c "$CONF" >/tmp/gliff-e2e-hypr.log 2>&1 &
+PIDS+=("$!")
 sleep 6
 # The nested instance is the directory that was not there before we started it.
 NEST_SIG=$(comm -13 <(echo "$before" | sort) <(ls "$XDG_RUNTIME_DIR/hypr" | sort) | head -1)
 [ -n "$NEST_SIG" ] || fail "nested Hyprland did not start"
 export HYPRLAND_INSTANCE_SIGNATURE="$NEST_SIG"
-export WAYLAND_DISPLAY=$(sed -n 2p "$XDG_RUNTIME_DIR/hypr/$NEST_SIG/hyprland.lock")
+WAYLAND_DISPLAY=$(sed -n 2p "$XDG_RUNTIME_DIR/hypr/$NEST_SIG/hyprland.lock")
+export WAYLAND_DISPLAY
 echo "   nested sig $NEST_SIG on $WAYLAND_DISPLAY"
 
 damage() { for i in $(seq 1 80); do hyprctl notify 1 200 0 "e2e $i" >/dev/null 2>&1; sleep 0.1; done; }
@@ -70,24 +71,23 @@ damage() { for i in $(seq 1 80); do hyprctl notify 1 200 0 "e2e $i" >/dev/null 2
 echo "== 1. probe checks =="
 $PROBE --instance "$NEST_SIG" protocols 2>/dev/null | grep -q "^PASS" || fail "protocols"
 PROBE_GPU=$($PROBE gpu 2>/dev/null || true)
-# The GPU checks below (surfaces, round trip) go through the VA-API codec, so
-# they key on a VA-API encoder, not on the GPU tier as such: a machine that
-# encodes through Vulkan Video runs the server's GPU tier but not these.
-if echo "$PROBE_GPU" | grep -q "^PASS VA-API H.264 encode"; then
+HAS_GPU=0
+CLIENT_VIDEO=cpu
+if echo "$PROBE_GPU" | grep -qE '^PASS (VA-API|Vulkan Video) H.264 encode'; then
     HAS_GPU=1
-    CLIENT_VIDEO=gpu
 else
-    HAS_GPU=0
-    CLIENT_VIDEO=cpu
-    if echo "$PROBE_GPU" | grep -q "^PASS Vulkan Video H.264 encode"; then
-        echo "   Vulkan Video encodes here, VA-API does not; the VA-API GPU checks are skipped"
-    else
-        echo "   no GPU tier on this machine; GPU checks are skipped"
-    fi
+    echo "   no GPU encoder; GPU server checks are skipped"
+fi
+if echo "$PROBE_GPU" | grep -q '^PASS VA-API H.264 decode'; then
+    CLIENT_VIDEO=gpu
+fi
+# Only the raw VA-API surface probe requires a VA-API encoder. The actual
+# encoder, round trip and server also support Vulkan Video (NVIDIA).
+if echo "$PROBE_GPU" | grep -q '^PASS VA-API H.264 encode'; then
+    $PROBE surfaces 2>/dev/null | grep -q "^PASS Vulkan split" || fail "VA-API surface hand-off"
 fi
 if [ "$HAS_GPU" = 1 ]; then
-    $PROBE surfaces 2>/dev/null | grep -q "^PASS Vulkan split" || fail "VA-API surface hand-off"
-    $PROBE roundtrip 2>/dev/null | grep -q "^PASS min RGB PSNR" || fail "GPU codec round-trip"
+    $PROBE roundtrip --decode "$CLIENT_VIDEO" 2>/dev/null | grep -q "^PASS min RGB PSNR" || fail "GPU codec round-trip"
 fi
 $PROBE --video cpu roundtrip 2>/dev/null | grep -q "^PASS min RGB PSNR" || fail "CPU codec round-trip"
 echo "   probe checks PASS"
@@ -101,13 +101,24 @@ run_pipeline() {
     sleep 1
     local HN
     HN=$(hyprctl monitors -j | python3 -c "import sys,json;print(next((m['name'] for m in json.load(sys.stdin) if 'e2ecap' in m['name'] or m['name']=='e2ecap'),''))")
-    local pipe
-    pipe=$($PROBE --instance "$NEST_SIG" --video "$video" pipeline --output "${HN:-e2ecap}" 2>/dev/null)
+    [ -n "$HN" ] || fail "nested compositor did not create the capture output"
+    local geometry
+    geometry=$(hyprctl monitors -j | python3 -c "import sys,json; m=next(m for m in json.load(sys.stdin) if m['name']=='$HN'); print(m['width'], m['height'])")
+    if [ "$geometry" = "0 0" ]; then
+        fail "nested compositor left $HN at 0x0 before capture; check its buffer allocation in $XDG_RUNTIME_DIR/hypr/$NEST_SIG/hyprland.log"
+    fi
+    local pipe_log result
+    pipe_log=$(mktemp --suffix=-gliff-pipeline.log)
+    $PROBE --instance "$NEST_SIG" --video "$video" pipeline --output "$HN" >"$pipe_log" 2>&1
+    result=$?
     hyprctl output remove "${HN:-e2ecap}" >/dev/null 2>&1
-    echo "$pipe" | grep -q "^PASS" || fail "4:4:4 pipeline ($video)"
-    echo "$pipe" | grep -q "^FAIL" && fail "4:4:4 pipeline ($video) ($(echo "$pipe" | grep '^FAIL' | head -1))"
+    if [ "$result" -ne 0 ] || ! grep -q '^PASS' "$pipe_log" || grep -q '^FAIL' "$pipe_log"; then
+        cat "$pipe_log" >&2
+        fail "4:4:4 pipeline ($video), log: $pipe_log"
+    fi
+    rm -f "$pipe_log"
 }
-[ "$HAS_GPU" = 1 ] && run_pipeline gpu
+if [ "$HAS_GPU" = 1 ] && [ "$CLIENT_VIDEO" = gpu ]; then run_pipeline gpu; fi
 run_pipeline cpu
 echo "   pipeline PASS"
 
@@ -119,20 +130,25 @@ run_server_test() {
     local sp=$!; PIDS+=("$sp")
     sleep 2
     damage & local dp=$!; PIDS+=("$dp")
-    local out
-    out=$(timeout 30 $PROBE --video "$client_video" serve-test --connect "127.0.0.1:$port" --frames 8 2>&1)
+    local stream_log result
+    stream_log=$(mktemp --suffix=-gliff-stream.log)
+    timeout 30 $PROBE --video "$client_video" serve-test --connect "127.0.0.1:$port" --frames 8 >"$stream_log" 2>&1
+    result=$?
     kill "$dp" 2>/dev/null; kill "$sp" 2>/dev/null; sleep 1
-    echo "$out" | grep -q "^PASS" || fail "$label ($(echo "$out" | tail -1))"
-    echo "$out" | grep -q "^FAIL" && fail "$label ($(echo "$out" | grep '^FAIL' | head -1))"
+    if [ "$result" -ne 0 ] || ! grep -q '^PASS' "$stream_log" || grep -q '^FAIL' "$stream_log"; then
+        cat "$stream_log" >&2
+        fail "$label, log: $stream_log"
+    fi
+    rm -f "$stream_log"
     echo "   $label PASS"
 }
 
 if [ "$HAS_GPU" = 1 ]; then
     echo "== 3. server + client, Dual420 =="
-    run_server_test 9040 "Dual420 stream" gpu
+    run_server_test 9040 "Dual420 stream" "$CLIENT_VIDEO"
 
     echo "== 4. server + client, Single420 (--low-bandwidth) =="
-    run_server_test 9041 "Single420 stream" gpu --low-bandwidth
+    run_server_test 9041 "Single420 stream" "$CLIENT_VIDEO" --low-bandwidth
 else
     echo "== 3./4. GPU server tests skipped (no GPU tier) =="
 fi
@@ -141,6 +157,8 @@ echo "== 4b. CPU tier matrix =="
 run_server_test 9044 "cpu server -> cpu client" cpu --video cpu
 if [ "$HAS_GPU" = 1 ]; then
     run_server_test 9045 "gpu server -> cpu client" cpu
+fi
+if [ "$CLIENT_VIDEO" = gpu ]; then
     run_server_test 9046 "cpu server -> gpu client" gpu --video cpu
 fi
 
@@ -154,6 +172,17 @@ command -v wl-copy >/dev/null && command -v wl-paste >/dev/null || fail "wl-clip
 # item on its own. Wait for both before pasting and killing anything.
 wait_type() { for i in $(seq 1 60); do wl-paste -l 2>/dev/null | grep -qx "$1" && return 0; sleep 0.25; done; return 1; }
 wait_recv() { for i in $(seq 1 60); do grep -q "$1" "$2" && return 0; sleep 0.25; done; return 1; }
+# The initial selection already has the requested MIME type. Keep the peer
+# alive until its replacement selection has actually delivered the data.
+wait_paste() {
+    local mime=$1 dest=$2
+    shift 2
+    for ((attempt = 0; attempt < 60; attempt++)); do
+        timeout 2 wl-paste --no-newline --type "$mime" >"$dest" 2>/dev/null && "$@" "$dest" && return 0
+        sleep 0.25
+    done
+    return 1
+}
 wl-copy "e2e-clip-in" 2>/dev/null
 "$SERVER" --listen 127.0.0.1:9042 --headless --instance "$NEST_SIG" >/tmp/gliff-e2e-server.log 2>&1 &
 csp=$!; PIDS+=("$csp"); sleep 2
@@ -163,19 +192,22 @@ GLIFF_SEND_CLIP="e2e-clip-out" timeout 20 $PROBE --video "$CLIENT_VIDEO" serve-t
 clipc=$!; PIDS+=("$clipc")
 wait_type "text/plain;charset=utf-8" || fail "server never offered the client's text"
 wait_recv "CLIP-RECV:" "$clipf" || fail "client never received the compositor's text"
-pasted=$(wl-paste -n 2>/dev/null)
+text_expected=$(mktemp); text_actual=$(mktemp)
+printf '%s' e2e-clip-out >"$text_expected"
+wait_paste 'text/plain;charset=utf-8' "$text_actual" cmp -s "$text_expected" \
+    || fail "client->compositor clipboard (got: $(cat "$text_actual"))"
 kill "$clipc" "$cdp" "$csp" 2>/dev/null
 grep -q "CLIP-RECV: e2e-clip-in" "$clipf" || fail "compositor->client clipboard (got: $(grep CLIP-RECV "$clipf"))"
-[ "$pasted" = "e2e-clip-out" ] || fail "client->compositor clipboard (got: $pasted)"
-rm -f "$clipf"
+rm -f "$clipf" "$text_expected" "$text_actual"
 echo "   clipboard both directions PASS"
 
 echo "== 7. mirrored output resize and mid-session CPU fallback =="
 resize_cases=(dmabuf)
 if [ "$HAS_GPU" = 1 ]; then
     fallback_shim=$(mktemp --suffix=.so)
+    read -r -a gbm_cflags <<<"$(pkg-config --cflags gbm)"
     cc -shared -fPIC -Wall -Wextra -Werror scripts/test-fixtures/fail-gbm-allocation.c \
-        -o "$fallback_shim" $(pkg-config --cflags gbm) -ldl || fail "build GBM failure fixture"
+        -o "$fallback_shim" "${gbm_cflags[@]}" -ldl || fail "build GBM failure fixture"
     resize_cases+=(shm-fallback)
 fi
 for resize_case in "${resize_cases[@]}"; do
@@ -229,7 +261,7 @@ rotated=$(hyprctl monitors -j | python3 -c "import sys,json; print(next(m['name'
 hyprctl eval "hl.monitor({ output = \"$rotated\", mode = \"1280x800@60\", position = \"auto\", scale = 1, transform = 1 })" >/dev/null
 sleep 1
 $PROBE --video cpu --capture shm --instance "$NEST_SIG" pipeline --output "$rotated" >/tmp/gliff-e2e-rotate-cpu.log 2>&1 || fail "rotated CPU pipeline"
-if [ "$HAS_GPU" = 1 ]; then
+if [ "$HAS_GPU" = 1 ] && [ "$CLIENT_VIDEO" = gpu ]; then
     $PROBE --instance "$NEST_SIG" pipeline --output "$rotated" >/tmp/gliff-e2e-rotate-gpu.log 2>&1 || fail "rotated GPU pipeline"
 fi
 hyprctl output remove "$rotated" >/dev/null 2>&1
@@ -237,30 +269,33 @@ echo "   rotated output CPU/GPU pipelines PASS"
 
 echo "== 8. binary clipboard both directions (1 MiB, chunked) =="
 blob=$(mktemp); head -c 1048576 /dev/urandom >"$blob"
+client_blob=$(mktemp); head -c 1048576 /dev/urandom >"$client_blob"
 recvf=$(mktemp); outf=$(mktemp)
 wl-copy --type application/octet-stream <"$blob" 2>/dev/null
 "$SERVER" --listen 127.0.0.1:9047 --headless --instance "$NEST_SIG" >/tmp/gliff-e2e-server.log 2>&1 &
 bsp=$!; PIDS+=("$bsp"); sleep 2
 damage & bdp=$!; PIDS+=("$bdp")
 clipf=$(mktemp)
-GLIFF_SEND_CLIP_FILE="$blob" GLIFF_RECV_CLIP_FILE="$recvf" timeout 20 $PROBE --video "$CLIENT_VIDEO" serve-test --connect 127.0.0.1:9047 --frames 200 >"$clipf" 2>&1 &
+GLIFF_SEND_CLIP_FILE="$client_blob" GLIFF_RECV_CLIP_FILE="$recvf" timeout 20 $PROBE --video "$CLIENT_VIDEO" serve-test --connect 127.0.0.1:9047 --frames 200 >"$clipf" 2>&1 &
 bclipc=$!; PIDS+=("$bclipc")
 wait_type "application/octet-stream" || fail "server never offered the client's binary item"
 wait_recv "CLIP-RECV-FILE:" "$clipf" || fail "client never received the compositor's binary item"
-wl-paste --type application/octet-stream >"$outf" 2>/dev/null
+wait_paste application/octet-stream "$outf" cmp -s "$client_blob" \
+    || fail "client->compositor binary clipboard differs ($(stat -c %s "$outf") bytes)"
 kill "$bclipc" "$bdp" "$bsp" 2>/dev/null
 grep -q "CLIP-RECV-FILE: 1048576 bytes" "$clipf" || fail "compositor->client binary clipboard (got: $(grep CLIP-RECV "$clipf"))"
 cmp -s "$blob" "$recvf" || fail "compositor->client binary clipboard differs"
-cmp -s "$blob" "$outf" || fail "client->compositor binary clipboard differs ($(stat -c %s "$outf") bytes)"
-rm -f "$clipf" "$blob" "$recvf" "$outf"
+cmp -s "$client_blob" "$outf" || fail "client->compositor binary clipboard differs ($(stat -c %s "$outf") bytes)"
+rm -f "$clipf" "$blob" "$client_blob" "$recvf" "$outf"
 echo "   binary clipboard both directions PASS"
 
 echo "== 9. copied files both directions (spooled) =="
 srcd=$(mktemp -d); mkdir -p "$srcd/photos/sub"
 head -c 300000 /dev/urandom >"$srcd/photos/a.bin"; echo "hello" >"$srcd/photos/sub/b.txt"; echo "solo" >"$srcd/solo.txt"
 recvd=$(mktemp -d)
+spoolbase=$(mktemp -d); uris=$(mktemp)
 printf 'file://%s\r\nfile://%s\r\n' "$srcd/photos" "$srcd/solo.txt" | wl-copy --type text/uri-list 2>/dev/null
-"$SERVER" --listen 127.0.0.1:9048 --headless --instance "$NEST_SIG" >/tmp/gliff-e2e-server.log 2>&1 &
+GLIFF_CLIPBOARD_DIR="$spoolbase" "$SERVER" --listen 127.0.0.1:9048 --headless --instance "$NEST_SIG" >/tmp/gliff-e2e-server.log 2>&1 &
 fsp=$!; PIDS+=("$fsp"); sleep 2
 damage & fdp=$!; PIDS+=("$fdp")
 clipf=$(mktemp)
@@ -268,15 +303,16 @@ GLIFF_SEND_CLIP_FILES="$srcd/photos:$srcd/solo.txt" GLIFF_RECV_CLIP_DIR="$recvd"
 fclipc=$!; PIDS+=("$fclipc")
 wait_type "text/uri-list" || fail "server never offered the client's files"
 wait_recv "CLIP-RECV-FILES:" "$clipf" || fail "client never received the compositor's files"
-pasted_uris=$(wl-paste --type text/uri-list 2>/dev/null | tr -d '\r')
-kill "$fclipc" "$fdp" "$fsp" 2>/dev/null
+wait_paste text/uri-list "$uris" grep -q -F "file://$spoolbase/" \
+    || fail "client->compositor files: no received spool in URI list"
+pasted_uris=$(tr -d '\r' <"$uris")
 grep -q "CLIP-RECV-FILES: 5 entries" "$clipf" || fail "compositor->client files (probe said: $(grep -iE 'clip|offer|serv|error|panick' "$clipf" | tail -8 | tr '\n' ' '); server said: $(grep -iE 'clip|warn' /tmp/gliff-e2e-server.log | tail -5 | tr '\n' ' '))"
 cmp -s "$srcd/photos/a.bin" "$recvd/photos/a.bin" && cmp -s "$srcd/photos/sub/b.txt" "$recvd/photos/sub/b.txt" && cmp -s "$srcd/solo.txt" "$recvd/solo.txt" || fail "compositor->client files differ"
 spool=$(echo "$pasted_uris" | head -1 | sed 's|^file://||; s|/photos$||')
 [ -n "$spool" ] && [ -d "$spool/photos" ] || fail "client->compositor files: no spool in URI list (got: $pasted_uris)"
 cmp -s "$srcd/photos/a.bin" "$spool/photos/a.bin" && cmp -s "$srcd/photos/sub/b.txt" "$spool/photos/sub/b.txt" && cmp -s "$srcd/solo.txt" "$spool/solo.txt" || fail "client->compositor files differ"
-rm -rf "$spool"
-rm -rf "$clipf" "$srcd" "$recvd"
+kill "$fclipc" "$fdp" "$fsp" 2>/dev/null
+rm -rf "$clipf" "$srcd" "$recvd" "$spoolbase" "$uris"
 echo "   copied files both directions PASS"
 
 echo "== 10. client keymap reaches compositor clients =="
@@ -295,6 +331,12 @@ rm -f "$keyf" "$kout"
 echo "   client keymap PASS"
 
 echo "== 11. keymap change mid-session reaches clients behind an input method =="
+# Keep UI fixtures on a headless output: the parent compositor may stop
+# sending frame callbacks to its nested window when the user changes workspace.
+hyprctl output create headless e2eui >/dev/null 2>&1
+set_monitor e2eui 1280x800@60
+sleep 1
+ui_workspace=$(hyprctl monitors -j | python3 -c "import sys,json; print(next(m['activeWorkspace']['id'] for m in json.load(sys.stdin) if m['name']=='e2eui'))")
 # Omarchy runs fcitx5: with an input method active, Hyprland routes keys
 # through its keyboard grab, which kept the first keymap of a virtual
 # keyboard. The probe types evdev 16 under us ("q") then under fr ("a").
@@ -302,6 +344,9 @@ if command -v fcitx5 >/dev/null && command -v foot >/dev/null && command -v dbus
     typed=$(mktemp); klog=$(mktemp); imhome=$(mktemp -d)
     XDG_CONFIG_HOME="$imhome/config" XDG_CACHE_HOME="$imhome/cache" XDG_DATA_HOME="$imhome/data" setsid dbus-run-session -- sh -c "fcitx5 --disable notificationitem >/tmp/gliff-e2e-fcitx.log 2>&1 & sleep 3; foot -T e2e-typed sh -c 'cat > $typed'" >/dev/null 2>&1 &
     imp=$!; PIDS+=("$imp"); sleep 5
+    taddr=$(hyprctl clients -j | python3 -c "import sys,json; print(next(c['address'] for c in json.load(sys.stdin) if c['title']=='e2e-typed'))")
+    hyprctl dispatch "hl.dsp.window.move({ workspace = $ui_workspace, window = \"address:$taddr\" })" >/dev/null
+    sleep 1
     # Earlier steps leave the pointer elsewhere: focus the terminal, put the
     # pointer on it (focus follows the pointer) and mirror its monitor.
     read -r taddr tx ty tw th tmon < <(hyprctl clients -j | python3 -c "import sys,json; c=next(c for c in json.load(sys.stdin) if c['title']=='e2e-typed'); print(c['address'], *c['at'], *c['size'], c['monitor'])")
@@ -332,9 +377,13 @@ icp=$!; PIDS+=("$icp")
 # A second, unconnected client window to take focus away.
 XDG_CONFIG_HOME="$txdg" target/release/gliff >/dev/null 2>&1 &
 iop=$!; PIDS+=("$iop"); sleep 4
+hyprctl dispatch "hl.dsp.window.move({ workspace = $ui_workspace, window = \"pid:$icp\" })" >/dev/null
+hyprctl dispatch "hl.dsp.focus({ window = \"pid:$icp\" })" >/dev/null
 # The video takes focus only while the pointer is over it, so the other
 # window goes to its own workspace, leaving the client under the pointer.
-hyprctl dispatch "hl.dsp.window.move({ workspace = 2, window = \"pid:$iop\" })" >/dev/null; sleep 1
+hyprctl dispatch "hl.dsp.window.move({ workspace = $((ui_workspace + 100)), window = \"pid:$iop\" })" >/dev/null; sleep 1
+read -r cx cy cw ch < <(hyprctl clients -j | python3 -c "import sys,json; c=next(c for c in json.load(sys.stdin) if c['pid']==$icp); print(*c['at'], *c['size'])")
+hyprctl dispatch "hl.dsp.cursor.move({ x = $((cx + cw / 2)), y = $((cy + ch / 2)) })" >/dev/null
 for _ in $(seq 1 10); do
     hyprctl dispatch "hl.dsp.focus({ window = \"pid:$iop\" })" >/dev/null; sleep 0.5
     hyprctl dispatch "hl.dsp.focus({ window = \"pid:$icp\" })" >/dev/null; sleep 0.5

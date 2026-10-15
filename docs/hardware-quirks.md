@@ -133,6 +133,19 @@ Found on a GeForce RTX 5070 Ti, driver 610.57.04, Hyprland on DP-1 at
   objects, which the decoder import does not take (`gliff-probe roundtrip`
   stops at the first decode). Only the server side was tested here.
 
+### NVIDIA nested headless outputs
+
+With Hyprland 0.56.2, Aquamarine 0.15.0 and NVIDIA 610.57.04 on an RTX 5090,
+`scripts/e2e.sh` can fail before Gliff captures a frame: the nested Wayland
+output renders, but a new headless output remains at 0x0. Explicitly setting
+its mode also fails, and the compositor logs GBM buffer-allocation errors.
+
+Aquamarine's headless backend uses guessed implicit/linear formats when no
+DRM backend exists, discarding the parent Wayland compositor's advertised
+formats and modifiers. Reusing that Wayland format list fixes allocation.
+The complete E2E suite passes with a rebuilt Aquamarine containing that fix;
+Gliff's test script does not patch or replace the installed compositor.
+
 ## Not yet tested anywhere
 - Intel generations before Panther Lake.
 - Baseline-profile streams (the CPU tier's output) through the VA-API High
