@@ -145,6 +145,9 @@ struct Session {
     /// The server is streaming: set by its Connected status, cleared when
     /// the connection drops.
     connected: Cell<bool>,
+    /// The server streams a dedicated headless output: its frames carry the
+    /// compositor-drawn cursor, so the local pointer is hidden over the video.
+    headless: Cell<bool>,
     /// Size of the stream the server is sending, from the last decoded frame.
     stream_size: Cell<(u32, u32)>,
     /// The full-quality fit size the stream is drawn into; equals the stream
@@ -180,6 +183,7 @@ impl Session {
             gave_up: Cell::new(false),
             remembered: Cell::new(false),
             connected: Cell::new(false),
+            headless: Cell::new(false),
             stream_size: Cell::new((0, 0)),
             stream_view: Cell::new((0, 0)),
             server_view: Cell::new((0, 0)),
@@ -1129,9 +1133,11 @@ fn poll_status(ui: Rc<App>, s: Rc<Session>, rx: Receiver<Status>, generation: u6
                     view_width,
                     view_height,
                     fps_cap,
+                    headless,
                 } => {
                     s.server_view.set((view_width, view_height));
                     s.fps_cap.set(fps_cap);
+                    s.headless.set(headless);
                     s.resize_requested.set((0, 0));
                     s.retries.set(0);
                     s.gave_up.set(false);
@@ -1149,6 +1155,11 @@ fn poll_status(ui: Rc<App>, s: Rc<Session>, rx: Receiver<Status>, generation: u6
                     // background session is resized when it is shown.
                     if is_active(&ui, &s) {
                         request_resize(&ui);
+                        if headless && s.cursor.borrow().is_none() {
+                            let cursor = hidden_cursor();
+                            ui.video.set_cursor(Some(&cursor));
+                            *s.cursor.borrow_mut() = Some(cursor);
+                        }
                     }
                 }
                 Status::Stats {
@@ -1242,13 +1253,22 @@ fn poll_status(ui: Rc<App>, s: Rc<Session>, rx: Receiver<Status>, generation: u6
 /// compositor draws it at the real pointer position with no added latency.
 /// An image with no visible shape (fully transparent, or one flat colour as
 /// Hyprland sends when it has no cursor image to share) falls back to the
-/// default pointer so the user is never left without one.
+/// default pointer — except on a headless session, whose frames already
+/// carry the compositor-drawn cursor and would show two pointers.
 fn set_remote_cursor(ui: &App, s: &Rc<Session>, image: CursorImage) {
-    let cursor = remote_cursor(image);
+    let cursor = remote_cursor(image).or_else(|| s.headless.get().then(hidden_cursor));
     if is_active(ui, s) {
         ui.video.set_cursor(cursor.as_ref());
     }
     *s.cursor.borrow_mut() = cursor;
+}
+
+/// A fully transparent 1×1 cursor: the compositor shows nothing for the
+/// local pointer while the video carries the remote one.
+fn hidden_cursor() -> gdk::Cursor {
+    let bytes = glib::Bytes::from_owned(vec![0u8; 4]);
+    let texture = gdk::MemoryTexture::new(1, 1, gdk::MemoryFormat::B8g8r8a8, &bytes, 4);
+    gdk::Cursor::from_texture(&texture, 0, 0, None)
 }
 
 struct CursorImage<'a> {
@@ -1685,6 +1705,17 @@ fn install_input_handlers(
 
     // While the video has focus, route system shortcuts (Super, Alt-Tab, ...)
     // to the remote session instead of the local compositor.
+    // The compositor answers asynchronously, and may refuse.
+    window.connect_realize(|window| {
+        if let Some(toplevel) = window.surface().and_downcast::<gdk::Toplevel>() {
+            toplevel.connect_shortcuts_inhibited_notify(|t| {
+                tracing::info!(
+                    inhibited = t.is_shortcuts_inhibited(),
+                    "compositor shortcut inhibit"
+                );
+            });
+        }
+    });
     let focus = gtk::EventControllerFocus::new();
     {
         let window = window.clone();
@@ -1697,13 +1728,6 @@ fn install_input_handlers(
             tracing::debug!("video focused; inhibiting system shortcuts");
             if let Some(toplevel) = window.surface().and_downcast::<gdk::Toplevel>() {
                 toplevel.inhibit_system_shortcuts(None::<&gdk::Event>);
-                // The compositor answers asynchronously, and may refuse.
-                toplevel.connect_shortcuts_inhibited_notify(|t| {
-                    tracing::info!(
-                        inhibited = t.is_shortcuts_inhibited(),
-                        "compositor shortcut inhibit"
-                    );
-                });
             }
             if let Some(hint) = &hint {
                 if !ui.capture_hinted.replace(true) {

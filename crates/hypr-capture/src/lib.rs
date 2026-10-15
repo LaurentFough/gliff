@@ -1,8 +1,7 @@
 //! Screen and cursor capture from Hyprland through `ext-image-copy-capture-v1`
 //! into GBM-allocated dmabufs, or wl_shm buffers when the compositor offers
-//! no linear dmabuf the CPU could map (NVIDIA) and the caller opts in, or no
-//! dmabuf at all, or there is no render node to allocate on (Hyper-V guests),
-//! or GBM cannot allocate on it (QEMU guests without virgl).
+//! no linear dmabuf the CPU could map (NVIDIA), or no dmabuf at all, or there
+//! is no render node to allocate on (Hyper-V guests).
 //!
 //! The capture runs on its own thread with a `calloop` loop; the owner sends
 //! commands through [`Capturer`] and receives [`CaptureEvent`]s through a
@@ -56,13 +55,57 @@ pub struct Rect {
     pub height: i32,
 }
 
+/// What the capture ring is made of, from `--capture` or `GLIFF_CAPTURE`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CaptureMode {
+    /// GBM dmabufs, dropping to wl_shm when the compositor offers no dmabuf,
+    /// the render node cannot be opened or allocated on, or (with
+    /// `prefer_linear` and `shm_fallback`) no format is linear.
+    #[default]
+    Auto,
+    /// dmabufs only: no wl_shm fallback of any kind.
+    Dmabuf,
+    /// wl_shm only, without touching the render node: the compositor reads
+    /// each frame back for us. For a dmabuf that allocates but is never
+    /// filled (QEMU virtio-gpu with virgl, a GPU the compositor does not
+    /// render on). Only the CPU video pipeline can read these frames.
+    Shm,
+}
+
+impl CaptureMode {
+    /// `auto`, `dmabuf` or `shm` from the CLI, else `GLIFF_CAPTURE`, else
+    /// `Auto`.
+    pub fn resolve(cli: Option<&str>) -> Self {
+        let parse = |s: &str, from: &str| match s {
+            "auto" => Some(Self::Auto),
+            "dmabuf" => Some(Self::Dmabuf),
+            "shm" => Some(Self::Shm),
+            other => {
+                tracing::warn!(
+                    value = other,
+                    "{from} is not `auto`, `dmabuf` or `shm`; ignoring"
+                );
+                None
+            }
+        };
+        if let Some(mode) = cli.and_then(|s| parse(s, "--capture")) {
+            return mode;
+        }
+        std::env::var("GLIFF_CAPTURE")
+            .ok()
+            .and_then(|s| parse(&s, "GLIFF_CAPTURE"))
+            .unwrap_or_default()
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct CaptureConfig {
     pub target: Target,
     /// Output name, e.g. `HDMI-A-1` or `HEADLESS-2`.
     pub output: String,
-    /// GBM device for dmabufs; when it cannot be opened, or cannot allocate
-    /// the ring, capture uses wl_shm.
+    /// What the ring is made of; see [`CaptureMode`].
+    pub mode: CaptureMode,
+    /// GBM device for dmabufs; when it cannot be opened capture uses wl_shm.
     pub render_node: PathBuf,
     /// Ring size; 3 keeps one frame in flight while one is consumed.
     pub buffers: usize,
@@ -91,6 +134,7 @@ impl CaptureConfig {
         Self {
             target: Target::default(),
             output: output.into(),
+            mode: CaptureMode::Auto,
             render_node: render_node(None),
             buffers: 3,
             prefer_linear: true,
@@ -175,7 +219,16 @@ impl CaptureBuffer {
         let mapped = bo
             .map(&device, 0, 0, w, h, |m| f(m.buffer(), m.stride()))
             .map_err(|_| Error::Gbm("buffer belongs to another device".into()))?
-            .map_err(|e| Error::Gbm(format!("map: {e}")))?;
+            .map_err(|e| {
+                // Which modifier refused the map is the useful part, and some
+                // drivers fail without setting errno, where `{e}` reads
+                // "Success".
+                let why = match e.raw_os_error() {
+                    Some(0) | None => "the driver refused it".to_string(),
+                    _ => e.to_string(),
+                };
+                Error::Gbm(format!("map: {why} (modifier {:#x})", self.info.modifier))
+            })?;
         Ok(mapped)
     }
 
@@ -349,6 +402,14 @@ impl Capturer {
             .map_err(|_| Error::ThreadGone)
     }
 
+    /// Capture subsequent frames into shared memory for CPU encoding.
+    /// Outstanding dmabuf frames may still arrive; callers must discard them.
+    pub fn use_shm(&self) -> Result<()> {
+        self.cmd
+            .send(thread::Cmd::UseShm)
+            .map_err(|_| Error::ThreadGone)
+    }
+
     pub fn stop(&self) {
         let _ = self.cmd.send(thread::Cmd::Stop);
     }
@@ -368,13 +429,16 @@ pub fn list_outputs(target: &Target) -> Result<Vec<OutputInfo>> {
     thread::list_outputs(target)
 }
 
-/// Protocol names the capture path needs, for probing.
+/// Protocol names the capture path needs, for probing. The ring also needs
+/// one of [`BUFFER_GLOBALS`].
 pub const REQUIRED_GLOBALS: &[&str] = &[
     "ext_output_image_capture_source_manager_v1",
     "ext_image_copy_capture_manager_v1",
-    "zwp_linux_dmabuf_v1",
 ];
 
+/// Protocol names a capture ring can be made of: dmabufs, or wl_shm where
+/// the compositor offers no dmabuf or `CaptureMode::Shm` asks for it.
+pub const BUFFER_GLOBALS: &[&str] = &["zwp_linux_dmabuf_v1", "wl_shm"];
 #[cfg(test)]
 mod tests {
     use super::*;

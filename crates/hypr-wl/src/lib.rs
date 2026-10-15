@@ -18,7 +18,7 @@ use wayland_client::{Connection, Dispatch, EventQueue, Proxy, QueueHandle};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    #[error("XDG_RUNTIME_DIR is not set")]
+    #[error("XDG_RUNTIME_DIR is not set and /run/user/<uid> does not exist")]
     NoRuntimeDir,
     #[error("no Wayland display: set WAYLAND_DISPLAY or run inside Hyprland ({0})")]
     NoDisplay(String),
@@ -91,8 +91,8 @@ pub fn connect(target: &Target) -> Result<Connection> {
     let path = if display.starts_with('/') {
         PathBuf::from(display)
     } else {
-        let dir = std::env::var_os("XDG_RUNTIME_DIR").ok_or(Error::NoRuntimeDir)?;
-        PathBuf::from(dir).join(display)
+        let dir = hypr_ipc::runtime_dir().map_err(|_| Error::NoRuntimeDir)?;
+        dir.join(display)
     };
     let stream = UnixStream::connect(&path).map_err(|e| Error::Connect(path.clone(), e))?;
     tracing::debug!(path = %path.display(), "connected to compositor");

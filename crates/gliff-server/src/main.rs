@@ -62,6 +62,14 @@ struct Cli {
     /// a single 4:2:0 stream to halve the encode work.
     #[arg(long)]
     full_chroma: bool,
+    /// Capture buffers: `auto` (dmabufs, falling back to wl_shm when the
+    /// compositor offers no dmabuf or the render node cannot allocate),
+    /// `dmabuf` (never wl_shm) or `shm` (the compositor reads each frame back
+    /// into wl_shm; for a dmabuf that allocates but is never filled, such as
+    /// a VM's virtio-gpu, and takes the CPU video pipeline). Overrides the
+    /// GLIFF_CAPTURE environment variable.
+    #[arg(long, value_parser = ["auto", "dmabuf", "shm"])]
+    capture: Option<String>,
 }
 
 fn main() -> Result<()> {
@@ -92,6 +100,7 @@ fn main() -> Result<()> {
         bitrate: cli.bitrate,
         video: gliff_sw::VideoMode::resolve(cli.video.as_deref()),
         full_chroma: cli.full_chroma,
+        capture: hypr_capture::CaptureMode::resolve(cli.capture.as_deref()),
     };
 
     let rt = tokio::runtime::Builder::new_current_thread()
