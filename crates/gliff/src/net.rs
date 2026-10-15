@@ -31,6 +31,8 @@ use crate::keymap::{Keymap, FIRST_KEYMAP_WAIT};
 /// size, and the effective scale x1000.
 type Geometry = ((u32, u32), (u32, u32), u32);
 
+const MAX_STREAM: (u32, u32) = (3840, 2160);
+
 /// A decoded frame with the geometry it was configured under, so the UI
 /// never paints a frame with another configuration's view or scale (frames
 /// and statuses travel on separate channels).
@@ -220,6 +222,7 @@ fn new_decoder(
     width: u32,
     height: u32,
 ) -> anyhow::Result<VideoDecoder> {
+    validate_stream_size(width, height)?;
     let dual = chroma != ChromaMode::Single420;
     if let Some(gpu) = gpu {
         match Decoder::new(gpu, dual, width, height) {
@@ -270,8 +273,8 @@ where
     let gpu = open_gpu(video);
     let caps = ClientCaps {
         codecs: vec![Codec::H264],
-        max_width: 3840,
-        max_height: 2160,
+        max_width: MAX_STREAM.0,
+        max_height: MAX_STREAM.1,
         // The CPU tier asks for one 4:2:0 stream so it decodes one stream,
         // not two; the recombine also costs CPU on this side.
         chroma: if gpu.is_some() {
@@ -666,6 +669,7 @@ where
                 fps_cap: f,
                 ..
             } => {
+                validate_stream_size(w, h)?;
                 // A pace-only change (fps cap) must not reset the decoder;
                 // a coded-stream change does, and drops the frame waiting
                 // for the UI with it.
@@ -757,4 +761,31 @@ fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+
+fn validate_stream_size(width: u32, height: u32) -> anyhow::Result<()> {
+    anyhow::ensure!(width > 0 && height > 0 && width <= MAX_STREAM.0 && height <= MAX_STREAM.1
+        && width.is_multiple_of(2) && height.is_multiple_of(2),
+        "invalid stream dimensions {width}x{height}; expected even dimensions within advertised 3840x2160 limit");
+    Ok(())
+}
+
+#[cfg(test)]
+mod stream_tests {
+    use super::*;
+    #[test]
+    fn reject_invalid_stream_geometry_before_creating_a_decoder() {
+        for size in [
+            (0, 1080),
+            (1920, 0),
+            (3842, 2160),
+            (3840, 2162),
+            (u32::MAX, 2),
+            (1919, 1080),
+        ] {
+            assert!(validate_stream_size(size.0, size.1).is_err());
+        }
+        assert!(validate_stream_size(3840, 2160).is_ok());
+        assert!(validate_stream_size(2, 2).is_ok());
+    }
 }

@@ -230,6 +230,17 @@ impl Encoder {
         plane: &DmabufPlane,
         force_keyframe: bool,
     ) -> Result<EncodedFrame> {
+        self.encode_dmabuf_transformed(key, plane, 0, force_keyframe)
+    }
+
+    /// Encode after undoing the compositor's buffer transform.
+    pub fn encode_dmabuf_transformed(
+        &mut self,
+        key: u64,
+        plane: &DmabufPlane,
+        transform: u32,
+        force_keyframe: bool,
+    ) -> Result<EncodedFrame> {
         if !self.imports.contains_key(&key) {
             // A new capture ring means the old buffers are gone.
             if self.imports.len() >= 8 {
@@ -240,7 +251,7 @@ impl Encoder {
                 .insert(key, Image::import_dmabuf(&self.gpu, plane)?);
         }
         let src = self.imports.remove(&key).expect("inserted above");
-        let result = self.encode_image(&src, force_keyframe);
+        let result = self.encode_image(&src, transform, force_keyframe);
         self.imports.insert(key, src);
         result
     }
@@ -257,10 +268,15 @@ impl Encoder {
                 src.copy_rgba_from_buffer(cmd, &staging);
                 Ok(())
             })?;
-        self.encode_image(&src, force_keyframe)
+        self.encode_image(&src, 0, force_keyframe)
     }
 
-    fn encode_image(&mut self, src: &Image, force_keyframe: bool) -> Result<EncodedFrame> {
+    fn encode_image(
+        &mut self,
+        src: &Image,
+        transform: u32,
+        force_keyframe: bool,
+    ) -> Result<EncodedFrame> {
         let (w, h) = (self.settings.width, self.settings.height);
         let (split, main, aux) = (&self.split, &self.main, self.aux.as_ref());
         // The split blocks until it is done: the encoder reads the surfaces
@@ -275,7 +291,7 @@ impl Encoder {
                 }
                 let main_out = main.shader_output();
                 let aux_out = aux.map(Stream::shader_output);
-                split.record(cmd, src, main_out, aux_out, w, h)?;
+                split.record(cmd, src, main_out, aux_out, (w, h), transform)?;
                 main_out.memory_barrier(cmd);
                 main.record_release(cmd);
                 if let Some(a) = aux {
@@ -713,7 +729,7 @@ pub fn split_into_surface(
         src.transition(cmd, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
         let out = scratch.as_ref().unwrap_or(&target);
         out.transition(cmd, vk::ImageLayout::GENERAL);
-        split.record(cmd, &src, out, None, width, height)?;
+        split.record(cmd, &src, out, None, (width, height), 0)?;
         out.memory_barrier(cmd);
         if let Some(s) = &scratch {
             s.transition(cmd, vk::ImageLayout::TRANSFER_SRC_OPTIMAL);

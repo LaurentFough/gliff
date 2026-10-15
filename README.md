@@ -37,8 +37,8 @@ both ends, and falls back to the CPU on machines where it cannot.
 Install gliff on both machines: your machine runs `gliff`, the remote one
 runs `gliff-server`.
 
-Install gliff from the [Omarchy Package Repository
-(OPR)](https://github.com/omacom/omarchy-pkgs):
+Gliff is currently available on the **edge** channel of the [Omarchy Package
+Repository (OPR)](https://github.com/omacom/omarchy-pkgs):
 
 ```
 omarchy pkg add gliff
@@ -46,11 +46,16 @@ omarchy pkg add gliff
 
 Then open **Gliff** from the app launcher, or run `gliff` in a terminal.
 
-On Arch without the OPR, build and install the package from a checkout:
+If your channel reports `target not found: gliff`, or you use Arch without
+OPR, build and install the package from source:
 
 ```
+git clone https://github.com/omacom/gliff.git
+cd gliff
 bin/install
 ```
+
+This uses the current checkout, including fixes newer than the last release.
 
 To build from source, see [docs/development.md](docs/development.md).
 
@@ -92,6 +97,11 @@ without moving the pointer. `--release-hotkey` changes that key (`ctrl+alt+q`,
 **Clipboard.** Copy on one machine and paste on the other. Nothing is sent
 until you paste. A paste that takes more than a second shows its progress
 with a cancel button. Pasted files are kept in `~/.cache/gliff/clipboard`.
+
+Clipboard sharing trusts every connected host: a host can request the
+advertised clipboard contents without a local paste. Use `gliff --no-clipboard`
+to disable sharing in both directions when connecting to an untrusted host.
+Local selections marked `x-kde-passwordManagerHint` are not shared.
 
 **Slow links.** gliff measures the link and lowers the frame rate, then the
 colour detail, then the resolution, and raises them again when there is

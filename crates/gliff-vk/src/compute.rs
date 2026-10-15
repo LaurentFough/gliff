@@ -18,7 +18,7 @@ struct Push {
     width: i32,
     height: i32,
     has_aux: i32,
-    /// Output pixels per source pixel; only the recombine shader reads it.
+    /// Decoder zoom, or the capture transform for the split shader.
     zoom: i32,
 }
 
@@ -200,7 +200,7 @@ impl Pass {
                 width: width as i32,
                 height: height as i32,
                 has_aux: has_aux as i32,
-                zoom: zoom.max(1) as i32,
+                zoom: zoom as i32,
             };
             let bytes = std::slice::from_raw_parts(
                 (&push as *const Push).cast::<u8>(),
@@ -250,8 +250,8 @@ impl Split {
         src: &Image,
         main: &Image,
         aux: Option<&Image>,
-        width: u32,
-        height: u32,
+        extent: (u32, u32),
+        transform: u32,
     ) -> Result<()> {
         let aux_views = aux
             .map(|a| (a.plane_views[0], a.plane_views[1]))
@@ -264,7 +264,7 @@ impl Split {
             aux_views.1,
         ];
         self.0
-            .dispatch(cmd, &views, width, height, aux.is_some(), 1)
+            .dispatch(cmd, &views, extent.0, extent.1, aux.is_some(), transform)
     }
 }
 
@@ -304,6 +304,6 @@ impl Recombine {
             dst.view0(),
         ];
         self.0
-            .dispatch(cmd, &views, width, height, aux.is_some(), zoom)
+            .dispatch(cmd, &views, width, height, aux.is_some(), zoom.max(1))
     }
 }

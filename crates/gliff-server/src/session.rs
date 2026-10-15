@@ -746,7 +746,7 @@ impl Session {
                 if self.require_shm && !image.buffer.is_shm() {
                     return Ok(ControlFlow::Continue(()));
                 }
-                let size = (image.buffer.info.width & !1, image.buffer.info.height & !1);
+                let size = image.extent();
                 if !self.output.is_headless() && size != (self.output.width, self.output.height) {
                     self.output.width = size.0;
                     self.output.height = size.1;
@@ -898,8 +898,7 @@ impl Session {
     /// size: a mirrored capture keeps output dimensions while its stream is
     /// fitted smaller.
     fn matches_output(&self, frame: &CapturedFrame) -> bool {
-        let info = &frame.buffer.info;
-        (info.width & !1, info.height & !1) == (self.output.width, self.output.height)
+        frame.extent() == (self.output.width, self.output.height)
     }
 
     /// A refinement pass that codes below this many bytes changed nothing
@@ -1071,7 +1070,7 @@ impl Session {
     /// later capture-ring allocation falls back to shared memory.
     fn fall_back_to_cpu(&mut self) -> Result<()> {
         self.video = VideoTier::Cpu;
-        self.encoder_max = gliff_sw::Encoder::MAX_SIZE;
+        self.encoder_max = stream_limit(gliff_sw::Encoder::MAX_SIZE, &self.caps)?;
         self.base_stream =
             EncoderSettings::fit_extent(self.base_stream.0, self.base_stream.1, self.encoder_max);
         let level = self.ladder.level();
@@ -1293,7 +1292,7 @@ impl VideoStart {
         } else {
             ChromaMode::Dual420
         };
-        let encoder_max = video.encoder_max().context("query encoder limits")?;
+        let encoder_max = stream_limit(video.encoder_max().context("query encoder limits")?, caps)?;
         let stream = EncoderSettings::fit_extent(output.width, output.height, encoder_max);
         if stream != (output.width, output.height) {
             tracing::info!(
@@ -1411,11 +1410,16 @@ impl VideoEncoder {
                 // when the ring is reallocated (resize), so old imports are
                 // never reused.
                 let buffer_key = (frame.buffer.generation << 32) | frame.buffer.index as u64;
-                Ok(enc.encode_dmabuf(buffer_key, &plane, force_keyframe)?)
+                Ok(enc.encode_dmabuf_transformed(
+                    buffer_key,
+                    &plane,
+                    frame.transform,
+                    force_keyframe,
+                )?)
             }
             Self::Cpu(enc) => {
                 let t0 = Instant::now();
-                let image = frame.buffer.read_bgra()?;
+                let image = frame.read_bgra()?;
                 tracing::debug!(
                     read_us = t0.elapsed().as_micros(),
                     "read the captured frame"
@@ -1538,8 +1542,16 @@ fn setup_output(
         .with_context(|| format!("no output {name}"))?;
         return Ok(SessionOutput {
             name: m.name.clone(),
-            width: m.width & !1,
-            height: m.height & !1,
+            width: if m.transform & 1 != 0 {
+                m.height
+            } else {
+                m.width
+            } & !1,
+            height: if m.transform & 1 != 0 {
+                m.width
+            } else {
+                m.height
+            } & !1,
             scale: m.scale,
             headless: None,
         });
@@ -1652,4 +1664,38 @@ fn start_input(target: &Target, output: &str, keymap: &str) -> Result<Input> {
     ic.keymap = (!keymap.is_empty()).then(|| keymap.to_string());
     tracing::debug!(bytes = keymap.len(), "client keymap");
     Ok(Input::start(ic, Box::new(|_| {}))?)
+}
+
+fn stream_limit(encoder: (u32, u32), caps: &ClientCaps) -> Result<(u32, u32)> {
+    let limit = (
+        encoder.0.min(caps.max_width),
+        encoder.1.min(caps.max_height),
+    );
+    anyhow::ensure!(
+        limit.0 >= 2 && limit.1 >= 2,
+        "client has no usable stream dimensions"
+    );
+    Ok(limit)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn initial_stream_respects_client_limits_before_first_resize() {
+        let caps = ClientCaps {
+            max_width: 3840,
+            max_height: 2160,
+            codecs: vec![Codec::H264],
+            chroma: vec![ChromaMode::Single420],
+            features: vec![],
+        };
+        let limit = stream_limit((4096, 4096), &caps).unwrap();
+        assert_eq!(EncoderSettings::fit_extent(5120, 1440, limit), (3840, 1080));
+        let bad = ClientCaps {
+            max_width: 0,
+            ..caps
+        };
+        assert!(stream_limit((4096, 4096), &bad).is_err());
+    }
 }
