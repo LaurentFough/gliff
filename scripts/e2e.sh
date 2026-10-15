@@ -166,39 +166,57 @@ grep -q "CLIP-RECV: e2e-clip-in" "$clipf" || fail "compositor->client clipboard 
 rm -f "$clipf"
 echo "   clipboard both directions PASS"
 
-echo "== 7. mirrored output resize =="
-set_monitor() { hyprctl eval "hl.monitor({ output = \"$1\", mode = \"$2\", position = \"auto\", scale = 1 })" >/dev/null 2>&1; }
-hyprctl output create headless e2emirror >/dev/null 2>&1
-sleep 1
-mirror=$(hyprctl monitors -j | python3 -c "import sys,json; print(next(m['name'] for m in json.load(sys.stdin) if 'e2emirror' in m['name']))")
-set_monitor "$mirror" 1280x800@60
-sleep 1
-"$SERVER" --listen 127.0.0.1:9043 --output "$mirror" --instance "$NEST_SIG" >/tmp/gliff-e2e-mirror-server.log 2>&1 &
-msp=$!; PIDS+=("$msp"); sleep 1
-damage & mdp=$!; PIDS+=("$mdp")
-mirror_log=$(mktemp)
-timeout 30 "$PROBE" --video "$CLIENT_VIDEO" serve-test --connect 127.0.0.1:9043 --frames 30 >"$mirror_log" 2>&1 &
-mcp=$!; PIDS+=("$mcp")
-wait_for_mirror() {
-    local pattern=$1
-    for ((attempt = 0; attempt < 100; attempt++)); do
-        grep -q "$pattern" "$mirror_log" && return 0
-        kill -0 "$mcp" 2>/dev/null || break
-        sleep 0.1
-    done
-    fail "mirror resize: missing '$pattern' (log: $mirror_log)"
-}
-wait_for_mirror 'first decoded frame ok'
-set_monitor "$mirror" 640x480@60
-wait_for_mirror 'reconfig to 640x480'
-set_monitor "$mirror" 1024x768@60
-wait_for_mirror 'reconfig to 800x600'
-wait "$mcp" || fail "mirror resize: probe failed (log: $mirror_log)"
-grep -q '^PASS decoded 30 frames' "$mirror_log" || fail "mirror resize: frames stopped (log: $mirror_log)"
-grep -q '^FAIL' "$mirror_log" && fail "mirror resize: failed assertion (log: $mirror_log)"
-kill "$mdp" "$msp" 2>/dev/null
-hyprctl output remove "$mirror" >/dev/null 2>&1
-echo "   mirrored output resize PASS"
+echo "== 7. mirrored output resize and mid-session CPU fallback =="
+resize_cases=(dmabuf)
+if [ "$HAS_GPU" = 1 ]; then
+    fallback_shim=$(mktemp --suffix=.so)
+    cc -shared -fPIC -Wall -Wextra -Werror scripts/test-fixtures/fail-gbm-allocation.c \
+        -o "$fallback_shim" $(pkg-config --cflags gbm) -ldl || fail "build GBM failure fixture"
+    resize_cases+=(shm-fallback)
+fi
+for resize_case in "${resize_cases[@]}"; do
+    set_monitor() { hyprctl eval "hl.monitor({ output = \"$1\", mode = \"$2\", position = \"auto\", scale = 1 })" >/dev/null 2>&1; }
+    hyprctl output create headless e2emirror >/dev/null 2>&1
+    sleep 1
+    mirror=$(hyprctl monitors -j | python3 -c "import sys,json; print(next(m['name'] for m in json.load(sys.stdin) if 'e2emirror' in m['name']))")
+    set_monitor "$mirror" 1280x800@60
+    sleep 1
+    server_env=()
+    if [ "$resize_case" = shm-fallback ]; then
+        server_env=("LD_PRELOAD=$fallback_shim")
+    fi
+    env RUST_LOG=info "${server_env[@]}" "$SERVER" --listen 127.0.0.1:9043 --output "$mirror" --instance "$NEST_SIG" >/tmp/gliff-e2e-mirror-server.log 2>&1 &
+    msp=$!; PIDS+=("$msp"); sleep 1
+    damage & mdp=$!; PIDS+=("$mdp")
+    mirror_log=$(mktemp)
+    timeout 30 "$PROBE" --video "$CLIENT_VIDEO" serve-test --connect 127.0.0.1:9043 --frames 30 >"$mirror_log" 2>&1 &
+    mcp=$!; PIDS+=("$mcp")
+    wait_for_mirror() {
+        local pattern=$1
+        for ((attempt = 0; attempt < 100; attempt++)); do
+            grep -q "$pattern" "$mirror_log" && return 0
+            kill -0 "$mcp" 2>/dev/null || break
+            sleep 0.1
+        done
+        fail "mirror resize: missing '$pattern' (log: $mirror_log)"
+    }
+    wait_for_mirror 'first decoded frame ok'
+    set_monitor "$mirror" 640x480@60
+    wait_for_mirror 'reconfig to 640x480'
+    set_monitor "$mirror" 1024x768@60
+    wait_for_mirror 'reconfig to 800x600'
+    wait "$mcp" || fail "mirror resize: probe failed (log: $mirror_log)"
+    grep -q '^PASS decoded 30 frames' "$mirror_log" || fail "mirror resize: frames stopped (log: $mirror_log)"
+    grep -q '^FAIL' "$mirror_log" && fail "mirror resize: failed assertion (log: $mirror_log)"
+    kill "$mdp" "$msp" 2>/dev/null
+    hyprctl output remove "$mirror" >/dev/null 2>&1
+    if [ "$resize_case" = shm-fallback ]; then
+        grep -q "using the GPU video pipeline" /tmp/gliff-e2e-mirror-server.log || fail "fallback test did not start on GPU"
+        grep -q "capture fell back to wl_shm; falling back to the CPU pipeline" /tmp/gliff-e2e-mirror-server.log || fail "resize did not switch to CPU"
+        rm -f "$fallback_shim"
+    fi
+    echo "   mirrored output resize ($resize_case) PASS"
+done
 
 echo "== 8. binary clipboard both directions (1 MiB, chunked) =="
 blob=$(mktemp); head -c 1048576 /dev/urandom >"$blob"

@@ -197,6 +197,8 @@ impl CaptureBuffer {
     }
 
     /// Map the whole buffer for CPU reads and run `f(pixels, stride_bytes)`.
+    /// A wl_shm buffer is read into a temporary copy first; `read_bgra` reads
+    /// it directly instead.
     pub fn with_mapped<R>(&self, f: impl FnOnce(&[u8], u32) -> R) -> Result<R> {
         let (bo, device) = match &self.backing {
             Backing::Gbm { bo, device } => (bo, device),
@@ -240,28 +242,64 @@ impl CaptureBuffer {
             DrmFourcc::try_from(self.info.fourcc),
             Ok(DrmFourcc::Xrgb8888 | DrmFourcc::Argb8888)
         );
-        let pixels = self.with_mapped(|mapped, stride| {
-            let mut out = vec![0u8; width * height * 4];
-            for (dst, src) in out
-                .chunks_exact_mut(width * 4)
-                .zip(mapped.chunks(stride as usize))
-            {
-                if bgra_in_memory {
-                    dst.copy_from_slice(&src[..width * 4]);
-                } else {
-                    for (d, p) in dst.chunks_exact_mut(4).zip(src.chunks_exact(4)) {
-                        d.copy_from_slice(&[p[2], p[1], p[0], p[3]]);
+        let pixels = match &self.backing {
+            Backing::Shm(file) => {
+                let stride = self.info.planes[0].stride;
+                read_shm_bgra(file, stride, width, height, bgra_in_memory)?
+            }
+            Backing::Gbm { .. } => self.with_mapped(|mapped, stride| {
+                let mut out = vec![0u8; width * height * 4];
+                for (dst, src) in out
+                    .chunks_exact_mut(width * 4)
+                    .zip(mapped.chunks(stride as usize))
+                {
+                    if bgra_in_memory {
+                        dst.copy_from_slice(&src[..width * 4]);
+                    } else {
+                        for (d, p) in dst.chunks_exact_mut(4).zip(src.chunks_exact(4)) {
+                            d.copy_from_slice(&[p[2], p[1], p[0], p[3]]);
+                        }
                     }
                 }
-            }
-            out
-        })?;
+                out
+            })?,
+        };
         Ok(BgraImage {
             width,
             height,
             pixels,
         })
     }
+}
+
+/// Read the top-left `width`x`height` of a wl_shm frame straight from the
+/// memfd into packed rows: one copy, where `with_mapped` would read the whole
+/// buffer first. RGBA layouts are swizzled in place afterwards.
+fn read_shm_bgra(
+    file: &File,
+    stride: u32,
+    width: usize,
+    height: usize,
+    bgra_in_memory: bool,
+) -> Result<Vec<u8>> {
+    let row = width * 4;
+    let mut out = vec![0u8; row * height];
+    if out.is_empty() {
+        return Ok(out);
+    }
+    if stride as usize == row {
+        file.read_exact_at(&mut out, 0)?;
+    } else {
+        for (y, dst) in out.chunks_exact_mut(row).enumerate() {
+            file.read_exact_at(dst, y as u64 * u64::from(stride))?;
+        }
+    }
+    if !bgra_in_memory {
+        for p in out.chunks_exact_mut(4) {
+            p.swap(0, 2);
+        }
+    }
+    Ok(out)
 }
 
 /// Packed BGRA pixels, `width * 4` bytes per row.
@@ -401,3 +439,53 @@ pub const REQUIRED_GLOBALS: &[&str] = &[
 /// Protocol names a capture ring can be made of: dmabufs, or wl_shm where
 /// the compositor offers no dmabuf or `CaptureMode::Shm` asks for it.
 pub const BUFFER_GLOBALS: &[&str] = &["zwp_linux_dmabuf_v1", "wl_shm"];
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nix::sys::memfd::{memfd_create, MFdFlags};
+
+    /// A memfd holding `rows` rows of `stride` bytes, each pixel `[x, y, 0x7f, 0xff]`.
+    fn frame(stride: usize, rows: usize) -> File {
+        let file = File::from(memfd_create(c"gliff-test", MFdFlags::MFD_CLOEXEC).unwrap());
+        let mut bytes = vec![0u8; stride * rows];
+        for (y, row) in bytes.chunks_exact_mut(stride).enumerate() {
+            for (x, p) in row.chunks_exact_mut(4).enumerate() {
+                p.copy_from_slice(&[x as u8, y as u8, 0x7f, 0xff]);
+            }
+        }
+        file.write_all_at(&bytes, 0).unwrap();
+        file
+    }
+
+    #[test]
+    fn shm_read_copies_packed_rows() {
+        let out = read_shm_bgra(&frame(16, 2), 16, 4, 2, true).unwrap();
+        assert_eq!(out.len(), 4 * 2 * 4);
+        assert_eq!(&out[..4], &[0, 0, 0x7f, 0xff]);
+        assert_eq!(&out[out.len() - 4..], &[3, 1, 0x7f, 0xff]);
+    }
+
+    #[test]
+    fn shm_read_crops_each_row_to_the_width() {
+        // An odd output is cropped to an even width: the stride keeps the
+        // extra pixel, which must not end up in the packed rows.
+        let out = read_shm_bgra(&frame(12, 2), 12, 2, 2, true).unwrap();
+        assert_eq!(
+            out,
+            [0, 0, 0x7f, 0xff, 1, 0, 0x7f, 0xff, 0, 1, 0x7f, 0xff, 1, 1, 0x7f, 0xff]
+        );
+    }
+
+    #[test]
+    fn shm_read_swizzles_rgba_into_bgra() {
+        let out = read_shm_bgra(&frame(8, 1), 8, 2, 1, false).unwrap();
+        assert_eq!(out, [0x7f, 0, 0, 0xff, 0x7f, 0, 1, 0xff]);
+    }
+
+    #[test]
+    fn shm_read_of_an_empty_image_is_empty() {
+        assert!(read_shm_bgra(&frame(8, 1), 8, 0, 1, true)
+            .unwrap()
+            .is_empty());
+    }
+}

@@ -255,6 +255,13 @@ same path. Note that an idle output renders no new frame, so `gliff-probe
 capture` on a static screen can time out where the server, which keeps
 requesting, gets frames; a headless output renders reliably.
 
+If a later resize makes GBM allocation fail, capture can switch to wl_shm
+mid-session. The server then switches from GPU to CPU encoding, refits the
+stream to the CPU encoder's limits, and sends a new StreamConfig before
+resuming with a keyframe. A failed first GPU encode also switches capture
+to wl_shm and waits for a fresh frame, rather than trying to map the failed
+GPU buffer on the CPU.
+
 ## Known limitations recorded from code review (not yet fixed)
 
 - **Instance discovery tie-break.** `hypr-ipc` picks the newest instance

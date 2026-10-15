@@ -1066,6 +1066,50 @@ impl Session {
         self.encoder.set_rate(bitrate, self.fps_cmd, vbv);
     }
 
+    /// Refit the stream for CPU encoding and notify the client before its
+    /// first CPU frame. Used both for a failed first GPU encode and when a
+    /// later capture-ring allocation falls back to shared memory.
+    fn fall_back_to_cpu(&mut self) -> Result<()> {
+        self.video = VideoTier::Cpu;
+        self.encoder_max = gliff_sw::Encoder::MAX_SIZE;
+        self.base_stream =
+            EncoderSettings::fit_extent(self.base_stream.0, self.base_stream.1, self.encoder_max);
+        let level = self.ladder.level();
+        self.stream = EncoderSettings::fit_extent(
+            ((self.base_stream.0 as f32 * level.scale) as u32).max(2) & !1,
+            ((self.base_stream.1 as f32 * level.scale) as u32).max(2) & !1,
+            self.encoder_max,
+        );
+        let streams = if self.chroma == ChromaMode::Dual420 {
+            2
+        } else {
+            1
+        };
+        self.ctl.reconfigure(
+            self.stream.0 as u64 * self.stream.1 as u64,
+            streams,
+            MAX_FPS,
+        );
+        self.settings = encoder_settings(
+            self.stream.0,
+            self.stream.1,
+            self.ctl.stream_bitrate(),
+            self.fps_cmd,
+            self.ctl.vbv_ms(self.fps_cmd),
+        );
+        self.encoder = VideoEncoder::new(
+            &self.video,
+            &self.settings,
+            self.chroma == ChromaMode::Dual420,
+        )?;
+        self.encode_us = 0.0;
+        self.want_keyframe = true;
+        self.refines = 0;
+        self.next_refine_at = Instant::now();
+        self.send_config();
+        Ok(())
+    }
+
     /// Encode `frame` and queue it; returns the coded byte count.
     /// `app_limited` marks a send that does not use the capacity we have
     /// (a refinement pass), so it cannot lower the rate estimate.
@@ -1074,6 +1118,12 @@ impl Session {
         frame: &CapturedFrame,
         app_limited: bool,
     ) -> Result<Option<usize>> {
+        // A resize can make GBM allocation fail after GPU encoding has
+        // already succeeded. Switch tiers before importing the shm frame.
+        if frame.buffer.is_shm() && matches!(self.video, VideoTier::Gpu(_)) {
+            tracing::warn!("capture fell back to wl_shm; falling back to the CPU pipeline");
+            self.fall_back_to_cpu()?;
+        }
         let (width, height) = self.stream;
         let key = std::mem::take(&mut self.want_keyframe);
         let t0 = Instant::now();
@@ -1081,41 +1131,7 @@ impl Session {
             Ok(e) => e,
             Err(e) if matches!(self.video, VideoTier::Gpu(_)) && !self.gpu_encoded => {
                 tracing::warn!(error = %format!("{e:#}"), "the first GPU encode failed; falling back to the CPU pipeline");
-                self.video = VideoTier::Cpu;
-                self.encoder_max = gliff_sw::Encoder::MAX_SIZE;
-                self.base_stream = EncoderSettings::fit_extent(
-                    self.base_stream.0,
-                    self.base_stream.1,
-                    self.encoder_max,
-                );
-                let level = self.ladder.level();
-                self.stream = EncoderSettings::fit_extent(
-                    ((self.base_stream.0 as f32 * level.scale) as u32).max(2) & !1,
-                    ((self.base_stream.1 as f32 * level.scale) as u32).max(2) & !1,
-                    self.encoder_max,
-                );
-                let streams = if self.chroma == ChromaMode::Dual420 {
-                    2
-                } else {
-                    1
-                };
-                self.ctl.reconfigure(
-                    self.stream.0 as u64 * self.stream.1 as u64,
-                    streams,
-                    MAX_FPS,
-                );
-                self.settings = encoder_settings(
-                    self.stream.0,
-                    self.stream.1,
-                    self.ctl.stream_bitrate(),
-                    self.fps_cmd,
-                    self.ctl.vbv_ms(self.fps_cmd),
-                );
-                self.encoder = VideoEncoder::new(
-                    &self.video,
-                    &self.settings,
-                    self.chroma == ChromaMode::Dual420,
-                )?;
+                self.fall_back_to_cpu()?;
                 // A tiled NVIDIA dmabuf cannot be read by the CPU. Replace
                 // the capture ring and wait for a fresh shared-memory frame.
                 self.require_shm = true;
@@ -1126,7 +1142,6 @@ impl Session {
                 self.encode_us = 0.0;
                 self.capturer.use_shm()?;
                 self.capture_asked = true;
-                self.send_config();
                 return Ok(None);
             }
             Err(e) => return Err(e),
