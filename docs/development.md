@@ -119,11 +119,24 @@ entry and the icon from `pkgbuild/`.
 The version is set in one place, `[workspace.package]` in `Cargo.toml`;
 `pkgbuild/PKGBUILD` reads it from there.
 
-1. Set the version in `Cargo.toml`, then run `cargo build` to update
-   `Cargo.lock`.
-2. Commit the two files as "Release gliff 0.2.0".
-3. Tag the commit `v0.2.0` and push the commit and the tag.
+1. Set the next version in `Cargo.toml`, then run `cargo check --workspace`
+   to update `Cargo.lock`.
+2. Run `scripts/check.sh`. For video changes, also run `scripts/e2e.sh`
+   inside a Hyprland session before releasing.
+3. Commit `Cargo.toml` and `Cargo.lock` as "Release gliff X.Y.Z", tag that
+   commit `vX.Y.Z`, and push the commit and tag to `origin`.
 
-CI checks that the tag matches the version, runs the checks, and publishes
-the GitHub release. The Omarchy Package Repository watches the tags and
-opens the pull request that updates its recipe.
+The tag starts `.github/workflows/ci.yml`. Only after formatting, Clippy,
+and tests pass does CI check that the tag matches the workspace version and
+publish a GitHub release with generated notes. Review and edit those notes
+on GitHub to describe the changes users will notice.
+
+The Omarchy Package Repository watches Gliff's `v*` tags. Its hourly
+unattended update workflow opens a package update PR, builds and tests the
+package for x86_64 and aarch64, and auto-merges it after the required checks
+pass. That merge starts package publishing. No manual version bump in
+`omarchy-pkgs` is needed for a normal release.
+
+Verify that the tagged CI run and GitHub release succeeded, then check the
+package update PR and publishing run in `omacom/omarchy-pkgs`. A green
+source release alone does not mean the package has finished publishing.
