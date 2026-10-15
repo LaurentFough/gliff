@@ -178,6 +178,11 @@ struct Session {
 }
 
 impl Session {
+    fn reset_resize(&self) {
+        self.resize_requested.set((0, 0));
+        self.resize_scale.set(0.0);
+    }
+
     fn new(endpoint: Endpoint) -> Self {
         Self {
             name: machine_name(&endpoint).to_string(),
@@ -979,7 +984,7 @@ fn start_session(ui: Rc<App>, s: Rc<Session>) {
     // Replacing the sender closes the old worker's input, which ends it.
     *s.input_tx.borrow_mut() = Some(input_tx);
     s.zoom.set(1);
-    s.resize_requested.set((0, 0));
+    s.reset_resize();
     let generation = s.generation.get() + 1;
     s.generation.set(generation);
     set_status(&ui, &s, "Connecting…");
@@ -1961,6 +1966,17 @@ fn device_scale(ui: &App) -> f64 {
 mod tests {
     use super::*;
     use std::cell::RefCell;
+
+    #[test]
+    fn reconnect_invalidates_the_previous_scale_request() {
+        let s = Session::new(Endpoint::Tcp("127.0.0.1:9070".into()));
+        s.server_view.set((1920, 1080));
+        s.resize_requested.set((1920, 1080));
+        s.resize_scale.set(1.25);
+        s.reset_resize();
+        assert_ne!(s.resize_scale.get(), 1.25);
+        assert_eq!(s.resize_requested.get(), (0, 0));
+    }
 
     #[test]
     fn visible_shape_needs_alpha_and_contrast() {

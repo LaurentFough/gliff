@@ -38,12 +38,27 @@ impl Layout {
 /// pixels on a display of `device` scale. Offsets are snapped to device pixels.
 pub fn layout(view: (u32, u32), device: f64, width: f64, height: f64) -> Option<Layout> {
     let (vw, vh) = (view.0 as f64, view.1 as f64);
-    if vw <= 0.0 || vh <= 0.0 || width <= 0.0 || height <= 0.0 {
+    if vw <= 0.0
+        || vh <= 0.0
+        || width <= 0.0
+        || height <= 0.0
+        || !device.is_finite()
+        || device <= 0.0
+    {
         return None;
     }
-    let device = device.max(1.0);
     let fit = (width * device / vw).min(height * device / vh);
-    let factor = fit;
+    // The smallest even mode gives the compositor's alignment step at this
+    // scale. Allow that much slack plus rounding when preserving exact integer
+    // sampling; fractional scales can require more than ten device pixels.
+    let alignment = hypr_ipc::clean_mode(2, 2, device.clamp(0.5, 4.0) as f32).0;
+    let integer = fit.floor();
+    let slack = (width * device - vw * integer).min(height * device - vh * integer);
+    let factor = if integer >= 1.0 && slack < f64::from(alignment) + 1.0 {
+        integer
+    } else {
+        fit
+    };
     let (fw, fh) = (vw * factor / device, vh * factor / device);
     let snap = |v: f64| (v * device).floor() / device;
     Some(Layout {
@@ -91,11 +106,11 @@ mod imp {
 
     impl PaintableImpl for FramePaintable {
         fn intrinsic_width(&self) -> i32 {
-            (self.view_or_texture().0 as f64 / self.scale.get().max(1.0)).round() as i32
+            (self.view_or_texture().0 as f64 / self.scale.get().max(f64::EPSILON)).round() as i32
         }
 
         fn intrinsic_height(&self) -> i32 {
-            (self.view_or_texture().1 as f64 / self.scale.get().max(1.0)).round() as i32
+            (self.view_or_texture().1 as f64 / self.scale.get().max(f64::EPSILON)).round() as i32
         }
 
         fn intrinsic_aspect_ratio(&self) -> f64 {
@@ -224,6 +239,35 @@ mod tests {
         assert_eq!((l.width, l.height), (1600.0, 900.0));
         assert_eq!((l.x, l.y), (0.0, 0.0));
         assert_eq!(l.zoom(), 1);
+    }
+
+    #[test]
+    fn nearly_exact_modes_keep_integer_sampling() {
+        for (device, width, height) in [(1.0, 1601.0, 901.0), (1.25, 1287.0, 727.0)] {
+            let l = layout((1600, 900), device, width, height).unwrap();
+            assert_eq!(l.factor, 1.0);
+            assert_eq!(l.width * device, 1600.0);
+            assert_eq!(l.height * device, 900.0);
+        }
+    }
+
+    #[test]
+    fn mode_alignment_slack_tracks_fractional_scale() {
+        for device in [1.125, 1.25, 1.4, 1.75, 1.8, 2.5, 3.875] {
+            let physical = (1410, 796);
+            let view = hypr_ipc::clean_mode(physical.0, physical.1, device as f32);
+            let l = layout(view, device, 1410.5 / device, 796.25 / device).unwrap();
+            assert_eq!(l.factor, 1.0, "scale {device}, view {view:?}");
+        }
+    }
+
+    #[test]
+    fn below_one_scale_preserves_drawing_and_pointer_coordinates() {
+        let device = 0.8;
+        let l = layout((1920, 1080), device, 2400.0, 1350.0).unwrap();
+        assert_eq!((l.width, l.height), (2400.0, 1350.0));
+        assert_eq!(l.width / l.factor * device, 1920.0);
+        assert_eq!(l.height / l.factor * device, 1080.0);
     }
 
     #[test]
