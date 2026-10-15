@@ -51,6 +51,9 @@ struct Cli {
     /// opens with a tab for each machine connected to before, or with the
     /// address bar focused when there are none.
     host: Option<String>,
+    /// Disable clipboard sharing in both directions for every tab.
+    #[arg(long)]
+    no_clipboard: bool,
     /// Dev: connect directly to a `gliff-server --listen` address. Repeat it
     /// to open a tab for each.
     #[arg(long)]
@@ -84,7 +87,7 @@ struct App {
     window: adw::ApplicationWindow,
     /// The picture, upcast; input controllers attach to it and we measure it.
     video: gtk::Widget,
-    /// What the picture shows: the latest frame at an integer scale.
+    /// What the picture shows: the latest frame fitted to the window.
     frame: paintable::FramePaintable,
     stats: gtk::Label,
     /// Centred over the picture while the shown session is not streaming:
@@ -113,6 +116,7 @@ struct App {
     active: RefCell<Option<Rc<Session>>>,
     /// Size of the video widget in device pixels, rounded down to even.
     view_size: Cell<(u32, u32)>,
+    view_scale: Cell<f64>,
     /// Evdev codes currently held on the remote, so they can all be released
     /// when the keyboard is handed back to the local compositor.
     pressed_keys: RefCell<BTreeSet<u32>>,
@@ -163,6 +167,7 @@ struct Session {
     stream_scale: Cell<f32>,
     /// The size last asked of the server, so a pending resize is not repeated.
     resize_requested: Cell<(u32, u32)>,
+    resize_scale: Cell<f64>,
     /// The output zoom last asked of the decoder; a new worker starts at 1.
     zoom: Cell<u32>,
     /// The latest frame and its view, painted when the tab is shown.
@@ -173,6 +178,11 @@ struct Session {
 }
 
 impl Session {
+    fn reset_resize(&self) {
+        self.resize_requested.set((0, 0));
+        self.resize_scale.set(0.0);
+    }
+
     fn new(endpoint: Endpoint) -> Self {
         Self {
             name: machine_name(&endpoint).to_string(),
@@ -190,6 +200,7 @@ impl Session {
             fps_cap: Cell::new(0),
             stream_scale: Cell::new(1.0),
             resize_requested: Cell::new((0, 0)),
+            resize_scale: Cell::new(0.0),
             zoom: Cell::new(1),
             last_frame: RefCell::new(None),
             cursor: RefCell::new(None),
@@ -340,7 +351,7 @@ fn build_ui(app: &adw::Application, cli: &Cli) {
         .build();
 
     // The video is a plain Picture given the whole allocation (Fill); the
-    // paintable places the frame itself at an integer scale, see
+    // paintable fits the frame using the surface device scale, see
     // paintable::layout.
     let picture = gtk::Picture::builder()
         .hexpand(true)
@@ -391,6 +402,7 @@ fn build_ui(app: &adw::Application, cli: &Cli) {
         sessions: RefCell::new(Vec::new()),
         active: RefCell::new(None),
         view_size: Cell::new((0, 0)),
+        view_scale: Cell::new(1.0),
         pressed_keys: RefCell::new(BTreeSet::new()),
         released: Cell::new(false),
         config_path: Config::default_path(),
@@ -452,6 +464,9 @@ fn build_ui(app: &adw::Application, cli: &Cli) {
     {
         let ui = ui.clone();
         clipboard_ui::watch_local(move || {
+            if ui.cli.no_clipboard {
+                return Vec::new();
+            }
             ui.sessions
                 .borrow()
                 .iter()
@@ -823,10 +838,7 @@ fn show_session(ui: &Rc<App>, s: &Rc<Session>) {
     show_status(ui, &s.status.borrow());
     ui.stats.set_text(&s.stats.borrow());
     match &*s.last_frame.borrow() {
-        Some((texture, view)) => {
-            ui.frame
-                .set_frame(texture.clone(), ui.video.scale_factor(), *view)
-        }
+        Some((texture, view)) => ui.frame.set_frame(texture.clone(), device_scale(ui), *view),
         None => ui.frame.clear(),
     }
     ui.video.set_cursor(s.cursor.borrow().as_ref());
@@ -972,7 +984,7 @@ fn start_session(ui: Rc<App>, s: Rc<Session>) {
     // Replacing the sender closes the old worker's input, which ends it.
     *s.input_tx.borrow_mut() = Some(input_tx);
     s.zoom.set(1);
-    s.resize_requested.set((0, 0));
+    s.reset_resize();
     let generation = s.generation.get() + 1;
     s.generation.set(generation);
     set_status(&ui, &s, "Connecting…");
@@ -1062,7 +1074,7 @@ fn poll_frames(ui: Rc<App>, s: Rc<Session>, rx: Receiver<Picture>, generation: u
                     s.stream_scale.set((p.scale_milli.max(1) as f32) / 1000.0);
                     if is_active(&ui, &s) {
                         ui.frame
-                            .set_frame(texture.clone(), ui.video.scale_factor(), p.view);
+                            .set_frame(texture.clone(), device_scale(&ui), p.view);
                     }
                     *s.last_frame.borrow_mut() = Some((texture, p.view));
                 }
@@ -1207,14 +1219,16 @@ fn poll_status(ui: Rc<App>, s: Rc<Session>, rx: Receiver<Status>, generation: u6
                     mime_types,
                     files,
                 } => {
-                    if is_active(&ui, &s) {
+                    if !ui.cli.no_clipboard && is_active(&ui, &s) {
                         if let Some(tx) = s.input_tx.borrow().as_ref() {
                             clipboard_ui::set_remote_offer(tx, serial, mime_types, files);
                         }
                     }
                 }
                 Status::ClipboardRead { mime_type, reply } => {
-                    clipboard_ui::read_local(mime_type, reply)
+                    if !ui.cli.no_clipboard {
+                        clipboard_ui::read_local(mime_type, reply)
+                    }
                 }
                 Status::ClipboardTransfer { id, progress } => {
                     let cancel_via = s.clone();
@@ -1328,13 +1342,13 @@ fn to_remote(ui: &App, x: f64, y: f64) -> (f64, f64) {
     if rw == 0 || rh == 0 {
         return (0.0, 0.0);
     }
-    let device = ui.video.scale_factor().max(1);
+    let device = device_scale(ui);
     let (aw, ah) = (ui.video.width() as f64, ui.video.height() as f64);
     let Some(l) = paintable::layout((vw, vh), device, aw, ah) else {
         return (0.0, 0.0);
     };
-    let vx = (x - l.x) / l.factor * device as f64;
-    let vy = (y - l.y) / l.factor * device as f64;
+    let vx = (x - l.x) / l.factor * device;
+    let vy = (y - l.y) / l.factor * device;
     let px = (vx * rw as f64 / vw as f64).clamp(0.0, rw as f64);
     let py = (vy * rh as f64 / vh as f64).clamp(0.0, rh as f64);
     let scale = s.stream_scale.get().max(0.01) as f64;
@@ -1852,12 +1866,19 @@ fn install_resize_handler(ui: &Rc<App>) {
     // timer sends only once the size has held for 200 ms.
     let ui = ui.clone();
     glib::timeout_add_local(Duration::from_millis(100), move || {
-        let scale = ui.video.scale_factor();
+        let scale = device_scale(&ui);
         ui.frame.set_scale(scale);
         request_zoom(&ui);
-        let (w, h) = (ui.video.width() * scale, ui.video.height() * scale);
-        let size = (w.max(0) as u32 & !1, h.max(0) as u32 & !1);
-        if size != ui.view_size.get() {
+        let (w, h) = (
+            ui.video.width() as f64 * scale,
+            ui.video.height() as f64 * scale,
+        );
+        let size = (
+            w.max(0.0).round() as u32 & !1,
+            h.max(0.0).round() as u32 & !1,
+        );
+        let scale_changed = ui.view_scale.replace(scale) != scale;
+        if size != ui.view_size.get() || scale_changed {
             ui.view_size.set(size);
             let ui = ui.clone();
             glib::timeout_add_local_once(Duration::from_millis(200), move || {
@@ -1881,7 +1902,7 @@ fn request_zoom(ui: &App) {
     if view == (0, 0) {
         view = s.stream_view.get();
     }
-    let device = ui.video.scale_factor().max(1);
+    let device = device_scale(ui);
     let (aw, ah) = (ui.video.width() as f64, ui.video.height() as f64);
     let want = paintable::layout(view, device, aw, ah).map_or(1, |l| l.zoom());
     if want == s.zoom.get() {
@@ -1903,17 +1924,22 @@ fn request_resize(ui: &App) {
         return;
     };
     let size = ui.view_size.get();
-    if size.0 < 64 || size.1 < 64 || size == s.server_view.get() || size == s.resize_requested.get()
+    let scale = device_scale(ui);
+    if size.0 < 64
+        || size.1 < 64
+        || (s.resize_scale.get() == scale
+            && (size == s.server_view.get() || size == s.resize_requested.get()))
     {
         return;
     }
     s.resize_requested.set(size);
+    s.resize_scale.set(scale);
     send_to(
         &s,
         ClientMsg::Resize {
             width: size.0,
             height: size.1,
-            scale: ui.video.scale_factor() as f32,
+            scale: scale as f32,
         },
     );
 }
@@ -1930,10 +1956,27 @@ fn evdev_button(n: u32) -> u32 {
     }
 }
 
+fn device_scale(ui: &App) -> f64 {
+    ui.window
+        .surface()
+        .map_or(ui.video.scale_factor() as f64, |s| s.scale())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::cell::RefCell;
+
+    #[test]
+    fn reconnect_invalidates_the_previous_scale_request() {
+        let s = Session::new(Endpoint::Tcp("127.0.0.1:9070".into()));
+        s.server_view.set((1920, 1080));
+        s.resize_requested.set((1920, 1080));
+        s.resize_scale.set(1.25);
+        s.reset_resize();
+        assert_ne!(s.resize_scale.get(), 1.25);
+        assert_eq!(s.resize_requested.get(), (0, 0));
+    }
 
     #[test]
     fn visible_shape_needs_alpha_and_contrast() {

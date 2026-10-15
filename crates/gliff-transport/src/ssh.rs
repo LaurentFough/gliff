@@ -37,17 +37,7 @@ pub struct SshStream {
 /// asks for low-latency queuing. stderr is inherited so server logs reach the
 /// client's terminal.
 pub fn spawn_ssh(target: &SshTarget) -> std::io::Result<SshStream> {
-    let mut cmd = Command::new("ssh");
-    cmd.arg("-T")
-        .arg("-o")
-        .arg("Compression=no")
-        .arg("-o")
-        .arg("IPQoS=lowdelay")
-        .args(&target.ssh_args)
-        .arg(&target.host)
-        .arg(&target.server_bin)
-        .arg("--stdio")
-        .args(&target.server_args);
+    let mut cmd = ssh_command(target);
     cmd.stdin(std::process::Stdio::piped());
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::inherit());
@@ -60,4 +50,37 @@ pub fn spawn_ssh(target: &SshTarget) -> std::io::Result<SshStream> {
         stdin,
         stdout,
     })
+}
+
+fn ssh_command(target: &SshTarget) -> Command {
+    let mut cmd = Command::new("ssh");
+    cmd.arg("-T")
+        .arg("-o")
+        .arg("Compression=no")
+        .arg("-o")
+        .arg("IPQoS=lowdelay")
+        .args(&target.ssh_args)
+        .arg("--")
+        .arg(&target.host)
+        .arg(&target.server_bin)
+        .arg("--stdio")
+        .args(&target.server_args);
+    cmd
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn host_cannot_supply_ssh_options() {
+        let target = SshTarget::new("-oProxyCommand=touch /tmp/unwanted");
+        let cmd = ssh_command(&target);
+        let args: Vec<_> = cmd
+            .as_std()
+            .get_args()
+            .map(|a| a.to_str().unwrap())
+            .collect();
+        let host = args.iter().position(|a| *a == target.host).unwrap();
+        assert_eq!(args[host - 1], "--");
+    }
 }

@@ -144,6 +144,10 @@ if [ "$HAS_GPU" = 1 ]; then
     run_server_test 9046 "cpu server -> gpu client" gpu --video cpu
 fi
 
+echo "== 5b. sensitive clipboard selections are withheld =="
+cargo test --locked -p gliff clipboard_ui::tests::password_manager_selection_cannot_be_offered_or_read -- --ignored >/tmp/gliff-e2e-sensitive.log 2>&1 || fail "sensitive clipboard selection"
+echo "   sensitive clipboard selection PASS"
+
 echo "== 6. text clipboard both directions =="
 command -v wl-copy >/dev/null && command -v wl-paste >/dev/null || fail "wl-clipboard not installed"
 # The probe offers its item after a few frames and requests the compositor's
@@ -217,6 +221,19 @@ for resize_case in "${resize_cases[@]}"; do
     fi
     echo "   mirrored output resize ($resize_case) PASS"
 done
+
+echo "== 7b. rotated output capture and encoding =="
+hyprctl output create headless e2erotate >/dev/null 2>&1
+sleep 1
+rotated=$(hyprctl monitors -j | python3 -c "import sys,json; print(next(m['name'] for m in json.load(sys.stdin) if 'e2erotate' in m['name']))")
+hyprctl eval "hl.monitor({ output = \"$rotated\", mode = \"1280x800@60\", position = \"auto\", scale = 1, transform = 1 })" >/dev/null
+sleep 1
+$PROBE --video cpu --capture shm --instance "$NEST_SIG" pipeline --output "$rotated" >/tmp/gliff-e2e-rotate-cpu.log 2>&1 || fail "rotated CPU pipeline"
+if [ "$HAS_GPU" = 1 ]; then
+    $PROBE --instance "$NEST_SIG" pipeline --output "$rotated" >/tmp/gliff-e2e-rotate-gpu.log 2>&1 || fail "rotated GPU pipeline"
+fi
+hyprctl output remove "$rotated" >/dev/null 2>&1
+echo "   rotated output CPU/GPU pipelines PASS"
 
 echo "== 8. binary clipboard both directions (1 MiB, chunked) =="
 blob=$(mktemp); head -c 1048576 /dev/urandom >"$blob"

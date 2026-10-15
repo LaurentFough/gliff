@@ -121,6 +121,7 @@ struct State {
     in_flight: Option<(ExtImageCopyCaptureFrameV1, usize)>,
     pending_damage: Vec<Rect>,
     pending_presentation: u64,
+    pending_transform: u32,
     want_frame: bool,
     sequence: u64,
 
@@ -241,6 +242,7 @@ fn run(
         in_flight: None,
         pending_damage: Vec::new(),
         pending_presentation: 0,
+        pending_transform: 0,
         want_frame: false,
         sequence: 0,
         pointer: None,
@@ -872,6 +874,9 @@ impl State {
                 let secs = ((tv_sec_hi as u64) << 32) | tv_sec_lo as u64;
                 self.pending_presentation = secs * 1_000_000_000 + tv_nsec as u64;
             }
+            frame_proto::Event::Transform { transform } => {
+                self.pending_transform = transform.into();
+            }
             frame_proto::Event::Ready => {
                 let (frame, _) = self.in_flight.take().expect("checked above");
                 frame.destroy();
@@ -882,6 +887,7 @@ impl State {
                     damage: std::mem::take(&mut self.pending_damage),
                     presentation_ns: self.pending_presentation,
                     sequence: self.sequence,
+                    transform: self.pending_transform,
                     release: Some(self.cmd_tx.clone()),
                 };
                 self.emit(CaptureEvent::Frame(captured));

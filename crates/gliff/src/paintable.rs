@@ -1,21 +1,6 @@
-//! A paintable that shows a frame at a whole number of device pixels per
-//! stream pixel.
-//!
-//! The server declares a full-quality `view` size in device pixels. When
-//! the widget has room, the frame is drawn at the largest integer factor
-//! that fits (1x, 2x, ...) and centred. The decoder is asked to write its
-//! output at that same factor (pixel replication in the recombine shader,
-//! or on the CPU), so the texture GTK receives is already device sized and
-//! is drawn 1:1 with a plain texture node, which stays pixel-exact. GTK's
-//! own nearest-neighbour scaling is not used: on a HiDPI surface its
-//! renderer draws a scaled texture through an offscreen at logical
-//! resolution, which blurs the result. When the widget is smaller than the
-//! view, the frame shrinks to fit with linear filtering. A stream sent at
-//! reduced resolution (view larger than the texture) is stretched to the
-//! view box either way, so a quality change never moves the picture.
-//!
-//! [`layout`] is the single source of the frame's rectangle; the pointer
-//! mapping and the zoom request in `main.rs` derive from it.
+//! Fit the remote view to the window using the surface's actual device scale.
+//! Integer decoder zoom keeps exact integer enlargement sharp; GTK handles the
+//! remaining fractional fit so mirrored screens fill the available picture area.
 
 use std::cell::{Cell, RefCell};
 
@@ -33,7 +18,7 @@ pub struct Layout {
     pub y: f64,
     pub width: f64,
     pub height: f64,
-    /// Device pixels per view pixel; a whole number when the view fits.
+    /// Device pixels per view pixel.
     pub factor: f64,
 }
 
@@ -50,17 +35,30 @@ impl Layout {
 }
 
 /// Fit a `view` (device pixels) into a widget of `width` x `height` logical
-/// pixels on a display of `device` scale: the largest integer factor that
-/// fits, else a fractional shrink. Offsets are snapped to device pixels so
-/// an integer factor stays pixel-aligned.
-pub fn layout(view: (u32, u32), device: i32, width: f64, height: f64) -> Option<Layout> {
+/// pixels on a display of `device` scale. Offsets are snapped to device pixels.
+pub fn layout(view: (u32, u32), device: f64, width: f64, height: f64) -> Option<Layout> {
     let (vw, vh) = (view.0 as f64, view.1 as f64);
-    if vw <= 0.0 || vh <= 0.0 || width <= 0.0 || height <= 0.0 {
+    if vw <= 0.0
+        || vh <= 0.0
+        || width <= 0.0
+        || height <= 0.0
+        || !device.is_finite()
+        || device <= 0.0
+    {
         return None;
     }
-    let device = device.max(1) as f64;
     let fit = (width * device / vw).min(height * device / vh);
-    let factor = if fit >= 1.0 { fit.floor() } else { fit };
+    // The smallest even mode gives the compositor's alignment step at this
+    // scale. Allow that much slack plus rounding when preserving exact integer
+    // sampling; fractional scales can require more than ten device pixels.
+    let alignment = hypr_ipc::clean_mode(2, 2, device.clamp(0.5, 4.0) as f32).0;
+    let integer = fit.floor();
+    let slack = (width * device - vw * integer).min(height * device - vh * integer);
+    let factor = if integer >= 1.0 && slack < f64::from(alignment) + 1.0 {
+        integer
+    } else {
+        fit
+    };
     let (fw, fh) = (vw * factor / device, vh * factor / device);
     let snap = |v: f64| (v * device).floor() / device;
     Some(Layout {
@@ -78,7 +76,7 @@ mod imp {
     #[derive(Default)]
     pub struct FramePaintable {
         pub texture: RefCell<Option<gdk::Texture>>,
-        pub scale: Cell<i32>,
+        pub scale: Cell<f64>,
         /// The full-quality fit size in device pixels; the texture is
         /// stretched to it when the stream is scaled down.
         pub view: Cell<(u32, u32)>,
@@ -108,11 +106,11 @@ mod imp {
 
     impl PaintableImpl for FramePaintable {
         fn intrinsic_width(&self) -> i32 {
-            self.view_or_texture().0 / self.scale.get().max(1)
+            (self.view_or_texture().0 as f64 / self.scale.get().max(f64::EPSILON)).round() as i32
         }
 
         fn intrinsic_height(&self) -> i32 {
-            self.view_or_texture().1 / self.scale.get().max(1)
+            (self.view_or_texture().1 as f64 / self.scale.get().max(f64::EPSILON)).round() as i32
         }
 
         fn intrinsic_aspect_ratio(&self) -> f64 {
@@ -145,7 +143,7 @@ glib::wrapper! {
 impl Default for FramePaintable {
     fn default() -> Self {
         let p: Self = glib::Object::new();
-        p.imp().scale.set(1);
+        p.imp().scale.set(1.0);
         p
     }
 }
@@ -153,7 +151,7 @@ impl Default for FramePaintable {
 impl FramePaintable {
     /// Show `texture` inside a `view`-sized area (device pixels) on a
     /// display of `scale_factor`.
-    pub fn set_frame(&self, texture: gdk::Texture, scale_factor: i32, view: (u32, u32)) {
+    pub fn set_frame(&self, texture: gdk::Texture, scale_factor: f64, view: (u32, u32)) {
         let imp = self.imp();
         let size_changed = imp.scale.get() != scale_factor || imp.view.get() != view;
         imp.scale.set(scale_factor);
@@ -167,7 +165,7 @@ impl FramePaintable {
 
     /// Follow a display scale change without waiting for a new frame, so
     /// the drawn rectangle and the pointer mapping agree.
-    pub fn set_scale(&self, scale_factor: i32) {
+    pub fn set_scale(&self, scale_factor: f64) {
         let imp = self.imp();
         if imp.scale.get() != scale_factor {
             imp.scale.set(scale_factor);
@@ -193,22 +191,22 @@ mod tests {
 
     #[test]
     fn doubles_when_the_widget_has_room() {
-        let l = layout((2560, 1440), 2, 2560.0, 1440.0).unwrap();
+        let l = layout((2560, 1440), 2.0, 2560.0, 1440.0).unwrap();
         assert_eq!(l.factor, 2.0);
         assert_eq!((l.x, l.y, l.width, l.height), (0.0, 0.0, 2560.0, 1440.0));
     }
 
     #[test]
-    fn drops_to_one_when_two_does_not_fit() {
-        let l = layout((2560, 1440), 2, 2560.0, 1400.0).unwrap();
-        assert_eq!(l.factor, 1.0);
-        assert_eq!((l.width, l.height), (1280.0, 720.0));
-        assert_eq!((l.x, l.y), (640.0, 340.0));
+    fn fits_when_two_does_not_fit() {
+        let l = layout((2560, 1440), 2.0, 2560.0, 1400.0).unwrap();
+        assert!((l.height - 1400.0).abs() < 0.001);
+        assert!((l.width - 2488.888888).abs() < 0.001);
+        assert_eq!(l.y, 0.0);
     }
 
     #[test]
     fn shrinks_fractionally_when_too_small() {
-        let l = layout((2560, 1440), 1, 1280.0, 1000.0).unwrap();
+        let l = layout((2560, 1440), 1.0, 1280.0, 1000.0).unwrap();
         assert_eq!(l.factor, 0.5);
         assert_eq!((l.width, l.height), (1280.0, 720.0));
         assert_eq!((l.x, l.y), (0.0, 140.0));
@@ -216,22 +214,65 @@ mod tests {
 
     #[test]
     fn offsets_snap_to_device_pixels() {
-        let l = layout((1001, 601), 2, 1000.0, 600.0).unwrap();
-        assert_eq!(l.factor, 1.0);
+        let l = layout((1001, 601), 2.0, 1000.0, 600.0).unwrap();
         assert_eq!(l.x * 2.0, (l.x * 2.0).floor());
         assert_eq!(l.y * 2.0, (l.y * 2.0).floor());
     }
 
     #[test]
     fn zoom_is_the_integer_factor_or_one() {
-        assert_eq!(layout((2560, 1440), 2, 2560.0, 1440.0).unwrap().zoom(), 2);
-        assert_eq!(layout((2560, 1440), 2, 2560.0, 1400.0).unwrap().zoom(), 1);
-        assert_eq!(layout((2560, 1440), 1, 1280.0, 1000.0).unwrap().zoom(), 1);
+        assert_eq!(layout((2560, 1440), 2.0, 2560.0, 1440.0).unwrap().zoom(), 2);
+        assert_eq!(layout((2560, 1440), 2.0, 2560.0, 1400.0).unwrap().zoom(), 1);
+        assert_eq!(layout((2560, 1440), 1.0, 1280.0, 1000.0).unwrap().zoom(), 1);
+    }
+
+    #[test]
+    fn ultrawide_mirror_fills_matching_window() {
+        let l = layout((3840, 1080), 1.0, 5120.0, 1440.0).unwrap();
+        assert_eq!((l.width, l.height), (5120.0, 1440.0));
+        assert_eq!((l.x, l.y), (0.0, 0.0));
+    }
+
+    #[test]
+    fn fractional_surface_scale_fills_the_window() {
+        let l = layout((1920, 1080), 1.2, 1600.0, 900.0).unwrap();
+        assert_eq!((l.width, l.height), (1600.0, 900.0));
+        assert_eq!((l.x, l.y), (0.0, 0.0));
+        assert_eq!(l.zoom(), 1);
+    }
+
+    #[test]
+    fn nearly_exact_modes_keep_integer_sampling() {
+        for (device, width, height) in [(1.0, 1601.0, 901.0), (1.25, 1287.0, 727.0)] {
+            let l = layout((1600, 900), device, width, height).unwrap();
+            assert_eq!(l.factor, 1.0);
+            assert_eq!(l.width * device, 1600.0);
+            assert_eq!(l.height * device, 900.0);
+        }
+    }
+
+    #[test]
+    fn mode_alignment_slack_tracks_fractional_scale() {
+        for device in [1.125, 1.25, 1.4, 1.75, 1.8, 2.5, 3.875] {
+            let physical = (1410, 796);
+            let view = hypr_ipc::clean_mode(physical.0, physical.1, device as f32);
+            let l = layout(view, device, 1410.5 / device, 796.25 / device).unwrap();
+            assert_eq!(l.factor, 1.0, "scale {device}, view {view:?}");
+        }
+    }
+
+    #[test]
+    fn below_one_scale_preserves_drawing_and_pointer_coordinates() {
+        let device = 0.8;
+        let l = layout((1920, 1080), device, 2400.0, 1350.0).unwrap();
+        assert_eq!((l.width, l.height), (2400.0, 1350.0));
+        assert_eq!(l.width / l.factor * device, 1920.0);
+        assert_eq!(l.height / l.factor * device, 1080.0);
     }
 
     #[test]
     fn empty_inputs_have_no_layout() {
-        assert!(layout((0, 0), 2, 100.0, 100.0).is_none());
-        assert!(layout((10, 10), 2, 0.0, 100.0).is_none());
+        assert!(layout((0, 0), 2.0, 100.0, 100.0).is_none());
+        assert!(layout((10, 10), 2.0, 0.0, 100.0).is_none());
     }
 }

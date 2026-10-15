@@ -32,6 +32,9 @@ struct Cli {
     /// Dev only: listen on a TCP address (no auth; localhost).
     #[arg(long)]
     listen: Option<String>,
+    /// Allow an unauthenticated development listener on non-loopback addresses.
+    #[arg(long, requires = "listen")]
+    allow_remote: bool,
     /// Mirror an existing output: a name like `DP-1`, or `auto` for the
     /// focused one (the default).
     #[arg(long, conflicts_with = "headless")]
@@ -88,6 +91,7 @@ fn main() -> Result<()> {
         display: None,
         instance: cli.instance.clone(),
     };
+    let render_node = hypr_capture::render_node_for_target(cli.render_node.as_deref(), &target);
     let cfg = session::Config {
         target,
         output: if cli.headless {
@@ -95,7 +99,7 @@ fn main() -> Result<()> {
         } else {
             Some(cli.output.clone().unwrap_or_else(|| "auto".into()))
         },
-        render_node: hypr_capture::render_node(cli.render_node.as_deref()),
+        render_node,
         low_bandwidth: cli.low_bandwidth,
         bitrate: cli.bitrate,
         video: gliff_sw::VideoMode::resolve(cli.video.as_deref()),
@@ -109,7 +113,9 @@ fn main() -> Result<()> {
     let local = tokio::task::LocalSet::new();
     local.block_on(&rt, async move {
         if let Some(addr) = cli.listen {
-            let listener = TcpListener::bind(&addr)
+            let addresses: Vec<_> = tokio::net::lookup_host(&addr).await?.collect();
+            validate_listen_addresses(&addresses, cli.allow_remote)?;
+            let listener = TcpListener::bind(addresses.as_slice())
                 .await
                 .with_context(|| format!("bind {addr}"))?;
             tracing::info!(%addr, "listening (dev mode, no auth)");
@@ -148,4 +154,36 @@ fn assert_stdout_is_free() -> Result<()> {
         anyhow::bail!("--stdio requires stdout to be a pipe (it is a terminal)");
     }
     Ok(())
+}
+
+fn validate_listen_addresses(addresses: &[std::net::SocketAddr], allow_remote: bool) -> Result<()> {
+    anyhow::ensure!(
+        !addresses.is_empty(),
+        "listen address resolved to no addresses"
+    );
+    anyhow::ensure!(allow_remote || addresses.iter().all(|a| a.ip().is_loopback()),
+        "unauthenticated --listen requires a loopback address; use --allow-remote to expose the desktop to the network");
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn development_listener_requires_loopback_or_explicit_opt_in() {
+        for addr in ["0.0.0.0:9000", "[::]:9000", "192.168.1.2:9000"] {
+            let addresses = [addr.parse().unwrap()];
+            assert!(validate_listen_addresses(&addresses, false).is_err());
+            assert!(validate_listen_addresses(&addresses, true).is_ok());
+        }
+        let local = [
+            "127.0.0.1:9000".parse().unwrap(),
+            "[::1]:9000".parse().unwrap(),
+        ];
+        assert!(validate_listen_addresses(&local, false).is_ok());
+        assert!(
+            validate_listen_addresses(&[local[0], "0.0.0.0:9000".parse().unwrap()], false).is_err()
+        );
+        assert!(validate_listen_addresses(&[], false).is_err());
+    }
 }

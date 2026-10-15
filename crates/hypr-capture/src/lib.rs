@@ -11,6 +11,7 @@
 #![forbid(unsafe_code)]
 
 mod cursor;
+mod device;
 mod thread;
 
 use std::fs::File;
@@ -121,11 +122,17 @@ pub struct CaptureConfig {
 
 pub const DEFAULT_RENDER_NODE: &str = "/dev/dri/renderD128";
 
-/// The DRM render node to use: explicit, `GLIFF_RENDER_NODE`, or the default.
+/// The DRM render node to use: explicit, environment, compositor feedback,
+/// then renderD128 for compositors without feedback.
 pub fn render_node(explicit: Option<&std::path::Path>) -> PathBuf {
+    render_node_for_target(explicit, &Target::default())
+}
+
+pub fn render_node_for_target(explicit: Option<&std::path::Path>, target: &Target) -> PathBuf {
     explicit
         .map(std::path::Path::to_path_buf)
         .or_else(|| std::env::var_os("GLIFF_RENDER_NODE").map(PathBuf::from))
+        .or_else(|| device::compositor_render_node(target))
         .unwrap_or_else(|| PathBuf::from(DEFAULT_RENDER_NODE))
 }
 
@@ -135,7 +142,7 @@ impl CaptureConfig {
             target: Target::default(),
             output: output.into(),
             mode: CaptureMode::Auto,
-            render_node: render_node(None),
+            render_node: PathBuf::from(DEFAULT_RENDER_NODE),
             buffers: 3,
             prefer_linear: true,
             shm_fallback: true,
@@ -317,7 +324,59 @@ pub struct CapturedFrame {
     /// Compositor presentation time in nanoseconds (CLOCK_MONOTONIC).
     pub presentation_ns: u64,
     pub sequence: u64,
+    /// Transform applied to buffer contents, as wl_output.transform.
+    pub transform: u32,
     release: Option<Sender<thread::Cmd>>,
+}
+
+impl CapturedFrame {
+    pub fn extent(&self) -> (u32, u32) {
+        let (w, h) = (self.buffer.info.width & !1, self.buffer.info.height & !1);
+        if self.transform & 1 != 0 {
+            (h, w)
+        } else {
+            (w, h)
+        }
+    }
+
+    /// Return pixels in the output's logical orientation.
+    pub fn read_bgra(&self) -> Result<BgraImage> {
+        let mut image = self.buffer.read_bgra()?;
+        image.orient(self.transform);
+        Ok(image)
+    }
+}
+
+impl BgraImage {
+    fn orient(&mut self, transform: u32) {
+        if transform == 0 {
+            return;
+        }
+        let (sw, sh) = (self.width, self.height);
+        let (w, h) = if transform & 1 != 0 {
+            (sh, sw)
+        } else {
+            (sw, sh)
+        };
+        let mut pixels = vec![0; self.pixels.len()];
+        for y in 0..h {
+            for x in 0..w {
+                let fx = if transform & 4 != 0 { w - 1 - x } else { x };
+                let (sx, sy) = match transform & 3 {
+                    1 => (y, sh - 1 - fx),
+                    2 => (sw - 1 - fx, sh - 1 - y),
+                    3 => (sw - 1 - y, fx),
+                    _ => (fx, y),
+                };
+                let src = (sy * sw + sx) * 4;
+                let dst = (y * w + x) * 4;
+                pixels[dst..dst + 4].copy_from_slice(&self.pixels[src..src + 4]);
+            }
+        }
+        self.pixels = pixels;
+        self.width = w;
+        self.height = h;
+    }
 }
 
 impl std::fmt::Debug for CapturedFrame {
@@ -455,6 +514,34 @@ mod tests {
         }
         file.write_all_at(&bytes, 0).unwrap();
         file
+    }
+
+    #[test]
+    fn capture_pixels_are_oriented_for_all_output_transforms() {
+        let expected = [
+            vec![0, 1, 2, 3, 4, 5],
+            vec![3, 0, 4, 1, 5, 2],
+            vec![5, 4, 3, 2, 1, 0],
+            vec![2, 5, 1, 4, 0, 3],
+            vec![2, 1, 0, 5, 4, 3],
+            vec![0, 3, 1, 4, 2, 5],
+            vec![3, 4, 5, 0, 1, 2],
+            vec![5, 2, 4, 1, 3, 0],
+        ];
+        for (transform, want) in expected.iter().enumerate() {
+            let mut image = BgraImage {
+                width: 3,
+                height: 2,
+                pixels: (0..6).flat_map(|v| [v, 0, 0, 255]).collect(),
+            };
+            image.orient(transform as u32);
+            let got: Vec<_> = image.pixels.chunks_exact(4).map(|p| p[0]).collect();
+            assert_eq!(&got, want, "transform {transform}");
+            assert_eq!(
+                (image.width, image.height),
+                if transform & 1 != 0 { (2, 3) } else { (3, 2) }
+            );
+        }
     }
 
     #[test]

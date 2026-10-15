@@ -38,6 +38,13 @@ To run under the Khronos validation layer:
 VK_INSTANCE_LAYERS=VK_LAYER_KHRONOS_validation gliff-probe roundtrip
 ```
 
+For slow CPU-server / GPU-client decode problems, test the mixed path with
+packet delays and compare its decoded pixels with the reference:
+
+```
+gliff-probe --video cpu roundtrip --single --decode gpu --frame-delay-ms 300 --frames 20
+```
+
 ## Run on one machine
 
 Start a nested Hyprland, then inside it:
@@ -48,7 +55,9 @@ gliff --connect 127.0.0.1:9000
 ```
 
 `--listen` and `--connect` have no authentication and are for development
-only. `--video cpu` (or `GLIFF_VIDEO=cpu`) on either end forces the CPU tier,
+only. Listeners resolve to loopback addresses unless `--allow-remote` is
+explicitly supplied; that flag exposes an unauthenticated desktop.
+`--video cpu` (or `GLIFF_VIDEO=cpu`) on either end forces the CPU tier,
 and `--full-chroma` on a CPU server keeps 4:4:4. Server and client pick their
 tiers independently, so every pairing can be tested on one machine.
 
@@ -84,7 +93,7 @@ tiers independently, so every pairing can be tested on one machine.
 - **`scripts/e2e.sh`** boots a nested Hyprland and asserts PASS across the probe
   checks, the capture pipeline, both Dual420 and Single420 server-plus-client
   streams, the CPU tier matrix (cpu<->cpu and each mixed pairing), the
-  clipboard in both directions (as text, as a 1 MiB binary item and as a
+  rotated-output capture on both video tiers, clipboard in both directions (as text, as a 1 MiB binary item and as a
   copied directory tree), a mirrored-output resize, a keymap sent
   mid-session, and the GTK client's shortcut inhibit across repeated focus
   changes. It needs a Hyprland session, so it is not a CI unit test; run

@@ -90,6 +90,12 @@ enum Cmd {
         /// restore it, to exercise the live rate-control update.
         #[arg(long)]
         adapt: bool,
+        /// Decode on a different tier to exercise mixed CPU/GPU streams.
+        #[arg(long, value_parser = ["cpu", "gpu"])]
+        decode: Option<String>,
+        /// Delay each encoded packet before decoding, to model a slow server.
+        #[arg(long, default_value_t = 0)]
+        frame_delay_ms: u64,
     },
     /// Capture one frame of an output and write it as PNG
     Capture {
@@ -184,7 +190,7 @@ fn main() -> Result<()> {
         display: cli.display.clone(),
         instance: cli.instance.clone(),
     };
-    let node = hypr_capture::render_node(cli.render_node.as_deref());
+    let node = hypr_capture::render_node_for_target(cli.render_node.as_deref(), &target);
     let video = VideoMode::resolve(cli.video.as_deref());
     let capture_mode = CaptureMode::resolve(cli.capture.as_deref());
     match cli.cmd {
@@ -200,7 +206,26 @@ fn main() -> Result<()> {
             single,
             bitrate,
             adapt,
-        } => roundtrip(&node, width, height, frames, !single, bitrate, adapt, video)?,
+            decode,
+            frame_delay_ms,
+        } => roundtrip(
+            &node,
+            width,
+            height,
+            frames,
+            !single,
+            bitrate,
+            adapt,
+            video,
+            decode.map(|v| {
+                if v == "gpu" {
+                    VideoMode::Gpu
+                } else {
+                    VideoMode::Cpu
+                }
+            }),
+            frame_delay_ms,
+        )?,
         Cmd::Capture {
             output,
             png,
@@ -249,14 +274,36 @@ fn main() -> Result<()> {
                 }
             };
             if gpu_ok && video == VideoMode::Gpu {
-                if let Err(e) = roundtrip(&node, 640, 360, 10, true, None, false, VideoMode::Gpu) {
+                if let Err(e) = roundtrip(
+                    &node,
+                    640,
+                    360,
+                    10,
+                    true,
+                    None,
+                    false,
+                    VideoMode::Gpu,
+                    None,
+                    0,
+                ) {
                     status(
                         false,
                         &format!("GPU round trip failed ({e:#}); the CPU pipeline will be used"),
                     );
                 }
             }
-            roundtrip(&node, 640, 360, 10, true, None, false, VideoMode::Cpu)?;
+            roundtrip(
+                &node,
+                640,
+                360,
+                10,
+                true,
+                None,
+                false,
+                VideoMode::Cpu,
+                None,
+                0,
+            )?;
         }
     }
     Ok(())
@@ -427,7 +474,7 @@ fn capture(
                 );
             }
             CaptureEvent::Frame(frame) => {
-                let image = frame.buffer.read_bgra()?;
+                let image = frame.read_bgra()?;
                 let (w, h) = (image.width as u32, image.height as u32);
                 let rgb: Vec<u8> = image
                     .pixels
@@ -1334,6 +1381,8 @@ fn roundtrip(
     bitrate: Option<u32>,
     adapt: bool,
     video: VideoMode,
+    decode: Option<VideoMode>,
+    frame_delay_ms: u64,
 ) -> Result<()> {
     let bitrate = bitrate.unwrap_or(4 * EncoderSettings::default_bitrate(width, height, 60));
     let settings = EncoderSettings {
@@ -1343,31 +1392,32 @@ fn roundtrip(
         framerate: 60,
         vbv_ms: EncoderSettings::DEFAULT_VBV_MS,
     };
-    let (mut encoder, mut decoder) = match video {
-        VideoMode::Gpu => {
-            let gpu = Gpu::open(Some(node))?;
-            println!("  {} ({}) dual={dual}", gpu.name, gpu.driver);
-            (
-                ProbeEncoder::Gpu(Box::new(
-                    Encoder::new(&gpu, settings, dual).context("vulkan encoder")?,
-                )),
-                ProbeDecoder::Gpu(Box::new(
-                    Decoder::new(&gpu, dual, width, height).context("vulkan decoder")?,
-                )),
-            )
-        }
-        VideoMode::Cpu => {
-            println!("  cpu (OpenH264) dual={dual}");
-            (
-                ProbeEncoder::Cpu(Box::new(
-                    gliff_sw::Encoder::new(sw_settings(width, height, bitrate), dual)
-                        .context("cpu encoder")?,
-                )),
-                ProbeDecoder::Cpu(Box::new(
-                    gliff_sw::Decoder::new(dual).context("cpu decoder")?,
-                )),
-            )
-        }
+    let decode = decode.unwrap_or(video);
+    let gpu = if video == VideoMode::Gpu || decode == VideoMode::Gpu {
+        Some(Gpu::open(Some(node))?)
+    } else {
+        None
+    };
+    println!("  encode={video:?} decode={decode:?} dual={dual} frame_delay_ms={frame_delay_ms}");
+    let mut encoder = match video {
+        VideoMode::Gpu => ProbeEncoder::Gpu(Box::new(Encoder::new(
+            gpu.as_ref().unwrap(),
+            settings,
+            dual,
+        )?)),
+        VideoMode::Cpu => ProbeEncoder::Cpu(Box::new(gliff_sw::Encoder::new(
+            sw_settings(width, height, bitrate),
+            dual,
+        )?)),
+    };
+    let mut decoder = match decode {
+        VideoMode::Gpu => ProbeDecoder::Gpu(Box::new(Decoder::new(
+            gpu.as_ref().unwrap(),
+            dual,
+            width,
+            height,
+        )?)),
+        VideoMode::Cpu => ProbeDecoder::Cpu(Box::new(gliff_sw::Decoder::new(dual)?)),
     };
     let (w, h) = (width as usize, height as usize);
     let mut min_psnr = f64::MAX;
@@ -1395,6 +1445,9 @@ fn roundtrip(
         let enc_ms = t0.elapsed().as_secs_f64() * 1000.0;
         let aux = packet.aux.as_deref().unwrap_or(&[]);
         total_bytes += packet.main.len() + aux.len();
+        if frame_delay_ms > 0 {
+            std::thread::sleep(Duration::from_millis(frame_delay_ms));
+        }
         let t1 = std::time::Instant::now();
         let out = decoder
             .decode_to_bgra(&packet.main, aux)
@@ -1601,7 +1654,7 @@ fn pipeline(
     }
     let info = &frame.buffer.info;
     // Even dimensions, as `read_bgra` crops to for the 4:2:0 path.
-    let (w, h) = (info.width & !1, info.height & !1);
+    let (w, h) = frame.extent();
     let fourcc = drm_fourcc::DrmFourcc::try_from(info.fourcc)
         .map_err(|_| anyhow!("captured fourcc {:#x} is not a DRM format", info.fourcc))?;
     println!(
@@ -1616,7 +1669,7 @@ fn pipeline(
     // The CPU reference for the PSNR, when the frame maps at all: a tiled
     // capture buffer (NVIDIA, GPU tier) is not CPU-readable, which is why the
     // CPU tier captures into wl_shm instead.
-    let reference = match frame.buffer.read_bgra() {
+    let reference = match frame.read_bgra() {
         Ok(r) => Some(r),
         Err(e) if video == VideoMode::Gpu => {
             println!("  no CPU reference for this frame: {e}; the PSNR is skipped");
@@ -1676,7 +1729,9 @@ fn pipeline(
     };
     let t0 = std::time::Instant::now();
     let packet = match &mut encoder {
-        ProbeEncoder::Gpu(enc) => enc.encode_dmabuf(1, &plane, true).context("encode")?,
+        ProbeEncoder::Gpu(enc) => enc
+            .encode_dmabuf_transformed(1, &plane, frame.transform, true)
+            .context("encode")?,
         ProbeEncoder::Cpu(enc) => {
             let reference = reference
                 .as_ref()
