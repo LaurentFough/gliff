@@ -1558,24 +1558,41 @@ fn setup_output(
     }
     let before: Vec<String> = instance.monitors()?.into_iter().map(|m| m.name).collect();
     let requested = format!("gliff-{}", std::process::id());
-    instance
-        .create_headless_output(&requested)
-        .context("create headless output")?;
+    // Hyprland can take longer than the socket timeout to create an output
+    // (seen on NVIDIA), and creates it anyway. So a failed request is not
+    // the end: wait for the output, and adopt it if it comes.
+    let created = instance.create_headless_output(&requested);
+    if let Err(e) = &created {
+        tracing::warn!(error = %e, "headless output request failed; waiting for the output");
+    }
     // Hyprland names the output itself, so find the one that appeared.
+    let wait = if created.is_ok() { 4 } else { 50 };
+    let mut appeared = None;
+    for _ in 0..wait {
+        std::thread::sleep(Duration::from_millis(200));
+        appeared = instance
+            .monitors()?
+            .into_iter()
+            .find(|m| !before.contains(&m.name))
+            .map(|m| m.name);
+        if appeared.is_some() {
+            break;
+        }
+    }
+    let Some(name) = appeared else {
+        return Err(created
+            .err()
+            .map(anyhow::Error::from)
+            .unwrap_or_else(|| anyhow::anyhow!("headless output did not appear"))
+            .context("create headless output"));
+    };
     let mut output = SessionOutput {
-        name: requested,
+        name,
         width: 0,
         height: 0,
         scale: 1.0,
         headless: Some(instance.clone()),
     };
-    std::thread::sleep(Duration::from_millis(200));
-    let after = instance.monitors()?;
-    let m = after
-        .iter()
-        .find(|m| !before.contains(&m.name))
-        .context("headless output did not appear")?;
-    output.name = m.name.clone();
     let width = caps.max_width.clamp(320, 1920) & !1;
     let height = caps.max_height.clamp(240, 1080) & !1;
     if let Err(e) = instance.set_monitor_mode(&output.name, width, height, 60, 1.0) {
