@@ -153,6 +153,27 @@ impl Instance {
         self.request_json("monitors all")
     }
 
+    /// Run a dispatcher. A legacy (hyprlang) config takes `dispatch <name>
+    /// <args>`; a Lua config reads `dispatch` as `hl.dispatch(...)`, rejects
+    /// that form, and takes the `hl.dsp` call in `lua` instead.
+    fn dispatcher(&self, legacy: &str, lua: &str) -> Result<()> {
+        match self.dispatch(&format!("dispatch {legacy}")) {
+            Err(Error::Command { response, .. }) if response.contains("lua") => {
+                self.dispatch(&format!("dispatch {lua}"))
+            }
+            other => other,
+        }
+    }
+
+    /// Switch one monitor's DPMS on or off, leaving the others alone.
+    pub fn set_dpms(&self, monitor: &str, on: bool) -> Result<()> {
+        let action = if on { "on" } else { "off" };
+        self.dispatcher(
+            &format!("dpms {action} {monitor}"),
+            &format!("hl.dsp.dpms({{ action = \"{action}\", monitor = \"{monitor}\" }})"),
+        )
+    }
+
     pub fn get_option(&self, name: &str) -> Result<OptionValue> {
         self.request_json(&format!("getoption {name}"))
     }
@@ -231,6 +252,13 @@ pub struct Monitor {
     pub focused: bool,
     #[serde(default)]
     pub disabled: bool,
+    /// False while DPMS has the monitor off; Hyprland does not render it.
+    #[serde(default = "yes")]
+    pub dpms_status: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 fn one() -> f32 {
@@ -288,6 +316,19 @@ mod tests {
         let explicit = Instance::discover_in(tmp.path(), Some("old_1_1")).unwrap();
         assert_eq!(explicit.signature, "old_1_1");
         assert!(Instance::discover_in(tmp.path(), Some("missing")).is_err());
+    }
+
+    #[test]
+    fn parses_dpms_status() {
+        let m: Monitor =
+            serde_json::from_str(r#"{"id": 0, "name": "DP-2", "width": 3440, "height": 1440}"#)
+                .unwrap();
+        assert!(m.dpms_status, "a monitor without the field counts as on");
+        let m: Monitor = serde_json::from_str(
+            r#"{"id": 1, "name": "gliff-1", "width": 1280, "height": 712, "dpmsStatus": false}"#,
+        )
+        .unwrap();
+        assert!(!m.dpms_status);
     }
 
     #[test]

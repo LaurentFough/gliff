@@ -252,6 +252,9 @@ where
         cursor_shape_id: 0,
     };
 
+    // How often a headless output is checked for having been switched off.
+    let mut awake = tokio::time::interval(Duration::from_secs(2));
+    awake.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         let flow = tokio::select! {
             msg = msg_rx.recv() => match msg {
@@ -306,6 +309,10 @@ where
             _ = tokio::time::sleep_until(tokio::time::Instant::from_std(session.refine_wake())),
                 if session.can_refine() =>
             {
+                ControlFlow::Continue(())
+            }
+            _ = awake.tick(), if session.output.is_headless() => {
+                session.output.keep_awake();
                 ControlFlow::Continue(())
             }
             // The pace timer: fires when a frame waits only on the cadence.
@@ -1464,6 +1471,30 @@ impl SessionOutput {
         self.headless.is_some()
     }
 
+    /// Switch a headless output back on when something switched it off, as
+    /// an idle daemon's `dpms off` does to every monitor before it locks.
+    /// Hyprland does not render an output with DPMS off, so the stream would
+    /// freeze on black, lock screen included. Only this output is touched:
+    /// the remote's own screens keep their state.
+    fn keep_awake(&self) {
+        let Some(instance) = &self.headless else {
+            return;
+        };
+        let off = match instance.monitors() {
+            Ok(mons) => mons.iter().any(|m| m.name == self.name && !m.dpms_status),
+            Err(e) => {
+                tracing::debug!(error = %e, "cannot read the output's DPMS state");
+                false
+            }
+        };
+        if off {
+            tracing::info!(output = %self.name, "headless output was switched off; switching it on");
+            if let Err(e) = instance.set_dpms(&self.name, true) {
+                tracing::warn!(error = %e, "could not switch the headless output on");
+            }
+        }
+    }
+
     /// The logical extent Hyprland exposes to clients and the virtual pointer.
     fn logical_extent(&self) -> InputCmd {
         let s = self.scale.max(0.5);
@@ -1599,6 +1630,8 @@ fn setup_output(
     output.width = w & !1;
     output.height = h & !1;
     output.scale = scale;
+    // An output added while the remote sleeps comes up switched off.
+    output.keep_awake();
     Ok(output)
 }
 
