@@ -235,6 +235,21 @@ fi
 hyprctl output remove "$rotated" >/dev/null 2>&1
 echo "   rotated output CPU/GPU pipelines PASS"
 
+echo "== 7c. odd-sized output capture and encoding =="
+# The stream is the output cropped to even dimensions; the GPU split must
+# drop the extra column and row rather than resample the whole picture.
+hyprctl output create headless e2eodd >/dev/null 2>&1
+sleep 1
+odd=$(hyprctl monitors -j | python3 -c "import sys,json; print(next(m['name'] for m in json.load(sys.stdin) if 'e2eodd' in m['name']))")
+hyprctl eval "hl.monitor({ output = \"$odd\", mode = \"1281x801@60\", position = \"auto\", scale = 1 })" >/dev/null
+sleep 1
+$PROBE --video cpu --capture shm --instance "$NEST_SIG" pipeline --output "$odd" >/tmp/gliff-e2e-odd-cpu.log 2>&1 || fail "odd-sized CPU pipeline"
+if [ "$HAS_GPU" = 1 ]; then
+    $PROBE --instance "$NEST_SIG" pipeline --output "$odd" >/tmp/gliff-e2e-odd-gpu.log 2>&1 || fail "odd-sized GPU pipeline"
+fi
+hyprctl output remove "$odd" >/dev/null 2>&1
+echo "   odd-sized output CPU/GPU pipelines PASS"
+
 echo "== 8. binary clipboard both directions (1 MiB, chunked) =="
 blob=$(mktemp); head -c 1048576 /dev/urandom >"$blob"
 recvf=$(mktemp); outf=$(mktemp)
