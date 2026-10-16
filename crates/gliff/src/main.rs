@@ -1653,37 +1653,46 @@ fn install_input_handlers(
     }
     video.add_controller(motion);
 
-    // Buttons.
-    let click = gtk::GestureClick::new();
-    click.set_button(0); // any button
+    // Buttons, each press and release as it comes. A click gesture follows
+    // one button at a time and cancels it when a second button is pressed,
+    // or, for back, forward and other buttons past the fifth, when the
+    // pointer moves; the release then never reaches the remote, which keeps
+    // the button down.
+    let buttons = gtk::EventControllerLegacy::new();
     {
         let ui = ui.clone();
         let video = video.clone();
-        click.connect_pressed(move |g, _, _, _| {
-            ui.released.set(false);
-            video.grab_focus();
-            send(
-                &ui,
-                ClientMsg::PointerButton {
-                    button: evdev_button(g.current_button()),
-                    pressed: true,
-                },
+        buttons.connect_event(move |_, event| {
+            let kind = event.event_type();
+            let button = match kind {
+                gdk::EventType::ButtonPress | gdk::EventType::ButtonRelease => event
+                    .downcast_ref::<gdk::ButtonEvent>()
+                    .map(|e| evdev_button(e.button())),
+                // The first finger on a touch screen is the left button.
+                gdk::EventType::TouchBegin
+                | gdk::EventType::TouchEnd
+                | gdk::EventType::TouchCancel => event
+                    .downcast_ref::<gdk::TouchEvent>()
+                    .filter(|e| e.is_emulating_pointer())
+                    .map(|_| evdev_button(1)),
+                _ => None,
+            };
+            let Some(button) = button else {
+                return glib::Propagation::Proceed;
+            };
+            let pressed = matches!(
+                kind,
+                gdk::EventType::ButtonPress | gdk::EventType::TouchBegin
             );
+            if pressed {
+                ui.released.set(false);
+                video.grab_focus();
+            }
+            send(&ui, ClientMsg::PointerButton { button, pressed });
+            glib::Propagation::Proceed
         });
     }
-    {
-        let ui = ui.clone();
-        click.connect_released(move |g, _, _, _| {
-            send(
-                &ui,
-                ClientMsg::PointerButton {
-                    button: evdev_button(g.current_button()),
-                    pressed: false,
-                },
-            );
-        });
-    }
-    video.add_controller(click);
+    video.add_controller(buttons);
 
     // Scroll.
     let scroll = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::BOTH_AXES);
