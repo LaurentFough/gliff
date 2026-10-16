@@ -44,9 +44,11 @@ fn holds_remote_offer(cb: &gdk::Clipboard) -> bool {
     cb.content().is_some_and(|p| p.is::<RemoteProvider>())
 }
 
-/// Report every change of the local clipboard to the workers, except changes
-/// made by our own proxy provider. Every running session gets the offer, so
-/// any of them can paste it after a switch; nothing is sent until one does.
+/// Report every change of the local clipboard to the workers. Each change
+/// first revokes the previous local offer in every session. A change to our
+/// own proxy provider stops there, and any other change is then offered.
+/// Every running session gets the offer, so any of them can paste it after a
+/// switch; nothing is sent until one does.
 pub fn watch_local(senders: impl Fn() -> Vec<UnboundedSender<ToWorker>> + 'static) {
     let Some(cb) = clipboard() else {
         return;
@@ -59,11 +61,8 @@ pub fn watch_local(senders: impl Fn() -> Vec<UnboundedSender<ToWorker>> + 'stati
         // a copy from another gliff widget is a real local change.
         let gen = selection_gen.get() + 1;
         selection_gen.set(gen);
-        if holds_remote_offer(cb) {
-            return;
-        }
         let txs = senders();
-        if txs.is_empty() {
+        if !revoke_for_change(&txs, holds_remote_offer(cb)) {
             return;
         }
         let selection_gen = selection_gen.clone();
@@ -96,6 +95,18 @@ pub fn watch_local(senders: impl Fn() -> Vec<UnboundedSender<ToWorker>> + 'stati
             }
         });
     });
+}
+
+/// Withdraw the current local offer from every session, and say whether the
+/// change is a local selection to offer. The revocation comes first, before
+/// the file listing, and also when the server's offer took the clipboard:
+/// then no new offer replaces the old one, and its files would stay
+/// readable by every session.
+fn revoke_for_change(txs: &[UnboundedSender<ToWorker>], holds_remote: bool) -> bool {
+    for tx in txs {
+        let _ = tx.send(ToWorker::RevokeLocal);
+    }
+    !holds_remote && !txs.is_empty()
 }
 
 /// List the files behind the local clipboard's file list, if readable. The
@@ -431,6 +442,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn every_session_is_revoked_when_the_servers_offer_takes_the_clipboard() {
+        for holds_remote in [true, false] {
+            let (a_tx, mut a_rx) = tokio::sync::mpsc::unbounded_channel();
+            let (b_tx, mut b_rx) = tokio::sync::mpsc::unbounded_channel();
+            let offer = revoke_for_change(&[a_tx, b_tx], holds_remote);
+            assert_eq!(offer, !holds_remote);
+            for rx in [&mut a_rx, &mut b_rx] {
+                assert!(matches!(rx.try_recv(), Ok(ToWorker::RevokeLocal)));
+                assert!(rx.try_recv().is_err());
+            }
+        }
+        assert!(!revoke_for_change(&[], false));
+    }
+
+    #[test]
     #[ignore = "requires an isolated Wayland session; run by scripts/e2e.sh"]
     fn password_manager_selection_cannot_be_offered_or_read() {
         gtk::init().unwrap();
@@ -438,7 +464,9 @@ mod tests {
         let _owner = context.acquire().unwrap();
         let cb = clipboard().unwrap();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        watch_local(move || vec![tx.clone()]);
+        let sessions = Rc::new(RefCell::new(vec![tx]));
+        let current = sessions.clone();
+        watch_local(move || current.borrow().clone());
         let provider = gdk::ContentProvider::new_union(&[
             gdk::ContentProvider::for_bytes(
                 "text/plain",
@@ -455,10 +483,13 @@ mod tests {
         ]);
         cb.set_content(Some(&provider)).unwrap();
         let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        let mut revoked = false;
         let offer = loop {
             context.iteration(false);
-            if let Ok(offer) = rx.try_recv() {
-                break offer;
+            match rx.try_recv() {
+                Ok(ToWorker::RevokeLocal) => revoked = true,
+                Ok(offer) => break offer,
+                Err(_) => {}
             }
             assert!(
                 std::time::Instant::now() < deadline,
@@ -466,6 +497,7 @@ mod tests {
             );
             std::thread::sleep(Duration::from_millis(5));
         };
+        assert!(revoked, "the previous offer was not revoked first");
         match offer {
             ToWorker::LocalOffer { mime_types, files } => {
                 assert!(mime_types.is_empty());
@@ -488,5 +520,118 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         };
         assert!(result.is_err());
+
+        // The server's offer taking the clipboard must revoke the local
+        // files from every session, with no new local offer after it.
+        let (a_tx, mut a_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (b_tx, mut b_rx) = tokio::sync::mpsc::unbounded_channel();
+        *sessions.borrow_mut() = vec![a_tx.clone(), b_tx];
+        let file = concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml");
+        let uri_list = glib::Bytes::from_owned(format!("file://{file}\r\n").into_bytes());
+        cb.set_content(Some(&gdk::ContentProvider::for_bytes(
+            "text/uri-list",
+            &uri_list,
+        )))
+        .unwrap();
+        // Everything session a receives, replayed into a Bridge below.
+        let mut a_msgs = Vec::new();
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        loop {
+            context.iteration(false);
+            while let Ok(msg) = a_rx.try_recv() {
+                a_msgs.push(msg);
+            }
+            if a_msgs.iter().any(
+                |m| matches!(m, ToWorker::LocalOffer { files, .. } if files.entries.len() == 1),
+            ) {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "local file offer was not sent"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        while b_rx.try_recv().is_ok() {}
+        let offered = a_msgs.len();
+
+        set_remote_offer(&a_tx, 7, vec!["text/plain".into()], Vec::new());
+        assert!(holds_remote_offer(&cb));
+        let mut b_msgs = Vec::new();
+        // Keep pumping past the revocations, so a late offer would show.
+        let settle = std::time::Instant::now() + Duration::from_millis(500);
+        while std::time::Instant::now() < settle {
+            context.iteration(false);
+            while let Ok(msg) = a_rx.try_recv() {
+                a_msgs.push(msg);
+            }
+            while let Ok(msg) = b_rx.try_recv() {
+                b_msgs.push(msg);
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        // Withdraw our proxy before the checks can fail and end the test, so
+        // the compositor has no selection when the next e2e step copies. No
+        // worker answers the proxy here, so a paste from it would hang.
+        cb.set_content(gdk::ContentProvider::NONE).unwrap();
+        let settle = std::time::Instant::now() + Duration::from_millis(200);
+        while std::time::Instant::now() < settle {
+            context.iteration(false);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        for (name, after) in [("a", &a_msgs[offered..]), ("b", &b_msgs[..])] {
+            assert!(
+                after.iter().any(|m| matches!(m, ToWorker::RevokeLocal)),
+                "session {name} was not revoked when the server's offer took the clipboard"
+            );
+            assert!(
+                !after
+                    .iter()
+                    .any(|m| matches!(m, ToWorker::LocalOffer { .. })),
+                "session {name} got a local offer for the server's own selection"
+            );
+        }
+
+        // A Bridge fed what session a received refuses the old offer's file.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        tokio::task::LocalSet::new().block_on(&rt, async {
+            use crate::clipboard::Bridge;
+            use gliff_proto::{ClipboardItem, ClipboardMsg};
+            use gliff_transport::clipboard::{outbound_channel, Side, Transfers};
+            let (out, mut wire) = outbound_channel();
+            let (status_tx, _status_rx) = std::sync::mpsc::channel();
+            let bridge = Bridge::new(Transfers::new(out, Side::Client), status_tx);
+            let mut serial = None;
+            for msg in a_msgs {
+                let is_offer = matches!(msg, ToWorker::LocalOffer { .. });
+                bridge.on_ui(msg);
+                if is_offer {
+                    match wire.recv().await.unwrap().0 {
+                        ClipboardMsg::Offer { serial: s, .. } => serial = Some(s),
+                        other => panic!("expected an offer, got {other:?}"),
+                    }
+                }
+            }
+            bridge.on_peer_msg(
+                ClipboardMsg::Request {
+                    id: 2,
+                    serial: serial.expect("no local offer reached the bridge"),
+                    item: ClipboardItem::File(0),
+                },
+                Bytes::new(),
+            );
+            let answer = tokio::time::timeout(Duration::from_secs(1), wire.recv())
+                .await
+                .expect("file request was neither served nor refused")
+                .unwrap();
+            assert!(
+                matches!(answer.0, ClipboardMsg::Abort { id: 2 }),
+                "old offer's file was served after the takeover: {:?}",
+                answer.0
+            );
+        });
     }
 }
