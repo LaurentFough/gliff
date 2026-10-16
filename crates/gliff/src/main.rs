@@ -1944,14 +1944,15 @@ fn request_resize(ui: &App) {
     );
 }
 
-/// GTK button number to evdev `BTN_*`.
+/// GTK button number to evdev `BTN_*`. GDK numbers left, middle and right
+/// 1-3 and every further button `BTN_*` - `BTN_LEFT` + 5, after the old
+/// scroll buttons 4-7: 8 is `BTN_SIDE` (back), 9 is `BTN_EXTRA` (forward).
 fn evdev_button(n: u32) -> u32 {
     match n {
         1 => 0x110, // BTN_LEFT
         2 => 0x112, // BTN_MIDDLE
         3 => 0x111, // BTN_RIGHT
-        8 => 0x116, // BTN_SIDE (back)
-        9 => 0x115, // BTN_EXTRA (forward)
+        8.. => 0x110 + n - 5,
         _ => 0x110,
     }
 }
@@ -2046,5 +2047,14 @@ mod tests {
         assert!(!hk.matches(gdk::Key::Escape, none, &lt)); // first tap forwarded
         assert!(hk.matches(gdk::Key::Escape, none, &lt)); // quick second releases
         assert!(!hk.matches(gdk::Key::Escape, none, &lt)); // counter reset
+    }
+
+    #[test]
+    fn gtk_buttons_map_back_to_their_evdev_codes() {
+        // GDK on Wayland numbers a button past the first three as its evdev
+        // code - BTN_LEFT + 5, so the remote app sees the same number.
+        let codes: Vec<u32> = (1..=11).map(evdev_button).collect();
+        assert_eq!(&codes[..3], [0x110, 0x112, 0x111]);
+        assert_eq!(&codes[7..], [0x113, 0x114, 0x115, 0x116]);
     }
 }
