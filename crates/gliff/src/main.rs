@@ -1558,6 +1558,15 @@ fn track_key(ui: &App, code: u32, pressed: bool) -> bool {
     }
 }
 
+// GTK surface deltas are already logical pixels, not wheel detents.
+fn scroll_delta(delta: f64, surface: bool) -> (f64, Option<i32>) {
+    if surface {
+        (delta, None)
+    } else {
+        (delta * 15.0, Some(delta.signum() as i32))
+    }
+}
+
 fn install_input_handlers(
     ui: &Rc<App>,
     video: &gtk::Widget,
@@ -1689,14 +1698,15 @@ fn install_input_handlers(
     let scroll = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::BOTH_AXES);
     {
         let ui = ui.clone();
-        scroll.connect_scroll(move |_, dx, dy| {
+        scroll.connect_scroll(move |controller, dx, dy| {
+            let surface = controller.unit() == gdk::ScrollUnit::Surface;
             if dy != 0.0 {
                 send(
                     &ui,
                     ClientMsg::PointerAxis {
                         axis: Axis::Vertical,
-                        value: dy * 15.0,
-                        discrete: Some(dy.signum() as i32),
+                        value: scroll_delta(dy, surface).0,
+                        discrete: scroll_delta(dy, surface).1,
                         stop: false,
                     },
                 );
@@ -1706,13 +1716,29 @@ fn install_input_handlers(
                     &ui,
                     ClientMsg::PointerAxis {
                         axis: Axis::Horizontal,
-                        value: dx * 15.0,
-                        discrete: Some(dx.signum() as i32),
+                        value: scroll_delta(dx, surface).0,
+                        discrete: scroll_delta(dx, surface).1,
                         stop: false,
                     },
                 );
             }
             glib::Propagation::Stop
+        });
+    }
+    {
+        let ui = ui.clone();
+        scroll.connect_scroll_end(move |_| {
+            for axis in [Axis::Vertical, Axis::Horizontal] {
+                send(
+                    &ui,
+                    ClientMsg::PointerAxis {
+                        axis,
+                        value: 0.0,
+                        discrete: None,
+                        stop: true,
+                    },
+                );
+            }
         });
     }
     video.add_controller(scroll);
@@ -2046,5 +2072,30 @@ mod tests {
         assert!(!hk.matches(gdk::Key::Escape, none, &lt)); // first tap forwarded
         assert!(hk.matches(gdk::Key::Escape, none, &lt)); // quick second releases
         assert!(!hk.matches(gdk::Key::Escape, none, &lt)); // counter reset
+    }
+}
+
+#[cfg(test)]
+mod trackpad_tests {
+    use super::scroll_delta;
+
+    #[test]
+    fn small_finger_events_preserve_distance_without_wheel_clicks() {
+        let events = [0.1, 0.2, 0.3, -0.1];
+        let total: f64 = events
+            .iter()
+            .map(|d| {
+                let (value, discrete) = scroll_delta(*d, true);
+                assert_eq!(discrete, None);
+                value
+            })
+            .sum();
+        assert!((total - 0.5).abs() < 1e-10);
+    }
+
+    #[test]
+    fn real_wheel_keeps_detents_and_direction() {
+        assert_eq!(scroll_delta(1.0, false), (15.0, Some(1)));
+        assert_eq!(scroll_delta(-1.0, false), (-15.0, Some(-1)));
     }
 }
