@@ -99,14 +99,19 @@ const POOL_KEEP: usize = 3;
 impl PixelPool {
     /// A buffer of exactly `len` bytes: a free one with the capacity when
     /// there is one, so its pages are mapped already, else a new one.
-    fn take(&self, len: usize) -> Vec<u8> {
+    /// `None` when the allocation fails, which a frame survives unzoomed.
+    fn take(&self, len: usize) -> Option<Vec<u8>> {
         let mut free = self.0.lock().unwrap_or_else(|e| e.into_inner());
         let mut buf = match free.iter().position(|b| b.capacity() >= len) {
             Some(i) => free.swap_remove(i),
-            None => Vec::with_capacity(len),
+            None => {
+                let mut buf = Vec::new();
+                buf.try_reserve_exact(len).ok()?;
+                buf
+            }
         };
         buf.resize(len, 0);
-        buf
+        Some(buf)
     }
 
     /// Keep `buf` for reuse. When the pool is full, a larger buffer
@@ -159,10 +164,23 @@ pub struct PooledFrame {
 impl BgraFrame {
     /// Replicate every pixel into a `zoom` x `zoom` block, so the display
     /// side can show the frame at an integer scale without resampling. At
-    /// zoom 1 the pixels move without a copy.
+    /// zoom 1 the pixels move without a copy, as they do when the enlarged
+    /// frame cannot be allocated (the caller bounds the zoom).
     pub fn zoomed(self, zoom: u32, pool: &PixelPool) -> PooledFrame {
         let pool = pool.clone();
-        if zoom <= 1 {
+        let z = zoom as usize;
+        let (w, h) = (self.width as usize, self.height as usize);
+        let zoomed = (|| {
+            if zoom <= 1 {
+                return None;
+            }
+            let dst_stride = w.checked_mul(4)?.checked_mul(z)?;
+            let len = dst_stride.checked_mul(h)?.checked_mul(z)?;
+            let width = self.width.checked_mul(zoom)?;
+            let height = self.height.checked_mul(zoom)?;
+            Some((dst_stride, pool.take(len)?, width, height))
+        })();
+        let Some((dst_stride, mut buf, width, height)) = zoomed else {
             return PooledFrame {
                 width: self.width,
                 height: self.height,
@@ -171,12 +189,8 @@ impl BgraFrame {
                     pool,
                 },
             };
-        }
-        let z = zoom as usize;
-        let (w, h) = (self.width as usize, self.height as usize);
+        };
         let src_stride = w * 4;
-        let dst_stride = src_stride * z;
-        let mut buf = pool.take(dst_stride * h * z);
         {
             use rayon::prelude::*;
             buf.par_chunks_exact_mut(dst_stride * z)
@@ -194,8 +208,8 @@ impl BgraFrame {
                 });
         }
         PooledFrame {
-            width: self.width * zoom,
-            height: self.height * zoom,
+            width,
+            height,
             pixels: PooledPixels { buf, pool },
         }
     }
@@ -560,6 +574,39 @@ mod tests {
     }
 
     #[test]
+    fn a_zoom_past_the_address_space_leaves_the_frame_as_it_is() {
+        let pool = PixelPool::default();
+        let frame = BgraFrame {
+            width: 2,
+            height: 1,
+            pixels: vec![1, 2, 3, 4, 5, 6, 7, 8],
+        };
+        let z = frame.zoomed(u32::MAX, &pool);
+        assert_eq!(
+            (z.width, z.height, z.pixels.as_ref()),
+            (2, 1, &[1u8, 2, 3, 4, 5, 6, 7, 8][..])
+        );
+    }
+
+    #[test]
+    fn a_zoomed_frame_that_cannot_be_allocated_stays_unzoomed() {
+        // One pixel at zoom two billion: every size fits its type, but the
+        // 16 EB buffer is past isize::MAX, so the reservation fails
+        // deterministically, before the allocator is asked.
+        let pool = PixelPool::default();
+        let frame = BgraFrame {
+            width: 1,
+            height: 1,
+            pixels: vec![7; 4],
+        };
+        let z = frame.zoomed(2_000_000_000, &pool);
+        assert_eq!(
+            (z.width, z.height, z.pixels.as_ref()),
+            (1, 1, &[7u8; 4][..])
+        );
+    }
+
+    #[test]
     fn dropped_frames_return_their_buffers_to_the_pool() {
         let pool = PixelPool::default();
         let frame = BgraFrame {
@@ -571,7 +618,7 @@ mod tests {
         assert_eq!(pool.len(), 0);
         drop(z);
         assert_eq!(pool.len(), 1);
-        let small = pool.take(16);
+        let small = pool.take(16).unwrap();
         assert_eq!(
             (small.len(), pool.len()),
             (16, 0),
@@ -579,7 +626,7 @@ mod tests {
         );
         drop(small);
         pool.give(vec![0; 8]);
-        let big = pool.take(64);
+        let big = pool.take(64).unwrap();
         assert_eq!((big.len(), pool.len()), (64, 1), "a too-small buffer stays");
     }
 
@@ -592,7 +639,7 @@ mod tests {
         pool.give(vec![0; 64]);
         assert_eq!(pool.len(), POOL_KEEP);
         assert_eq!(
-            pool.take(64).len(),
+            pool.take(64).unwrap().len(),
             64,
             "the large buffer replaced a small one"
         );

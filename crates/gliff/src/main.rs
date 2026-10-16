@@ -1148,6 +1148,10 @@ fn poll_status(ui: Rc<App>, s: Rc<Session>, rx: Receiver<Status>, generation: u6
                     headless,
                 } => {
                     s.server_view.set((view_width, view_height));
+                    // The worker drops its zoom to 1 when the stream size
+                    // changes; forget the last request so the next poll
+                    // asks again for the zoom this view allows.
+                    s.zoom.set(0);
                     s.fps_cap.set(fps_cap);
                     s.headless.set(headless);
                     s.resize_requested.set((0, 0));
@@ -1196,23 +1200,21 @@ fn poll_status(ui: Rc<App>, s: Rc<Session>, rx: Receiver<Status>, generation: u6
                         ),
                     );
                 }
-                Status::Cursor {
-                    width,
-                    height,
-                    hot_x,
-                    hot_y,
-                    argb,
-                } => set_remote_cursor(
-                    &ui,
-                    &s,
-                    CursorImage {
-                        width,
-                        height,
-                        hot_x,
-                        hot_y,
-                        argb: &argb,
-                    },
-                ),
+                Status::Cursor(latest) => {
+                    if let Some(shape) = latest.take() {
+                        set_remote_cursor(
+                            &ui,
+                            &s,
+                            CursorImage {
+                                width: shape.width,
+                                height: shape.height,
+                                hot_x: shape.hot_x,
+                                hot_y: shape.hot_y,
+                                argb: &shape.argb,
+                            },
+                        )
+                    }
+                }
                 // Only the shown machine may take over the local clipboard.
                 Status::ClipboardOffer {
                     serial,
@@ -1301,8 +1303,18 @@ fn remote_cursor(image: CursorImage) -> Option<gdk::Cursor> {
         hot_y,
         argb,
     } = image;
-    let needed = width as u64 * height as u64 * 4;
-    if width == 0 || height == 0 || width > 1024 || height > 1024 || (argb.len() as u64) < needed {
+    if width == 0 || height == 0 || width > 1024 || height > 1024 {
+        return None;
+    }
+    // GTK refuses a hotspot outside the image and returns no cursor, which
+    // the bindings would wrap as a valid one.
+    if !(0..width as i32).contains(&hot_x) || !(0..height as i32).contains(&hot_y) {
+        return None;
+    }
+    let needed = (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|n| n.checked_mul(4))?;
+    if argb.len() < needed {
         return None;
     }
     if !has_visible_shape(argb) {
@@ -1987,6 +1999,24 @@ mod tests {
         assert!(!has_visible_shape(&transparent));
         assert!(!has_visible_shape(&black));
         assert!(has_visible_shape(&arrow));
+    }
+
+    #[test]
+    fn remote_cursor_rejects_a_hotspot_outside_the_image() {
+        // A visible 2x2 shape, so only the hotspot decides. These return
+        // before any GTK call, which is why no display is needed here.
+        let mut argb = [0u8; 16];
+        argb[3] = 255;
+        for (hot_x, hot_y) in [(2, 0), (0, 2), (-1, 0), (0, -1), (i32::MAX, i32::MIN)] {
+            let image = CursorImage {
+                width: 2,
+                height: 2,
+                hot_x,
+                hot_y,
+                argb: &argb,
+            };
+            assert!(remote_cursor(image).is_none(), "{hot_x},{hot_y}");
+        }
     }
 
     #[test]
