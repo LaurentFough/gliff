@@ -25,7 +25,7 @@ use gliff_vk::{DmabufPlane, EncodedFrame, Encoder, EncoderSettings, Gpu};
 
 use crate::rate::{cpu_rebuild_due, Ladder, LinkEstimator, RateController};
 use crate::writer::Writer;
-use hypr_capture::{CaptureConfig, CaptureEvent, CaptureMode, CapturedFrame, Capturer};
+use hypr_capture::{CaptureConfig, CaptureEvent, CaptureMode, CapturedFrame, Capturer, SizeLimit};
 use hypr_input::{Axis as InAxis, Clipboard, ClipboardEvent, Input, InputCmd, InputConfig};
 use hypr_wl::Target;
 
@@ -167,6 +167,7 @@ where
         &cfg.render_node,
         cfg.capture,
         allow_shm,
+        output.is_headless(),
         cap_tx,
     )?;
 
@@ -616,10 +617,10 @@ impl Session {
             .expect("the capturer lives until the session drops")
     }
 
-    /// Resize a headless output to the client's window, within the size it
-    /// declared in Hello, and restart the encoder at the new size.
     /// Resize a headless output to the client's window at the client's
-    /// scale, so the remote UI renders at the client's DPI.
+    /// scale, so the remote UI renders at the client's DPI, within the size
+    /// it declared in Hello and the server's cap, and restart the encoder
+    /// at the new size.
     async fn resize(&mut self, width: u32, height: u32, scale: f32) -> Result<()> {
         let width = width.min(self.caps.max_width) & !1;
         let height = height.min(self.caps.max_height) & !1;
@@ -635,7 +636,7 @@ impl Session {
         if !self.output.is_headless() {
             return self.fit_mirror(width, height);
         }
-        let (width, height) = hypr_ipc::clean_mode(width, height, scale);
+        let (width, height) = headless_target(width, height, scale);
         let same_size = (width, height) == (self.output.width, self.output.height);
         let same_scale = (scale - self.output.scale).abs() < 0.01;
         if same_size && same_scale {
@@ -1649,14 +1650,14 @@ fn main_monitor(mons: &[hypr_ipc::Monitor]) -> Option<&hypr_ipc::Monitor> {
         .or_else(|| enabled().min_by_key(|m| (m.x, m.y)))
 }
 
-fn start_capture(
+fn capture_config(
     target: &Target,
     output: &str,
     render_node: &std::path::Path,
     capture: CaptureMode,
     allow_shm: bool,
-    tx: UnboundedSender<Incoming>,
-) -> Result<Capturer> {
+    headless: bool,
+) -> CaptureConfig {
     let mut cc = CaptureConfig::new(output.to_string());
     cc.target = target.clone();
     cc.render_node = render_node.to_path_buf();
@@ -1666,6 +1667,25 @@ fn start_capture(
     // One extra ring slot: the session pins the last sent frame for
     // still-picture refinement.
     cc.buffers = 4;
+    // The capture thread follows the output's size on its own, so it
+    // enforces the headless cap too, in case something other than this
+    // session resizes the output.
+    if headless {
+        cc.max_size = Some(HEADLESS_LIMIT);
+    }
+    cc
+}
+
+fn start_capture(
+    target: &Target,
+    output: &str,
+    render_node: &std::path::Path,
+    capture: CaptureMode,
+    allow_shm: bool,
+    headless: bool,
+    tx: UnboundedSender<Incoming>,
+) -> Result<Capturer> {
+    let cc = capture_config(target, output, render_node, capture, allow_shm, headless);
     let sink = Box::new(move |ev: CaptureEvent| {
         let msg = match ev {
             CaptureEvent::Frame(frame) => Incoming::Frame(frame),
@@ -1704,6 +1724,39 @@ fn start_input(target: &Target, output: &str, keymap: &str) -> Result<Input> {
     Ok(Input::start(ic, Box::new(|_| {}))?)
 }
 
+/// The largest headless output a client may ask for, whatever its Hello
+/// declared. The gliff client asks for at most 3840x2160, which is also the
+/// OpenH264 maximum. A larger output is scaled down to the encoder's maximum
+/// for the stream anyway, while each capture ring buffer grows with it.
+/// 4096 a side is the coded size the VA path assumes when the driver
+/// reports no maximum.
+const HEADLESS_LIMIT: SizeLimit = SizeLimit {
+    side: 4096,
+    pixels: 3840 * 2160,
+};
+
+/// Fit a requested headless size within the server's limits, keeping the
+/// aspect ratio and the sides even. A window too narrow to scale stays at
+/// the smallest size resize accepts.
+fn headless_cap(width: u32, height: u32) -> (u32, u32) {
+    let SizeLimit { side, pixels } = HEADLESS_LIMIT;
+    let (w, h) = (f64::from(width), f64::from(height));
+    let fit = (f64::from(side) / w)
+        .min(f64::from(side) / h)
+        .min((pixels as f64 / (w * h)).sqrt())
+        .min(1.0);
+    let w = ((w * fit) as u32).clamp(320, side);
+    let h = ((h * fit) as u32).clamp(240, side);
+    (w & !1, h & !1)
+}
+
+/// The headless mode to ask Hyprland for: the client's window within the
+/// server's cap, rounded so the scale divides it.
+fn headless_target(width: u32, height: u32, scale: f32) -> (u32, u32) {
+    let (width, height) = headless_cap(width, height);
+    hypr_ipc::clean_mode(width, height, scale)
+}
+
 fn stream_limit(encoder: (u32, u32), caps: &ClientCaps) -> Result<(u32, u32)> {
     let limit = (
         encoder.0.min(caps.max_width),
@@ -1738,6 +1791,31 @@ mod tests {
     }
 
     #[test]
+    fn headless_resize_is_capped_by_the_server() {
+        // Within the limits: unchanged, apart from even sides.
+        assert_eq!(headless_cap(1920, 1080), (1920, 1080));
+        assert_eq!(headless_cap(3840, 2160), (3840, 2160));
+        assert_eq!(headless_cap(2160, 3840), (2160, 3840));
+        assert_eq!(headless_cap(1921, 1081), (1920, 1080));
+        // A long side alone is cut to the side limit, the other side with it.
+        assert_eq!(headless_cap(8192, 1000), (4096, 500));
+        assert_eq!(headless_cap(1000, 8192), (500, 4096));
+        assert_eq!(headless_cap(u32::MAX, 1000), (4096, 240));
+        assert_eq!(headless_cap(1000, u32::MAX), (320, 4096));
+        // Too many pixels: scaled down, keeping the aspect ratio.
+        assert_eq!(headless_cap(16384, 16384), (2880, 2880));
+        assert_eq!(headless_cap(u32::MAX, u32::MAX), (2880, 2880));
+        assert_eq!(headless_cap(4096, 2304), (3840, 2160));
+        for (w, h) in [(4096, 4096), (4096, 3000), (3001, 4095), (u32::MAX, 2161)] {
+            let (cw, ch) = headless_cap(w, h);
+            assert!(cw <= HEADLESS_LIMIT.side && ch <= HEADLESS_LIMIT.side);
+            assert!(u64::from(cw) * u64::from(ch) <= HEADLESS_LIMIT.pixels);
+            assert!(cw.is_multiple_of(2) && ch.is_multiple_of(2));
+            assert!(cw >= 320 && ch >= 240);
+        }
+    }
+
+    #[test]
     fn served_output_ends_threads_before_the_output() {
         use std::cell::RefCell;
         use std::rc::Rc;
@@ -1767,5 +1845,31 @@ mod tests {
         }));
         assert!(unwound.is_err());
         assert_eq!(*log.borrow(), want);
+    }
+
+    #[test]
+    fn headless_capture_carries_the_size_limit() {
+        let config = |headless| {
+            capture_config(
+                &Target::default(),
+                "HEADLESS-2",
+                std::path::Path::new("/dev/dri/renderD128"),
+                CaptureMode::Auto,
+                true,
+                headless,
+            )
+        };
+        assert_eq!(config(true).max_size, Some(HEADLESS_LIMIT));
+        // A mirrored monitor is the size it is.
+        assert_eq!(config(false).max_size, None);
+    }
+
+    #[test]
+    fn headless_target_applies_the_cap_before_rounding() {
+        assert_eq!(headless_target(1920, 1080, 1.0), (1920, 1080));
+        assert_eq!(headless_target(1366, 768, 1.25), (1360, 760));
+        assert_eq!(headless_target(16384, 16384, 1.0), (2880, 2880));
+        assert_eq!(headless_target(u32::MAX, u32::MAX, 1.5), (2880, 2880));
+        assert_eq!(headless_target(8192, 4608, 1.25), (3840, 2160));
     }
 }

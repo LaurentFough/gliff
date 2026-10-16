@@ -278,6 +278,23 @@ fn run(
     result
 }
 
+/// Every ring buffer has the output's size, so an output past the caller's
+/// limit would cost that much memory several times over.
+fn check_ring_size(cfg: &CaptureConfig, width: u32, height: u32) -> Result<()> {
+    match cfg.max_size {
+        Some(max)
+            if width.max(height) > max.side
+                || u64::from(width) * u64::from(height) > max.pixels =>
+        {
+            Err(Error::Capture(format!(
+                "output {width}x{height} is past the capture limit of {} a side and {} pixels",
+                max.side, max.pixels
+            )))
+        }
+        _ => Ok(()),
+    }
+}
+
 fn open_gbm(render_node: &std::path::Path) -> Result<Device<File>> {
     let gbm_err = |e: std::io::Error| Error::Gbm(format!("open {}: {e}", render_node.display()));
     let file = File::options()
@@ -525,6 +542,7 @@ impl State {
             tracing::debug!("output has no size yet; waiting before allocating the ring");
             return Ok(());
         }
+        check_ring_size(&self.cfg, self.constraints.width, self.constraints.height)?;
         self.ring_generation += 1;
         if let Some((fourcc, format)) = self.choose_shm_format() {
             return self.allocate_shm_ring(fourcc, format);
@@ -1215,6 +1233,7 @@ delegate_noop!(State: ExtImageCopyCaptureManagerV1);
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::SizeLimit;
 
     const XRGB: u32 = DrmFourcc::Xrgb8888 as u32;
     const ARGB_SHM: u32 = wl_shm::Format::Argb8888 as u32;
@@ -1229,6 +1248,23 @@ mod tests {
 
     fn linear() -> u64 {
         u64::from(DrmModifier::Linear)
+    }
+
+    #[test]
+    fn ring_size_respects_the_limit() {
+        let mut c = cfg(true, true);
+        assert!(check_ring_size(&c, 16384, 16384).is_ok());
+        c.max_size = Some(SizeLimit {
+            side: 4096,
+            pixels: 3840 * 2160,
+        });
+        assert!(check_ring_size(&c, 3840, 2160).is_ok());
+        assert!(check_ring_size(&c, 2160, 3840).is_ok());
+        assert!(check_ring_size(&c, 4096, 1000).is_ok());
+        assert!(check_ring_size(&c, 3842, 2160).is_err());
+        assert!(check_ring_size(&c, 4098, 1000).is_err());
+        assert!(check_ring_size(&c, 1000, 4098).is_err());
+        assert!(check_ring_size(&c, 16384, 16384).is_err());
     }
 
     #[test]
