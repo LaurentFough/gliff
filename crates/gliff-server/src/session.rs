@@ -15,7 +15,7 @@ use gliff_proto::clipboard::CHUNK;
 use gliff_proto::{
     features, version_mismatch, ChromaMode, ClientCaps, ClientMsg, ClipboardMsg, Codec, Greeting,
     OutputInfo as ProtoOutput, Rect, ServerMsg, SessionInfo, VideoPipeline, ERROR_NO_CHROMA,
-    ERROR_NO_CODEC, ERROR_VERSION, PROTOCOL_VERSION,
+    ERROR_NO_CODEC, ERROR_SETUP, ERROR_VERSION, PROTOCOL_VERSION,
 };
 use gliff_sw::VideoMode;
 use gliff_transport::clipboard::progress::Jobs;
@@ -100,8 +100,12 @@ where
         anyhow::bail!("client advertises no chroma mode this server speaks");
     }
 
-    let instance = cfg.target.instance().context("find Hyprland instance")?;
-    let output = setup_output(&instance, &cfg, &caps)?;
+    let instance = report_setup(
+        &mut writer,
+        cfg.target.instance().context("find Hyprland instance"),
+    )
+    .await?;
+    let output = report_setup(&mut writer, setup_output(&instance, &cfg, &caps)).await?;
     tracing::info!(output = %output.name, output.width, output.height, headless = output.is_headless(), "session output ready");
 
     let video = VideoTier::open(cfg.video, cfg.capture, &cfg.render_node);
@@ -126,6 +130,14 @@ where
     let start_fps = ladder.level().fps_cap.min(MAX_FPS);
     let fps_cmd = start_fps;
     let on_gpu = matches!(video, VideoTier::Gpu(_));
+    let started = match VideoStart::open(video, &cfg, &caps, &output, fps_cmd) {
+        Ok(start) => Ok(start),
+        Err(e) if on_gpu => {
+            tracing::warn!(error = %format!("{e:#}"), "cannot start the GPU video pipeline; falling back to the CPU pipeline");
+            VideoStart::open(VideoTier::Cpu, &cfg, &caps, &output, fps_cmd)
+        }
+        Err(e) => Err(e),
+    };
     let VideoStart {
         video,
         chroma,
@@ -134,14 +146,7 @@ where
         ctl,
         settings,
         encoder,
-    } = match VideoStart::open(video, &cfg, &caps, &output, fps_cmd) {
-        Ok(start) => start,
-        Err(e) if on_gpu => {
-            tracing::warn!(error = %format!("{e:#}"), "cannot start the GPU video pipeline; falling back to the CPU pipeline");
-            VideoStart::open(VideoTier::Cpu, &cfg, &caps, &output, fps_cmd)?
-        }
-        Err(e) => return Err(e),
-    };
+    } = report_setup(&mut writer, started).await?;
     // Pipelined behind HelloAck, never waited on: the Pong seeds the
     // round-trip estimate, usually before the first frame ack arrives.
     writer.write_msg(&ServerMsg::Ping { t: now_ms() }).await?;
@@ -161,16 +166,20 @@ where
     // The GPU tier imports the captured dmabuf, so it cannot take the wl_shm
     // ring the CPU tier falls back to when no linear dmabuf is offered.
     let allow_shm = !matches!(video, VideoTier::Gpu(_));
-    let capturer = start_capture(
-        &cfg.target,
-        &output.name,
-        &cfg.render_node,
-        cfg.capture,
-        allow_shm,
-        cap_tx,
-    )?;
+    let capturer = report_setup(
+        &mut writer,
+        start_capture(
+            &cfg.target,
+            &output.name,
+            &cfg.render_node,
+            cfg.capture,
+            allow_shm,
+            cap_tx,
+        ),
+    )
+    .await?;
 
-    let input = start_input(&cfg.target, &output.name, &keymap)?;
+    let input = report_setup(&mut writer, start_input(&cfg.target, &output.name, &keymap)).await?;
     input.send(output.logical_extent()).ok();
     if output.is_headless() {
         // Focus follows the pointer, so put it on the new screen right away:
@@ -361,6 +370,22 @@ where
             anyhow::bail!("{message}: client protocol {version}, server {PROTOCOL_VERSION}");
         }
     }
+}
+
+/// Pass a setup step's result through, first telling the client why the
+/// session cannot start when the step failed; otherwise all the client sees
+/// is the connection closing.
+async fn report_setup<T, W>(writer: &mut Framed<W>, step: Result<T>) -> Result<T>
+where
+    W: AsyncWrite + Unpin,
+{
+    if let Err(e) = &step {
+        // The session ends either way, so a failed write changes nothing.
+        let _ = writer
+            .write_msg(&ServerMsg::error(ERROR_SETUP, format!("{e:#}")))
+            .await;
+    }
+    step
 }
 
 /// What the reader task hands the session.
