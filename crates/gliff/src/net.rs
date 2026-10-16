@@ -235,7 +235,9 @@ fn new_decoder(
             }
         }
     }
-    Ok(VideoDecoder::Cpu(Box::new(gliff_sw::Decoder::new(dual)?)))
+    Ok(VideoDecoder::Cpu(Box::new(gliff_sw::Decoder::new(
+        dual, width, height,
+    )?)))
 }
 
 impl VideoDecoder {

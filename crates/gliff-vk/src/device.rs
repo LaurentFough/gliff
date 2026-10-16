@@ -197,8 +197,20 @@ impl Gpu {
                         .queue_priorities(&priority[..n as usize])
                 })
                 .collect();
+            // Image robustness makes a shader fetch outside an image read
+            // zero instead of undefined memory, as a second line behind the
+            // decoders' own picture size checks. Optional: not every driver
+            // has it.
+            let robust_image_access = {
+                let mut supported = vk::PhysicalDeviceVulkan13Features::default();
+                let mut features = vk::PhysicalDeviceFeatures2::default().push_next(&mut supported);
+                instance.get_physical_device_features2(physical, &mut features);
+                supported.robust_image_access == vk::TRUE
+            };
             let mut f12 = vk::PhysicalDeviceVulkan12Features::default().timeline_semaphore(true);
-            let mut f13 = vk::PhysicalDeviceVulkan13Features::default().synchronization2(true);
+            let mut f13 = vk::PhysicalDeviceVulkan13Features::default()
+                .synchronization2(true)
+                .robust_image_access(robust_image_access);
             let create = vk::DeviceCreateInfo::default()
                 .queue_create_infos(&queue_infos)
                 .enabled_extension_names(&names)
@@ -223,7 +235,7 @@ impl Gpu {
                 CStr::from_ptr(drv.driver_name.as_ptr()).to_string_lossy(),
                 CStr::from_ptr(drv.driver_info.as_ptr()).to_string_lossy()
             );
-            tracing::info!(%name, %driver, ?families, "vulkan device");
+            tracing::info!(%name, %driver, ?families, robust_image_access, "vulkan device");
             let video_encode = match (families.encode, video_caps) {
                 (Some(family), Some(caps)) => {
                     tracing::info!(

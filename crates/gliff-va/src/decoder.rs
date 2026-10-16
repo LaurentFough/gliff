@@ -40,6 +40,8 @@ pub struct H264Decoder {
     config: Config,
     max_width: u32,
     max_height: u32,
+    /// The display size the stream was announced with (`StreamConfig`).
+    expected: (u32, u32),
     sps_bytes: Vec<u8>,
     pps_bytes: Vec<u8>,
     stream: Option<Stream>,
@@ -58,7 +60,9 @@ struct PocState {
 }
 
 impl H264Decoder {
-    pub fn new(display: &Arc<Display>, caps: &Caps) -> Result<Self> {
+    /// A decoder for a stream of `width` x `height` display pixels. An SPS
+    /// of any other size is refused, see [`check_stream_size`].
+    pub fn new(display: &Arc<Display>, caps: &Caps, width: u32, height: u32) -> Result<Self> {
         caps.can_decode()?;
         let config = Config::new(
             display,
@@ -72,6 +76,7 @@ impl H264Decoder {
             config,
             max_width: or(caps.decode_max_width),
             max_height: or(caps.decode_max_height),
+            expected: (width, height),
             sps_bytes: Vec::new(),
             pps_bytes: Vec::new(),
             stream: None,
@@ -111,9 +116,12 @@ impl H264Decoder {
                 NAL_SPS => {
                     if nal.data != self.sps_bytes.as_slice() {
                         let sps = parse_sps(nal.data)?;
-                        self.sps_bytes = nal.data.to_vec();
+                        // Remember the SPS only once it is in use, so a
+                        // refused one is checked again when it repeats.
+                        self.sps_bytes.clear();
                         self.pps_bytes.clear();
                         self.open_stream(sps)?;
+                        self.sps_bytes = nal.data.to_vec();
                     }
                 }
                 NAL_PPS => {
@@ -246,6 +254,10 @@ impl H264Decoder {
     }
 
     fn open_stream(&mut self, sps: Sps) -> Result<()> {
+        // Drop the old stream first: after a refused SPS, slices must not
+        // decode against the previous one.
+        self.stream = None;
+        check_stream_size(&sps, self.expected)?;
         let (cw, ch) = sps.coded_size();
         if cw == 0 || ch == 0 || cw > self.max_width || ch > self.max_height {
             return Err(Error::Unsupported(format!(
@@ -257,7 +269,6 @@ impl H264Decoder {
         // picture being decoded before the marking process frees a slot.
         let refs = (sps.max_num_ref_frames as usize).clamp(1, 16);
         let dpb_slots = refs + 1;
-        self.stream = None;
         let surfaces = (0..dpb_slots + 1)
             .map(|_| Surface::new_nv12(&self.display, cw, ch, UsageHint::Decoder))
             .collect::<Result<Vec<_>>>()?;
@@ -280,6 +291,35 @@ impl H264Decoder {
         self.poc = PocState::default();
         Ok(())
     }
+}
+
+/// The largest coded side accepted from any encoder, the client's decode
+/// maximum. The driver limit in `open_stream` applies as well.
+const MAX_CODED_SIDE: u32 = 4096;
+
+/// Refuse an SPS whose picture is not the announced `expected` size: the
+/// cropped display size must match exactly. Encoders other than ours may pad
+/// the coded size beyond whole macroblocks, so any coded size from the
+/// display size up to `MAX_CODED_SIDE` is accepted. The recombine shader
+/// reads the announced size from the decoded surfaces, and the pipeline
+/// checks that they cover it.
+fn check_stream_size(sps: &Sps, expected: (u32, u32)) -> Result<()> {
+    let display = sps.display_size();
+    let coded = sps.coded_size();
+    let fits = display.0 > 0
+        && display.1 > 0
+        && display == expected
+        && coded.0 >= display.0
+        && coded.1 >= display.1
+        && coded.0 <= MAX_CODED_SIDE
+        && coded.1 <= MAX_CODED_SIDE;
+    if !fits {
+        return Err(Error::StreamSize(format!(
+            "picture {}x{} (coded {}x{}) does not match the announced {}x{}",
+            display.0, display.1, coded.0, coded.1, expected.0, expected.1
+        )));
+    }
+    Ok(())
 }
 
 fn va_picture(surface: &Surface, p: DpbPicture, flags: u32) -> va::VAPictureH264 {
@@ -622,4 +662,93 @@ fn apply_mmco(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::encoder::parameter_sets;
+    use crate::h264::writer::{nal_unit, write_sps};
+    use crate::EncoderSettings;
+
+    fn settings(width: u32, height: u32) -> EncoderSettings {
+        EncoderSettings {
+            width,
+            height,
+            bitrate: 1_000_000,
+            framerate: 60,
+            vbv_ms: EncoderSettings::DEFAULT_VBV_MS,
+        }
+    }
+
+    fn sps(coded: (u32, u32), crop: Option<[u32; 4]>) -> Sps {
+        Sps {
+            pic_width_in_mbs_minus1: coded.0 / 16 - 1,
+            pic_height_in_map_units_minus1: coded.1 / 16 - 1,
+            frame_mbs_only: true,
+            frame_cropping: crop,
+            ..Default::default()
+        }
+    }
+
+    /// The VA-API and Vulkan encoders crop the macroblock padding off the
+    /// right and bottom. Every even size they send must be accepted.
+    #[test]
+    fn accepts_our_encoders_cropped_sizes() {
+        for (w, h) in [(1920, 1080), (1366, 768), (2560, 1440), (642, 362), (2, 2)] {
+            let (sps, _) = parameter_sets(&settings(w, h));
+            let parsed = parse_sps(&nal_unit(3, NAL_SPS, &write_sps(&sps))).unwrap();
+            assert!(check_stream_size(&parsed, (w, h)).is_ok(), "{w}x{h}");
+        }
+    }
+
+    /// A CPU-tier server's OpenH264 SPS, decoded on the GPU client: 1920x1080
+    /// (coded 1920x1088) and 1366x768 (coded 1376x768), as gliff-sw encodes
+    /// them.
+    #[test]
+    fn accepts_openh264_cropped_sizes() {
+        let full_hd = [
+            0x67, 0x42, 0xc0, 0x2a, 0x8c, 0x68, 0x07, 0x80, 0x22, 0x7e, 0x59, 0xa8, 0x08, 0x08,
+            0x08, 0x3c, 0x22, 0x11, 0xa8,
+        ];
+        let wxga = [
+            0x67, 0x42, 0xc0, 0x2a, 0x8c, 0x68, 0x05, 0x60, 0x61, 0xe6, 0xe6, 0xa0, 0x20, 0x20,
+            0x20, 0xf0, 0x88, 0x46, 0xa0,
+        ];
+        let full_hd = parse_sps(&full_hd).unwrap();
+        assert_eq!(full_hd.coded_size(), (1920, 1088));
+        assert!(check_stream_size(&full_hd, (1920, 1080)).is_ok());
+        let wxga = parse_sps(&wxga).unwrap();
+        assert_eq!(wxga.coded_size(), (1376, 768));
+        assert!(check_stream_size(&wxga, (1366, 768)).is_ok());
+    }
+
+    /// Another encoder may pad more than to whole macroblocks.
+    #[test]
+    fn accepts_padding_beyond_whole_macroblocks() {
+        let padded = sps((1936, 1104), Some([0, 8, 0, 12]));
+        assert_eq!(padded.display_size(), (1920, 1080));
+        assert!(check_stream_size(&padded, (1920, 1080)).is_ok());
+        let at_cap = sps((4096, 4096), Some([0, 1024, 0, 1024]));
+        assert!(check_stream_size(&at_cap, (2048, 2048)).is_ok());
+    }
+
+    #[test]
+    fn refuses_a_picture_of_another_size() {
+        // A tiny picture under a large StreamConfig, the out-of-bounds case.
+        assert!(check_stream_size(&sps((16, 16), None), (4096, 4096)).is_err());
+        // Uncropped padding is not the announced size.
+        assert!(check_stream_size(&sps((1920, 1088), None), (1920, 1080)).is_err());
+        // Cropped below the announced size.
+        assert!(check_stream_size(&sps((1920, 1088), Some([0, 0, 0, 8])), (1920, 1080)).is_err());
+        // A coded side above the cap is refused, even with the right display size.
+        let too_big = sps((4112, 1088), Some([0, 1096, 0, 4]));
+        assert_eq!(too_big.display_size(), (1920, 1080));
+        assert!(check_stream_size(&too_big, (1920, 1080)).is_err());
+        // A crop larger than the picture leaves nothing to show.
+        let empty = sps((16, 16), Some([0, 100, 0, 100]));
+        assert_eq!(empty.display_size(), (0, 0));
+        assert!(check_stream_size(&empty, (0, 0)).is_err());
+        assert!(check_stream_size(&empty, (16, 16)).is_err());
+    }
 }
