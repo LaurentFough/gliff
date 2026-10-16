@@ -114,6 +114,9 @@ struct App {
     sessions: RefCell<Vec<Rc<Session>>>,
     /// The session the window shows and sends input to.
     active: RefCell<Option<Rc<Session>>>,
+    /// Offers the local clipboard to the shown session; set once the
+    /// clipboard is watched.
+    local_clipboard: RefCell<Option<clipboard_ui::LocalSelection>>,
     /// Size of the video widget in device pixels, rounded down to even.
     view_size: Cell<(u32, u32)>,
     view_scale: Cell<f64>,
@@ -401,6 +404,7 @@ fn build_ui(app: &adw::Application, cli: &Cli) {
         transfers,
         sessions: RefCell::new(Vec::new()),
         active: RefCell::new(None),
+        local_clipboard: RefCell::new(None),
         view_size: Cell::new((0, 0)),
         view_scale: Cell::new(1.0),
         pressed_keys: RefCell::new(BTreeSet::new()),
@@ -459,20 +463,32 @@ fn build_ui(app: &adw::Application, cli: &Cli) {
         );
     }
 
-    // Offer every local clipboard change to the servers; our own proxy for
-    // a server's selection does not count as a change.
+    // Offer every local clipboard change to the shown server; our own proxy
+    // for a server's selection does not count as a change.
     {
-        let ui = ui.clone();
-        clipboard_ui::watch_local(move || {
-            if ui.cli.no_clipboard {
-                return Vec::new();
-            }
-            ui.sessions
-                .borrow()
-                .iter()
-                .filter_map(|s| s.input_tx.borrow().clone())
-                .collect()
-        });
+        let running = Rc::downgrade(&ui);
+        let shown = Rc::downgrade(&ui);
+        let watch = clipboard_ui::watch_local(
+            move || {
+                running
+                    .upgrade()
+                    .map(|ui| running_inputs(&ui.sessions.borrow(), ui.cli.no_clipboard))
+                    .unwrap_or_default()
+            },
+            move || {
+                shown
+                    .upgrade()
+                    .map(|ui| {
+                        local_offer_targets(
+                            &ui.sessions.borrow(),
+                            active(&ui).as_ref(),
+                            ui.cli.no_clipboard,
+                        )
+                    })
+                    .unwrap_or_default()
+            },
+        );
+        *ui.local_clipboard.borrow_mut() = watch;
     }
 
     window.present();
@@ -617,6 +633,116 @@ fn is_active(ui: &App, s: &Rc<Session>) -> bool {
         .borrow()
         .as_ref()
         .is_some_and(|a| Rc::ptr_eq(a, s))
+}
+
+/// Every running session's input. A local clipboard change revokes the
+/// offer in all of them. Only the shown session can hold one, since a switch
+/// withdraws it, but revoking every session keeps that from resting on the
+/// switch alone.
+fn running_inputs(sessions: &[Rc<Session>], no_clipboard: bool) -> Vec<OutSender> {
+    if no_clipboard {
+        return Vec::new();
+    }
+    sessions
+        .iter()
+        .filter_map(|s| s.input_tx.borrow().clone())
+        .collect()
+}
+
+/// Who the local clipboard is offered to: only the shown session, so a host
+/// in a background tab cannot read what is copied while it is hidden.
+fn local_offer_targets(
+    sessions: &[Rc<Session>],
+    active: Option<&Rc<Session>>,
+    no_clipboard: bool,
+) -> Vec<OutSender> {
+    if no_clipboard {
+        return Vec::new();
+    }
+    sessions
+        .iter()
+        .filter(|s| active.is_some_and(|a| Rc::ptr_eq(a, s)))
+        .filter_map(|s| s.input_tx.borrow().clone())
+        .collect()
+}
+
+/// Withdraw the local clipboard from a session that is no longer shown. The
+/// revocation refuses the host's further requests and aborts what it is
+/// being served. The empty offer after it tells the host to drop the
+/// selection it advertised for us, so its applications stop seeing one.
+fn revoke_local_offer(previous: Option<&Rc<Session>>, no_clipboard: bool) {
+    if no_clipboard {
+        return;
+    }
+    if let Some(tx) = previous.and_then(|s| s.input_tx.borrow().clone()) {
+        let _ = tx.send(clipboard::ToWorker::RevokeLocal);
+        // Nothing can be read from an empty offer, so its generation is moot.
+        let _ = tx.send(clipboard::ToWorker::LocalOffer {
+            mime_types: Vec::new(),
+            files: Default::default(),
+            generation: 0,
+        });
+    }
+}
+
+/// Move the local clipboard to the session just shown: withdraw it from the
+/// one shown before, then offer the current selection again, which reaches
+/// only the shown session. The withdrawal is queued at once, and the new offer
+/// only after the selection has been read.
+fn move_local_offer(
+    previous: Option<&Rc<Session>>,
+    no_clipboard: bool,
+    watch: Option<&clipboard_ui::LocalSelection>,
+) {
+    if no_clipboard {
+        return;
+    }
+    revoke_local_offer(previous, no_clipboard);
+    if let Some(watch) = watch {
+        watch.reoffer();
+    }
+}
+
+/// Whether a server's request may read the local clipboard now. Its worker
+/// may have accepted the request before a tab switch or a new copy, so the
+/// session must still be shown and its offer still the latest.
+fn may_read_local(
+    active: Option<&Rc<Session>>,
+    s: &Rc<Session>,
+    no_clipboard: bool,
+    generation: u64,
+    watch: Option<&clipboard_ui::LocalSelection>,
+) -> bool {
+    !no_clipboard
+        && active.is_some_and(|a| Rc::ptr_eq(a, s))
+        && watch.is_some_and(|w| w.generation() == generation)
+}
+
+/// Serve a server's read of the local clipboard. `shown` gives the shown
+/// session and the clipboard watcher when the read starts, which may be
+/// after a tab switch or a new copy.
+fn serve_local_read(
+    s: &Rc<Session>,
+    no_clipboard: bool,
+    mime_type: String,
+    generation: u64,
+    reply: tokio::sync::mpsc::Sender<std::io::Result<bytes::Bytes>>,
+    shown: impl Fn() -> (Option<Rc<Session>>, Option<clipboard_ui::LocalSelection>) + 'static,
+) {
+    if no_clipboard {
+        return;
+    }
+    let s = s.clone();
+    clipboard_ui::read_local(mime_type, reply, move || {
+        let (active, watch) = shown();
+        may_read_local(
+            active.as_ref(),
+            &s,
+            no_clipboard,
+            generation,
+            watch.as_ref(),
+        )
+    });
 }
 
 fn find_session(ui: &App, name: &str) -> Option<Rc<Session>> {
@@ -827,7 +953,12 @@ fn open_session(ui: &Rc<App>, endpoint: Endpoint) {
 fn show_session(ui: &Rc<App>, s: &Rc<Session>) {
     if !is_active(ui, s) {
         release_pressed_keys(ui);
-        *ui.active.borrow_mut() = Some(s.clone());
+        let previous = ui.active.replace(Some(s.clone()));
+        move_local_offer(
+            previous.as_ref(),
+            ui.cli.no_clipboard,
+            ui.local_clipboard.borrow().as_ref(),
+        );
         if matches!(s.endpoint, Endpoint::Ssh(_)) {
             let mut config = Config::load(&ui.config_path);
             config.shown = Some(s.name.clone());
@@ -852,7 +983,8 @@ fn show_session(ui: &Rc<App>, s: &Rc<Session>) {
 /// Show no session: a black screen, as on a fresh window.
 fn show_nothing(ui: &Rc<App>) {
     release_pressed_keys(ui);
-    ui.active.borrow_mut().take();
+    let previous = ui.active.take();
+    revoke_local_offer(previous.as_ref(), ui.cli.no_clipboard);
     ui.window.set_title(Some("Gliff"));
     show_status(ui, "Not connected");
     ui.stats.set_text("");
@@ -1225,10 +1357,20 @@ fn poll_status(ui: Rc<App>, s: Rc<Session>, rx: Receiver<Status>, generation: u6
                         }
                     }
                 }
-                Status::ClipboardRead { mime_type, reply } => {
-                    if !ui.cli.no_clipboard {
-                        clipboard_ui::read_local(mime_type, reply)
-                    }
+                Status::ClipboardRead {
+                    mime_type,
+                    generation,
+                    reply,
+                } => {
+                    let shown_by = ui.clone();
+                    serve_local_read(
+                        &s,
+                        ui.cli.no_clipboard,
+                        mime_type,
+                        generation,
+                        reply,
+                        move || (active(&shown_by), shown_by.local_clipboard.borrow().clone()),
+                    );
                 }
                 Status::ClipboardTransfer { id, progress } => {
                     let cancel_via = s.clone();
@@ -1966,6 +2108,291 @@ fn device_scale(ui: &App) -> f64 {
 mod tests {
     use super::*;
     use std::cell::RefCell;
+
+    type Input = tokio::sync::mpsc::UnboundedReceiver<clipboard::ToWorker>;
+
+    fn session_with_input() -> (Rc<Session>, Input) {
+        let s = Rc::new(Session::new(Endpoint::Tcp("127.0.0.1:9070".into())));
+        let (tx, rx) = unbounded_channel();
+        *s.input_tx.borrow_mut() = Some(tx);
+        (s, rx)
+    }
+
+    /// What a session's worker was sent about the local clipboard.
+    #[derive(Debug, PartialEq)]
+    enum Queued {
+        Revoke,
+        /// An offer's mime types and generation.
+        Offer(Vec<String>, u64),
+    }
+
+    fn queued(rx: &mut Input) -> Vec<Queued> {
+        let mut all = Vec::new();
+        while let Ok(msg) = rx.try_recv() {
+            all.push(match msg {
+                clipboard::ToWorker::RevokeLocal => Queued::Revoke,
+                clipboard::ToWorker::LocalOffer {
+                    mime_types,
+                    files,
+                    generation,
+                } => {
+                    assert!(files.entries.is_empty());
+                    Queued::Offer(mime_types, generation)
+                }
+                _ => panic!("expected a clipboard message"),
+            });
+        }
+        all
+    }
+
+    fn text(generation: u64) -> Queued {
+        Queued::Offer(vec!["text/plain".into()], generation)
+    }
+
+    /// What a switch sends the session shown before it.
+    fn withdrawn() -> Vec<Queued> {
+        vec![Queued::Revoke, Queued::Offer(Vec::new(), 0)]
+    }
+
+    /// A tab bar: the sessions, the shown one, and the offer routing the
+    /// clipboard watcher in `build_ui` uses.
+    struct Tabs {
+        shown: Rc<RefCell<Option<Rc<Session>>>>,
+        watch: clipboard_ui::LocalSelection,
+        no_clipboard: bool,
+    }
+
+    impl Tabs {
+        fn new(sessions: Vec<Rc<Session>>, no_clipboard: bool) -> Self {
+            let sessions = Rc::new(sessions);
+            let shown = Rc::new(RefCell::new(None::<Rc<Session>>));
+            let watch = {
+                let running = sessions.clone();
+                let sessions = sessions.clone();
+                let shown = shown.clone();
+                clipboard_ui::LocalSelection::new(
+                    move || running_inputs(&running, no_clipboard),
+                    move || local_offer_targets(&sessions, shown.borrow().as_ref(), no_clipboard),
+                )
+            };
+            Self {
+                shown,
+                watch,
+                no_clipboard,
+            }
+        }
+
+        /// What `show_session` does on a switch.
+        fn show(&self, s: &Rc<Session>) {
+            let previous = self.shown.replace(Some(s.clone()));
+            move_local_offer(previous.as_ref(), self.no_clipboard, Some(&self.watch));
+        }
+
+        /// A local copy whose listing has started.
+        fn start_copy(&self) -> u64 {
+            self.watch.changed(false).expect("a local copy is offered")
+        }
+
+        /// A new local copy whose listing completes at once. Without
+        /// clipboard sharing no session is revoked and nothing is listed.
+        fn copy(&self, mime: &str) -> u64 {
+            let Some(gen) = self.watch.changed(false) else {
+                return self.watch.generation();
+            };
+            self.watch
+                .finish(gen, vec![mime.into()], Default::default());
+            gen
+        }
+
+        /// Queue a server's read for `s` the way the status handler does.
+        fn queue_read(
+            &self,
+            s: &Rc<Session>,
+            generation: u64,
+        ) -> tokio::sync::mpsc::Receiver<std::io::Result<bytes::Bytes>> {
+            let (reply, rx) = tokio::sync::mpsc::channel(2);
+            let shown = self.shown.clone();
+            let watch = self.watch.clone();
+            serve_local_read(
+                s,
+                self.no_clipboard,
+                "text/plain".into(),
+                generation,
+                reply,
+                move || (shown.borrow().clone(), Some(watch.clone())),
+            );
+            rx
+        }
+
+        fn may_read(&self, s: &Rc<Session>, generation: u64) -> bool {
+            may_read_local(
+                self.shown.borrow().as_ref(),
+                s,
+                self.no_clipboard,
+                generation,
+                Some(&self.watch),
+            )
+        }
+    }
+
+    #[test]
+    fn only_the_shown_session_is_offered_the_local_clipboard() {
+        let (a, mut a_rx) = session_with_input();
+        let (b, mut b_rx) = session_with_input();
+        let tabs = Tabs::new(vec![a.clone(), b.clone()], false);
+        tabs.copy("text/plain");
+        assert_eq!(queued(&mut a_rx), [Queued::Revoke]);
+        assert_eq!(queued(&mut b_rx), [Queued::Revoke]);
+
+        tabs.shown.replace(Some(b.clone()));
+        let gen = tabs.copy("text/plain");
+        assert_eq!(queued(&mut a_rx), [Queued::Revoke]);
+        assert_eq!(queued(&mut b_rx), [Queued::Revoke, text(gen)]);
+
+        let tabs = Tabs::new(vec![a.clone(), b.clone()], true);
+        tabs.shown.replace(Some(b.clone()));
+        tabs.copy("text/plain");
+        assert_eq!(queued(&mut a_rx), []);
+        assert_eq!(queued(&mut b_rx), []);
+    }
+
+    #[test]
+    fn the_servers_offer_taking_the_clipboard_revokes_every_session() {
+        let (a, mut a_rx) = session_with_input();
+        let (b, mut b_rx) = session_with_input();
+        let tabs = Tabs::new(vec![a.clone(), b.clone()], false);
+        tabs.show(&b);
+        tabs.copy("text/plain");
+        queued(&mut a_rx);
+        queued(&mut b_rx);
+        assert_eq!(tabs.watch.changed(true), None);
+        assert_eq!(queued(&mut a_rx), [Queued::Revoke]);
+        assert_eq!(queued(&mut b_rx), [Queued::Revoke]);
+    }
+
+    #[test]
+    fn switching_tabs_moves_the_local_offer() {
+        let (a, mut a_rx) = session_with_input();
+        let (b, mut b_rx) = session_with_input();
+        let tabs = Tabs::new(vec![a.clone(), b.clone()], false);
+        tabs.show(&a);
+        let first = tabs.copy("text/plain");
+        assert_eq!(queued(&mut a_rx), [Queued::Revoke, text(first)]);
+        assert_eq!(queued(&mut b_rx), [Queued::Revoke]);
+
+        // A copy of files is still being listed when the tab switches.
+        let listing = tabs.start_copy();
+        tabs.show(&b);
+        tabs.watch
+            .finish(listing, vec!["text/uri-list".into()], Default::default());
+        let reoffer = tabs.watch.generation();
+        tabs.watch
+            .finish(reoffer, vec!["text/plain".into()], Default::default());
+
+        let mut a_expected = vec![Queued::Revoke];
+        a_expected.extend(withdrawn());
+        assert_eq!(queued(&mut a_rx), a_expected);
+        assert_eq!(queued(&mut b_rx), [Queued::Revoke, text(reoffer)]);
+
+        // Showing no session withdraws the offer too.
+        revoke_local_offer(tabs.shown.take().as_ref(), false);
+        assert_eq!(queued(&mut b_rx), withdrawn());
+    }
+
+    /// Documents the order a switch queues: the withdrawal, then the new
+    /// offer. It does not guard it: the new offer is always sent from a
+    /// task after the clipboard is read, whatever order the calls are in.
+    #[test]
+    fn the_withdrawal_is_queued_before_the_new_offer() {
+        // Both tabs share one input, so the order of the two is visible.
+        let (a, mut rx) = session_with_input();
+        let b = Rc::new(Session::new(Endpoint::Tcp("127.0.0.1:9071".into())));
+        *b.input_tx.borrow_mut() = a.input_tx.borrow().clone();
+        let tabs = Tabs::new(vec![a.clone(), b.clone()], false);
+        tabs.show(&a);
+        tabs.show(&b);
+        let reoffer = tabs.watch.generation();
+        tabs.watch
+            .finish(reoffer, vec!["text/plain".into()], Default::default());
+        let mut expected = withdrawn();
+        expected.push(text(reoffer));
+        assert_eq!(queued(&mut rx), expected);
+    }
+
+    /// Run the queued reads until `rx` answers: true for a refusal, false
+    /// when the read went past the check (it then finds no clipboard without
+    /// a display and ends with no bytes).
+    fn run_read(
+        context: &glib::MainContext,
+        rx: &mut tokio::sync::mpsc::Receiver<std::io::Result<bytes::Bytes>>,
+    ) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            context.iteration(false);
+            match rx.try_recv() {
+                Ok(Err(_)) => {
+                    assert!(rx.try_recv().is_err(), "bytes after a refusal");
+                    return true;
+                }
+                Ok(Ok(_)) => panic!("clipboard bytes were sent"),
+                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => return false,
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {}
+            }
+            assert!(Instant::now() < deadline, "read did not finish");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    #[test]
+    fn the_status_handler_refuses_a_read_outdated_before_it_starts() {
+        let context = glib::MainContext::default();
+        let _owner = context.acquire().unwrap();
+        let (a, _a_rx) = session_with_input();
+        let (b, _b_rx) = session_with_input();
+        let tabs = Tabs::new(vec![a.clone(), b.clone()], false);
+        tabs.show(&a);
+        let offered = tabs.copy("text/plain");
+
+        // a's read is queued, then the tab switches before it runs.
+        let mut read = tabs.queue_read(&a, offered);
+        tabs.show(&b);
+        assert!(run_read(&context, &mut read));
+
+        // b's read is queued, then a new copy replaces the selection.
+        let current = tabs.watch.generation();
+        let mut read = tabs.queue_read(&b, current);
+        tabs.copy("image/png");
+        assert!(run_read(&context, &mut read));
+
+        // A read for the shown session's current offer is let through.
+        let mut read = tabs.queue_read(&b, tabs.watch.generation());
+        assert!(!run_read(&context, &mut read));
+    }
+
+    #[test]
+    fn a_read_queued_before_a_switch_or_a_copy_is_refused() {
+        let (a, _a_rx) = session_with_input();
+        let (b, _b_rx) = session_with_input();
+        let tabs = Tabs::new(vec![a.clone(), b.clone()], false);
+        tabs.show(&a);
+        let offered = tabs.copy("text/plain");
+        assert!(tabs.may_read(&a, offered));
+        assert!(!tabs.may_read(&b, offered));
+
+        // A request a's worker accepted before the switch reaches the UI after it.
+        tabs.show(&b);
+        assert!(!tabs.may_read(&a, offered));
+
+        // b's own request against its offer, then one that a new copy outdated.
+        let current = tabs.watch.generation();
+        assert!(tabs.may_read(&b, current));
+        tabs.copy("image/png");
+        assert!(!tabs.may_read(&b, current));
+
+        let tabs = Tabs::new(vec![a.clone()], true);
+        tabs.shown.replace(Some(a.clone()));
+        assert!(!tabs.may_read(&a, tabs.watch.generation()));
+    }
 
     #[test]
     fn reconnect_invalidates_the_previous_scale_request() {

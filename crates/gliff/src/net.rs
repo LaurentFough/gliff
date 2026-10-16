@@ -90,6 +90,8 @@ pub enum Status {
     /// `reply` chunk by chunk and drop the sender at the end.
     ClipboardRead {
         mime_type: String,
+        /// The UI's generation of the offer the request was made against.
+        generation: u64,
         reply: mpsc::Sender<std::io::Result<Bytes>>,
     },
     /// A paste from the server's offer that is taking a while, or ended.
