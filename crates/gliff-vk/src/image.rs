@@ -30,6 +30,9 @@ pub struct DmabufPlane<'a> {
 pub struct Image {
     gpu: Arc<Gpu>,
     pub(crate) image: vk::Image,
+    /// A plane-per-image import (see `import_nv12_planes`): `image` is the
+    /// Y plane and these hold the others. Barriers cover them all.
+    extra: Vec<vk::Image>,
     /// One allocation, or one per plane for a disjoint import.
     memory: Vec<vk::DeviceMemory>,
     pub format: vk::Format,
@@ -90,6 +93,7 @@ impl Image {
             layers: 1,
             layer_views: Vec::new(),
             plane_views: Vec::new(),
+            extra: Vec::new(),
             layout: vk::ImageLayout::UNDEFINED.into(),
         };
         let plane_usage = vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::SAMPLED;
@@ -163,6 +167,7 @@ impl Image {
             layers: 1,
             layer_views: Vec::new(),
             plane_views: Vec::new(),
+            extra: Vec::new(),
             layout: vk::ImageLayout::UNDEFINED.into(),
         };
         let video_usage = usage
@@ -242,6 +247,7 @@ impl Image {
             layers: 1,
             layer_views: Vec::new(),
             plane_views: Vec::new(),
+            extra: Vec::new(),
             layout: vk::ImageLayout::UNDEFINED.into(),
         };
         // The shader declares `rgba8`, so it stores through an RGBA view of
@@ -295,6 +301,7 @@ impl Image {
             layers: 1,
             layer_views: Vec::new(),
             plane_views: Vec::new(),
+            extra: Vec::new(),
             layout: vk::ImageLayout::UNDEFINED.into(),
         };
         img.layer_views.push(img.view(
@@ -394,6 +401,7 @@ impl Image {
             layers: 1,
             layer_views: Vec::new(),
             plane_views: Vec::new(),
+            extra: Vec::new(),
             layout: vk::ImageLayout::UNDEFINED.into(),
         };
         img.layer_views.push(img.view(
@@ -524,6 +532,7 @@ impl Image {
             layers: 1,
             layer_views: Vec::new(),
             plane_views: Vec::new(),
+            extra: Vec::new(),
             layout: vk::ImageLayout::GENERAL.into(),
         };
         let plane_usage = usage & (vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::SAMPLED);
@@ -539,6 +548,126 @@ impl Image {
             0,
             plane_usage,
         )?);
+        Ok(img)
+    }
+
+    /// Import an exported VA-API NV12 surface whose planes are separate
+    /// dmabufs (NVIDIA's VA-API driver) as one image per plane: R8 for Y,
+    /// R8G8 at half size for UV, each with the plane's own extent. Imported
+    /// as one DISJOINT NV12 image, NVIDIA's Vulkan driver lays the chroma
+    /// plane out differently from how the VA-API driver wrote it at many
+    /// sizes (1920x1080 among them), and chroma reads back as zeros.
+    pub(crate) fn import_nv12_planes(gpu: &Arc<Gpu>, desc: &PrimeDescriptor) -> Result<Self> {
+        if desc.planes.len() != 2
+            || desc.objects.len() != 2
+            || desc.planes.iter().enumerate().any(|(i, p)| p.object != i)
+        {
+            return Err(Error::Unsupported(
+                "per-plane import needs one dmabuf per plane".into(),
+            ));
+        }
+        let families = gpu.families.all();
+        let formats = [vk::Format::R8_UNORM, vk::Format::R8G8_UNORM];
+        let extents = [
+            (desc.width, desc.height),
+            (desc.width.div_ceil(2), desc.height.div_ceil(2)),
+        ];
+        let mut images = Vec::new();
+        let mut memory = Vec::new();
+        let release = |images: &[vk::Image], memory: &[vk::DeviceMemory]| unsafe {
+            // SAFETY: nothing else refers to these yet.
+            for &i in images {
+                gpu.device.destroy_image(i, None);
+            }
+            for &m in memory {
+                gpu.device.free_memory(m, None);
+            }
+        };
+        for i in 0..2 {
+            if gpu.modifier_properties(formats[i], desc.modifier).is_none() {
+                release(&images, &memory);
+                return Err(Error::Unsupported(format!(
+                    "{:?} with modifier {:#x} is not importable",
+                    formats[i], desc.modifier
+                )));
+            }
+            let layouts = [vk::SubresourceLayout {
+                offset: desc.planes[i].offset as u64,
+                size: 0,
+                row_pitch: desc.planes[i].pitch as u64,
+                array_pitch: 0,
+                depth_pitch: 0,
+            }];
+            let mut explicit = vk::ImageDrmFormatModifierExplicitCreateInfoEXT::default()
+                .drm_format_modifier(desc.modifier)
+                .plane_layouts(&layouts);
+            let mut external = vk::ExternalMemoryImageCreateInfo::default()
+                .handle_types(vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT);
+            let mut info = vk::ImageCreateInfo::default()
+                .image_type(vk::ImageType::TYPE_2D)
+                .format(formats[i])
+                .extent(vk::Extent3D {
+                    width: extents[i].0,
+                    height: extents[i].1,
+                    depth: 1,
+                })
+                .mip_levels(1)
+                .array_layers(1)
+                .samples(vk::SampleCountFlags::TYPE_1)
+                .tiling(vk::ImageTiling::DRM_FORMAT_MODIFIER_EXT)
+                .usage(vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_SRC)
+                .initial_layout(vk::ImageLayout::UNDEFINED)
+                .push_next(&mut explicit)
+                .push_next(&mut external);
+            if families.len() > 1 {
+                info = info
+                    .sharing_mode(vk::SharingMode::CONCURRENT)
+                    .queue_family_indices(&families);
+            }
+            match Self::create_imported(gpu, &info, desc.objects[i].as_fd()) {
+                Ok((image, mem)) => {
+                    images.push(image);
+                    memory.push(mem);
+                }
+                Err(e) => {
+                    release(&images, &memory);
+                    return Err(e);
+                }
+            }
+        }
+        let mut img = Self {
+            gpu: gpu.clone(),
+            image: images[0],
+            extra: vec![images[1]],
+            memory,
+            format: NV12,
+            width: desc.width,
+            height: desc.height,
+            layers: 1,
+            layer_views: Vec::new(),
+            plane_views: Vec::new(),
+            layout: vk::ImageLayout::GENERAL.into(),
+        };
+        for (i, &format) in formats.iter().enumerate() {
+            let image = if i == 0 { img.image } else { img.extra[0] };
+            let mut usage_info =
+                vk::ImageViewUsageCreateInfo::default().usage(vk::ImageUsageFlags::SAMPLED);
+            let info = vk::ImageViewCreateInfo::default()
+                .image(image)
+                .view_type(vk::ImageViewType::TYPE_2D)
+                .format(format)
+                .subresource_range(vk::ImageSubresourceRange {
+                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    base_mip_level: 0,
+                    level_count: 1,
+                    base_array_layer: 0,
+                    layer_count: 1,
+                })
+                .push_next(&mut usage_info);
+            // SAFETY: a valid image and range; `img` destroys the view.
+            img.plane_views
+                .push(unsafe { gpu.device.create_image_view(&info, None) }?);
+        }
         Ok(img)
     }
 
@@ -775,7 +904,10 @@ impl Image {
                 base_array_layer: 0,
                 layer_count: self.layers,
             });
-        let barriers = [barrier];
+        let barriers: Vec<_> = std::iter::once(self.image)
+            .chain(self.extra.iter().copied())
+            .map(|image| barrier.image(image))
+            .collect();
         let dep = vk::DependencyInfo::default().image_memory_barriers(&barriers);
         // SAFETY: recording into a command buffer in the recording state.
         unsafe { self.gpu.device.cmd_pipeline_barrier2(cmd, &dep) };
@@ -817,7 +949,10 @@ impl Image {
                 base_array_layer: 0,
                 layer_count: self.layers,
             });
-        let barriers = [barrier];
+        let barriers: Vec<_> = std::iter::once(self.image)
+            .chain(self.extra.iter().copied())
+            .map(|image| barrier.image(image))
+            .collect();
         let dep = vk::DependencyInfo::default().image_memory_barriers(&barriers);
         // SAFETY: recording into a command buffer in the recording state.
         unsafe { self.gpu.device.cmd_pipeline_barrier2(cmd, &dep) };
@@ -908,6 +1043,9 @@ impl Drop for Image {
                 self.gpu.device.destroy_image_view(v, None);
             }
             self.gpu.device.destroy_image(self.image, None);
+            for image in self.extra.drain(..) {
+                self.gpu.device.destroy_image(image, None);
+            }
             for m in self.memory.drain(..) {
                 self.gpu.device.free_memory(m, None);
             }

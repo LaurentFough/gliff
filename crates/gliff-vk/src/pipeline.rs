@@ -658,7 +658,13 @@ impl DecodeStream {
                 .dec
                 .surfaces()
                 .iter()
-                .map(|s| Image::import_nv12(&self.gpu, &s.export()?, false))
+                .map(|s| {
+                    let desc = s.export()?;
+                    match Image::import_nv12_planes(&self.gpu, &desc) {
+                        Ok(img) => Ok(img),
+                        Err(_) => Image::import_nv12(&self.gpu, &desc, false),
+                    }
+                })
                 .collect::<Result<Vec<_>>>()?;
             self.generation = self.dec.generation();
         }
