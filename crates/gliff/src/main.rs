@@ -1431,9 +1431,11 @@ impl ReleaseHotkey {
     ) -> bool {
         match self {
             Self::None => false,
-            Self::Chord { mods, keyval: k } => keyval == *k && (state & CHORD_MODS) == *mods,
+            Self::Chord { mods, keyval: k } => {
+                same_key(keyval, *k) && (state & CHORD_MODS) == *mods
+            }
             Self::DoubleTap { keyval: k, within } => {
-                if keyval != *k {
+                if !same_key(keyval, *k) {
                     return false;
                 }
                 let now = Instant::now();
@@ -1486,6 +1488,20 @@ impl ReleaseHotkey {
             }
         }
     }
+}
+
+/// True if a pressed keyval is the hotkey's key. GTK reports the keyval with
+/// Shift and Caps Lock applied, so Ctrl+Shift+q arrives as `Q` and Shift+Tab
+/// as `ISO_Left_Tab`; compare both unshifted.
+fn same_key(pressed: gdk::Key, key: gdk::Key) -> bool {
+    let unshifted = |k: gdk::Key| {
+        if k == gdk::Key::ISO_Left_Tab {
+            gdk::Key::Tab
+        } else {
+            k.to_lower()
+        }
+    };
+    unshifted(pressed) == unshifted(key)
 }
 
 /// Resolve a key name to a `gdk::Key`, accepting lower-case and a few aliases.
@@ -2036,6 +2052,24 @@ mod tests {
             gdk::ModifierType::SHIFT_MASK | gdk::ModifierType::LOCK_MASK,
             &lt
         ));
+    }
+
+    #[test]
+    fn chord_matches_the_shifted_keyval() {
+        let lt = RefCell::new(None);
+        let ctrl = gdk::ModifierType::CONTROL_MASK;
+        let alt = gdk::ModifierType::ALT_MASK;
+        let shift = gdk::ModifierType::SHIFT_MASK;
+        // GTK reports Ctrl+Shift+q as Q, and Shift+Tab as ISO_Left_Tab.
+        let hk = ReleaseHotkey::parse("ctrl+shift+q").unwrap();
+        assert!(hk.matches(gdk::Key::Q, ctrl | shift, &lt));
+        let hk = ReleaseHotkey::parse("shift+tab").unwrap();
+        assert!(hk.matches(gdk::Key::ISO_Left_Tab, shift, &lt));
+        // Caps Lock turns q into Q as well.
+        let hk = ReleaseHotkey::parse("ctrl+alt+q").unwrap();
+        let lock = gdk::ModifierType::LOCK_MASK;
+        assert!(hk.matches(gdk::Key::Q, ctrl | alt | lock, &lt));
+        assert!(!hk.matches(gdk::Key::W, ctrl | alt, &lt));
     }
 
     #[test]
