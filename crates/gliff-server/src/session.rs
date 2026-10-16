@@ -1,6 +1,6 @@
 //! One client session: output setup, the capture/encode/send loop, and input.
 
-use std::ops::ControlFlow;
+use std::ops::{ControlFlow, Deref, DerefMut};
 use std::os::fd::AsFd;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -218,7 +218,11 @@ where
         writer,
         video,
         instance,
-        output,
+        output: ServedOutput {
+            output,
+            capturer: Some(capturer),
+            input: Some(input),
+        },
         stream,
         encoder_max,
         gpu_encoded: false,
@@ -231,8 +235,6 @@ where
         chroma,
         settings,
         encoder,
-        input,
-        capturer,
         pending: None,
         capture_asked: true,
         blocked_noted: false,
@@ -298,7 +300,7 @@ where
             {
                 tracing::info!("no first frame yet; recapturing with full damage");
                 session.recaptured = true;
-                session.capturer.recapture().ok();
+                session.capturer().recapture().ok();
                 ControlFlow::Continue(())
             }
             // The refinement timer: fires when the screen is still and the
@@ -323,19 +325,8 @@ where
         session.pump_encoder()?;
     }
 
-    session.inject(InputCmd::ReleaseAll);
-    let Session {
-        capturer,
-        input,
-        output,
-        ..
-    } = session;
-    // Hyprland 0.56 aborts if a cursor capture session is still alive when
-    // its monitor is removed, so end the capture and input threads before
-    // dropping the output.
-    drop(capturer);
-    drop(input);
-    drop(output);
+    // Dropping the session ends it in order; see `impl Drop for Session`.
+    drop(session);
     Ok(())
 }
 
@@ -416,7 +407,7 @@ struct Session {
     writer: Writer,
     video: VideoTier,
     instance: hypr_ipc::Instance,
-    output: SessionOutput,
+    output: ServedOutput<SessionOutput, Capturer, Input>,
     /// Encoded size. Equals the output size, except for a mirrored screen
     /// larger than the client's window, or any output larger than the
     /// encoder's maximum, which are scaled down to fit.
@@ -438,8 +429,6 @@ struct Session {
     chroma: ChromaMode,
     settings: EncoderSettings,
     encoder: VideoEncoder,
-    input: Input,
-    capturer: Capturer,
     /// The newest captured frame not yet encoded.
     pending: Option<CapturedFrame>,
     capture_asked: bool,
@@ -615,7 +604,16 @@ impl Session {
 
     /// Forward an input event; a dead input thread ends the session elsewhere.
     fn inject(&self, cmd: InputCmd) {
-        let _ = self.input.send(cmd);
+        if let Some(input) = &self.output.input {
+            let _ = input.send(cmd);
+        }
+    }
+
+    fn capturer(&self) -> &Capturer {
+        self.output
+            .capturer
+            .as_ref()
+            .expect("the capturer lives until the session drops")
     }
 
     /// Resize a headless output to the client's window, within the size it
@@ -871,7 +869,7 @@ impl Session {
         // frame replaces `pending` (latest wins), so the frame that finally
         // goes out on a slow link is current, not as old as the stall.
         if !self.capture_asked {
-            self.capturer.request_frame().ok();
+            self.capturer().request_frame().ok();
             self.capture_asked = true;
         }
         Ok(())
@@ -1139,7 +1137,7 @@ impl Session {
                 self.refines = MAX_REFINES;
                 self.want_keyframe = true;
                 self.encode_us = 0.0;
-                self.capturer.use_shm()?;
+                self.capturer().use_shm()?;
                 self.capture_asked = true;
                 return Ok(None);
             }
@@ -1447,6 +1445,46 @@ impl VideoEncoder {
     }
 }
 
+// Runs before the fields drop, so held keys are released before the
+// capture thread ends, as the threads and output in `ServedOutput` go after.
+impl Drop for Session {
+    fn drop(&mut self) {
+        self.inject(InputCmd::ReleaseAll);
+    }
+}
+
+/// The output with the capture and input threads that use it. Dropping it
+/// ends both threads before the output, on every exit from `run`, a `?`
+/// return or an unwinding panic included.
+struct ServedOutput<O, C, I> {
+    output: O,
+    /// `Some` until the drop.
+    capturer: Option<C>,
+    input: Option<I>,
+}
+
+impl<O, C, I> Drop for ServedOutput<O, C, I> {
+    fn drop(&mut self) {
+        // Hyprland 0.56 aborts if a cursor capture session is still alive
+        // when its monitor is removed. `output` drops after this body.
+        drop(self.capturer.take());
+        drop(self.input.take());
+    }
+}
+
+impl<O, C, I> Deref for ServedOutput<O, C, I> {
+    type Target = O;
+    fn deref(&self) -> &O {
+        &self.output
+    }
+}
+
+impl<O, C, I> DerefMut for ServedOutput<O, C, I> {
+    fn deref_mut(&mut self) -> &mut O {
+        &mut self.output
+    }
+}
+
 /// The output being served. A created headless output is removed on drop, on
 /// every exit path including a failure later in setup.
 struct SessionOutput {
@@ -1697,5 +1735,37 @@ mod tests {
             ..caps
         };
         assert!(stream_limit((4096, 4096), &bad).is_err());
+    }
+
+    #[test]
+    fn served_output_ends_threads_before_the_output() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        type Log = Rc<RefCell<Vec<&'static str>>>;
+        struct Probe(&'static str, Log);
+        impl Drop for Probe {
+            fn drop(&mut self) {
+                self.1.borrow_mut().push(self.0);
+            }
+        }
+        let served = |log: &Log| ServedOutput {
+            output: Probe("output", log.clone()),
+            capturer: Some(Probe("capturer", log.clone())),
+            input: Some(Probe("input", log.clone())),
+        };
+        let want = ["capturer", "input", "output"];
+
+        let log = Log::default();
+        drop(served(&log));
+        assert_eq!(*log.borrow(), want);
+
+        let log = Log::default();
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _served = served(&log);
+            panic!("session failed");
+        }));
+        assert!(unwound.is_err());
+        assert_eq!(*log.borrow(), want);
     }
 }
