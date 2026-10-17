@@ -104,6 +104,31 @@ that probe order, when a new generation fails:
 - **Coded buffer status.** `VA_CODED_BUF_STATUS_*` bits are logged; a
   `BAD_BITSTREAM` status fails the encode and the server falls back to CPU.
 
+## Intel Haswell (ANV + i965)
+
+Found on an Iris 5100 (Haswell GT3) with Mesa 26.2.4 and `libva-intel-driver`
+(i965) 2.4.5; the iHD driver does not cover Haswell. `gliff-probe gpu`,
+`surfaces` and `roundtrip` pass, and Mesa warns "Haswell Vulkan support is
+incomplete".
+
+- **Entrypoint.** `VAEntrypointEncSlice`, rate control CQP | CBR | VBR,
+  packed headers 0x1f, maximum 4096x4096.
+- **CBR logs "Unrepairable overflow!" on near-static content.** The i965
+  rate control cannot pad the stream with `disable_bit_stuffing` set, so on
+  an idle desktop its HRD buffer fills and it prints the line to stderr
+  repeatedly. The encoder therefore uses VBR on i965 (`pick_rate_control`),
+  which needs no padding.
+- **VBR needs an initial QP.** Left at the driver's default, VBR was silent
+  (0 messages over an extended session at 1920x1080) but visibly softer
+  than CBR. `initial_qp = 22` is sharper than CBR in a side-by-side on a
+  live session. `min_qp` made no difference to the output. The
+  messages still appear now and then (1 to 15 per run in short sessions, CBR
+  gave 4), so the change is for picture quality, not for silence.
+- **"Unrepairable underflow!" at very low bitrates.** The synthetic
+  `gliff-probe roundtrip --bitrate 500000` stripes make the driver log it in
+  both modes, since it cannot reach the target even at the highest QP. It is
+  noise; the stream still decodes.
+
 ## NVIDIA (proprietary driver, Vulkan Video)
 
 Found on a GeForce RTX 5070 Ti, driver 610.57.04, Hyprland on DP-1 at
@@ -134,7 +159,7 @@ Found on a GeForce RTX 5070 Ti, driver 610.57.04, Hyprland on DP-1 at
   stops at the first decode). Only the server side was tested here.
 
 ## Not yet tested anywhere
-- Intel generations before Panther Lake.
+- Intel generations between Haswell and Panther Lake.
 - Baseline-profile streams (the CPU tier's output) through the VA-API High
   decode config: radeonsi accepts them, and so does iHD on Panther Lake
   (the e2e cpu-server -> gpu-client case); other drivers are unverified.

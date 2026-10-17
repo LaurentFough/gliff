@@ -19,6 +19,9 @@ use crate::{Error, Result};
 const LOG2_MAX_FRAME_NUM_MINUS4: u8 = 12;
 const LOG2_MAX_POC_LSB_MINUS4: u8 = 12;
 const PIC_INIT_QP: u8 = 26;
+/// Starting QP for VBR on the i965 driver. Its default is visibly soft; 22
+/// is sharp and still within the bitrate cap.
+const I965_VBR_INITIAL_QP: u32 = 22;
 const LEVEL_IDC: u8 = 51;
 
 #[derive(Debug, Clone)]
@@ -64,6 +67,7 @@ pub struct H264Encoder {
     poc: i32,
     started: bool,
     pending_rate: Option<(u32, u32, u32)>,
+    rate_control: u32,
 }
 
 impl H264Encoder {
@@ -83,13 +87,14 @@ impl H264Encoder {
                 "{cw}x{ch} exceeds the encoder maximum {max_w}x{max_h}"
             )));
         }
+        let rate_control = pick_rate_control(display, caps);
         let config = Config::new(
             display,
             Caps::PROFILE,
             entrypoint,
             &[
                 (va::VAConfigAttribRTFormat, va::VA_RT_FORMAT_YUV420),
-                (va::VAConfigAttribRateControl, va::VA_RC_CBR),
+                (va::VAConfigAttribRateControl, rate_control),
                 (va::VAConfigAttribEncPackedHeaders, Caps::PACKED_HEADERS),
             ],
         )?;
@@ -144,6 +149,7 @@ impl H264Encoder {
             poc: 0,
             started: false,
             pending_rate: None,
+            rate_control,
         })
     }
 
@@ -348,7 +354,12 @@ impl H264Encoder {
         // SAFETY: writing bitfields of a zeroed union member.
         unsafe {
             rc.rc_flags.bits.set_disable_frame_skip(1);
-            rc.rc_flags.bits.set_disable_bit_stuffing(1);
+            if self.rate_control == va::VA_RC_CBR {
+                rc.rc_flags.bits.set_disable_bit_stuffing(1);
+            }
+        }
+        if self.rate_control == va::VA_RC_VBR {
+            rc.initial_qp = I965_VBR_INITIAL_QP;
         }
         // SAFETY: as above.
         let mut fr: va::VAEncMiscParameterFrameRate = unsafe { std::mem::zeroed() };
@@ -521,4 +532,18 @@ fn parameter_sets(s: &EncoderSettings) -> (Sps, Pps) {
         ..Default::default()
     };
     (sps, pps)
+}
+
+/// CBR, except on the i965 driver (Haswell and older). Its rate control may
+/// not pad the stream with bit stuffing off, and then logs "Unrepairable
+/// overflow!" on near-static content; VBR needs no padding, at a sharper
+/// starting QP than the driver's default.
+fn pick_rate_control(display: &Display, caps: &Caps) -> u32 {
+    let vbr = caps.rate_control & va::VA_RC_VBR != 0 && display.vendor.contains("i965");
+    let choice = if vbr { va::VA_RC_VBR } else { va::VA_RC_CBR };
+    tracing::info!(
+        mode = if vbr { "VBR" } else { "CBR" },
+        "va-api encoder rate control"
+    );
+    choice
 }
