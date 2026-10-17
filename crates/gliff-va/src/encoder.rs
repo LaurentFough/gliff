@@ -19,9 +19,9 @@ use crate::{Error, Result};
 const LOG2_MAX_FRAME_NUM_MINUS4: u8 = 12;
 const LOG2_MAX_POC_LSB_MINUS4: u8 = 12;
 const PIC_INIT_QP: u8 = 26;
-/// Starting QP for VBR on the i965 driver. Its default is visibly soft; 22
-/// is sharp and still within the bitrate cap.
-const I965_VBR_INITIAL_QP: u32 = 22;
+/// Starting QP for VBR on the i965 driver. Its default is visibly soft; 18
+/// is sharp and spends about 10% more bits than 22.
+const I965_VBR_INITIAL_QP: u32 = 18;
 const LEVEL_IDC: u8 = 51;
 
 #[derive(Debug, Clone)]

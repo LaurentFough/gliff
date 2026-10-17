@@ -120,10 +120,13 @@ incomplete".
   which needs no padding.
 - **VBR needs an initial QP.** Left at the driver's default, VBR was silent
   (0 messages over an extended session at 1920x1080) but visibly softer
-  than CBR. `initial_qp = 22` is sharper than CBR in a side-by-side on a
-  live session. `min_qp` made no difference to the output. The
-  messages still appear now and then (1 to 15 per run in short sessions, CBR
-  gave 4), so the change is for picture quality, not for silence.
+  than CBR. `initial_qp = 18` looked slightly sharper than 22, which was
+  itself sharper than CBR, in a side-by-side on a live session; it costs about
+  10% more bits than 22 on the synthetic stream (974 KB against 866 KB at
+  20 Mbps, 811 KB against 741 KB at 4 Mbps). `min_qp` made no difference to
+  the output. The messages still appear now and then in short sessions (CBR
+  4, VBR with QP 22 1 to 15, with QP 18 0), so the change is for picture
+  quality, not for silence.
 - **"Unrepairable underflow!" at very low bitrates.** The synthetic
   `gliff-probe roundtrip --bitrate 500000` stripes make the driver log it in
   both modes, since it cannot reach the target even at the highest QP. It is
