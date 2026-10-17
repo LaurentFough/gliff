@@ -13,6 +13,9 @@ use tokio::io::AsyncWrite;
 use tokio::sync::{mpsc, Notify};
 use tokio::task::JoinHandle;
 
+/// Sound packets that may wait for the socket: half a second.
+const MAX_QUEUED_AUDIO: usize = 50;
+
 /// Messages waiting for the writer task. Bounded by coalescing: stale
 /// entries a newer one supersedes are dropped rather than queued behind it.
 #[derive(Default)]
@@ -65,6 +68,34 @@ impl Queue {
             | ServerMsg::ClipboardData { .. }
             | ServerMsg::ClipboardAck { .. }
             | ServerMsg::ClipboardAbort { .. } => {}
+            // Sound goes ahead of a video frame still waiting, in its own
+            // order, so a frame queued behind a slow write does not delay
+            // it; past a bound the oldest packet goes (the client conceals
+            // a gap).
+            ServerMsg::AudioStart { .. } | ServerMsg::AudioFrame { .. } => {
+                let audio = |m: &ServerMsg| {
+                    matches!(
+                        m,
+                        ServerMsg::AudioStart { .. } | ServerMsg::AudioFrame { .. }
+                    )
+                };
+                if self.packets.iter().filter(|(m, _)| audio(m)).count() >= MAX_QUEUED_AUDIO {
+                    if let Some(i) = self
+                        .packets
+                        .iter()
+                        .position(|(m, _)| matches!(m, ServerMsg::AudioFrame { .. }))
+                    {
+                        self.packets.remove(i);
+                    }
+                }
+                let at = self
+                    .packets
+                    .iter()
+                    .position(|(m, _)| matches!(m, ServerMsg::VideoFrame { .. }))
+                    .unwrap_or(self.packets.len());
+                self.packets.insert(at, (msg, payloads));
+                return;
+            }
             _ => unreachable!("unsupported queued server message"),
         }
         self.packets.push_back((msg, payloads));
@@ -253,6 +284,38 @@ mod tests {
         assert!(matches!(
             queue.packets[0].0,
             ServerMsg::ClipboardData { id: 0, .. }
+        ));
+    }
+
+    #[test]
+    fn audio_goes_ahead_of_a_waiting_frame_in_order_and_bounded() {
+        let mut queue = Queue::default();
+        let (msg, payloads) = video(1);
+        queue.push(msg, payloads);
+        queue.push(
+            ServerMsg::AudioStart {
+                codec: gliff_proto::AudioCodec::Opus,
+                sample_rate: 48000,
+                channels: 2,
+            },
+            Vec::new(),
+        );
+        for seq in 0..100 {
+            queue.push(ServerMsg::AudioFrame { seq, data_len: 1 }, vec![vec![0]]);
+        }
+        assert_eq!(queue.packets.len(), MAX_QUEUED_AUDIO + 1);
+        assert!(matches!(queue.packets[0].0, ServerMsg::AudioStart { .. }));
+        assert!(matches!(
+            queue.packets[1].0,
+            ServerMsg::AudioFrame { seq: 51, .. }
+        ));
+        assert!(matches!(
+            queue.packets[MAX_QUEUED_AUDIO - 1].0,
+            ServerMsg::AudioFrame { seq: 99, .. }
+        ));
+        assert!(matches!(
+            queue.packets[MAX_QUEUED_AUDIO].0,
+            ServerMsg::VideoFrame { frame_id: 1, .. }
         ));
     }
 

@@ -34,7 +34,12 @@ pub const PROTOCOL_VERSION: u16 = 1;
 
 /// Optional behaviours this build supports, exchanged in the handshake. A
 /// behaviour is used only when both ends list it.
-pub const FEATURES: &[&str] = &[];
+pub const FEATURES: &[&str] = &[FEATURE_AUDIO];
+
+/// Sound: the client turns it on with `ClientMsg::Audio`, and the server then
+/// sends `AudioStart` and a stream of `AudioFrame`s while it has sound to
+/// capture.
+pub const FEATURE_AUDIO: &str = "audio";
 
 pub fn features() -> Vec<String> {
     FEATURES.iter().map(|f| f.to_string()).collect()
@@ -107,6 +112,13 @@ pub enum ChromaMode {
     /// Low-bandwidth fallback only.
     #[n(2)]
     Single420,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode)]
+#[cbor(index_only)]
+pub enum AudioCodec {
+    #[n(0)]
+    Opus,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode)]
@@ -295,6 +307,14 @@ pub enum ClientMsg {
         #[n(0)]
         t: u64,
     },
+    /// Start or stop the server's sound. Sent only to a server that listed
+    /// [`FEATURE_AUDIO`]; a client with several sessions turns it on for the
+    /// one it shows.
+    #[n(17)]
+    Audio {
+        #[n(0)]
+        enabled: bool,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Encode, Decode)]
@@ -457,6 +477,27 @@ pub enum ServerMsg {
     Ping {
         #[n(0)]
         t: u64,
+    },
+    /// The sound that follows in `AudioFrame`s; sent whenever capture
+    /// (re)starts, so the client resets its decoder and buffer.
+    #[n(13)]
+    AudioStart {
+        #[n(0)]
+        codec: AudioCodec,
+        #[n(1)]
+        sample_rate: u32,
+        #[n(2)]
+        channels: u32,
+    },
+    /// One coded packet; `data_len` payload bytes follow the header. `seq`
+    /// counts packets since the last `AudioStart` and wraps, so the client
+    /// can conceal one the server dropped.
+    #[n(14)]
+    AudioFrame {
+        #[n(0)]
+        seq: u32,
+        #[n(1)]
+        data_len: u32,
     },
 }
 
@@ -716,6 +757,7 @@ mod tests {
                 "820682182a1903e8",
             ),
             (ClientMsg::RequestKeyframe, "820780"),
+            (ClientMsg::Audio { enabled: true }, "821181f5"),
         ];
         for (msg, bytes) in client {
             assert_eq!(hex(&minicbor::to_vec(&msg).unwrap()), bytes, "{msg:?}");
@@ -771,6 +813,21 @@ mod tests {
                 "8202860102f5818400000a0a18641832",
             ),
             (ServerMsg::error(ERROR_VERSION, "m"), "82098301616d01"),
+            (
+                ServerMsg::AudioStart {
+                    codec: AudioCodec::Opus,
+                    sample_rate: 48000,
+                    channels: 2,
+                },
+                "820d830019bb8002",
+            ),
+            (
+                ServerMsg::AudioFrame {
+                    seq: 7,
+                    data_len: 160,
+                },
+                "820e820718a0",
+            ),
         ];
         for (msg, bytes) in server {
             assert_eq!(hex(&minicbor::to_vec(&msg).unwrap()), bytes, "{msg:?}");

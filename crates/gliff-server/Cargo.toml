@@ -17,6 +17,8 @@ tokio = { workspace = true }
 bytes.workspace = true
 gliff-proto.workspace = true
 gliff-transport.workspace = true
+gliff-audio.workspace = true
+serde_json.workspace = true
 gliff-vk.workspace = true
 gliff-sw.workspace = true
 drm-fourcc.workspace = true

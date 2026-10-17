@@ -17,6 +17,9 @@ pub struct Config {
     /// The machine the window showed last.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shown: Option<String>,
+    /// The header's sound button is off: no tab plays its machine's sound.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub muted: bool,
 }
 
 impl Config {

@@ -53,6 +53,9 @@ pub enum ToWorker {
     },
     /// The user pressed cancel on a transfer reported as `id`.
     CancelTransfer(u32),
+    /// Play the server's sound or not: on for the shown session while the
+    /// header's sound button is on.
+    Audio(bool),
 }
 
 #[derive(Default)]
@@ -168,7 +171,7 @@ impl Bridge {
     /// A clipboard command from the UI; `Send` is handled by the caller.
     pub fn on_ui(&self, cmd: ToWorker) {
         match cmd {
-            ToWorker::Send(_) | ToWorker::Zoom(_) => {}
+            ToWorker::Send(_) | ToWorker::Zoom(_) | ToWorker::Audio(_) => {}
             ToWorker::LocalOffer { mime_types, files } => {
                 let serial = self.local_serial.get().unwrap_or(0).wrapping_add(1);
                 self.local_serial.set(Some(serial));

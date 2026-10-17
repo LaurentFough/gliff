@@ -80,6 +80,10 @@ struct Cli {
     /// the GLIFF_VIDEO environment variable.
     #[arg(long, value_parser = ["gpu", "cpu"])]
     video: Option<String>,
+    /// Start with the remote's sound off. The header's speaker button turns
+    /// it on and off, and the window remembers the choice.
+    #[arg(long)]
+    no_audio: bool,
 }
 
 /// Everything the UI shares with its callbacks.
@@ -117,6 +121,8 @@ struct App {
     /// Size of the video widget in device pixels, rounded down to even.
     view_size: Cell<(u32, u32)>,
     view_scale: Cell<f64>,
+    /// Plays the shown machine's sound while active.
+    sound_btn: gtk::ToggleButton,
     /// Evdev codes currently held on the remote, so they can all be released
     /// when the keyboard is handed back to the local compositor.
     pressed_keys: RefCell<BTreeSet<u32>>,
@@ -311,6 +317,10 @@ fn build_ui(app: &adw::Application, cli: &Cli) {
         .icon_name("utilities-system-monitor-symbolic")
         .tooltip_text("Show stats")
         .build();
+    let sound_btn = gtk::ToggleButton::builder()
+        .icon_name("audio-volume-high-symbolic")
+        .tooltip_text("Play the remote's sound")
+        .build();
     let tabs = gtk::Box::builder().spacing(6).build();
     let tabs_scroller = gtk::ScrolledWindow::builder()
         .child(&tabs)
@@ -323,6 +333,7 @@ fn build_ui(app: &adw::Application, cli: &Cli) {
     header.pack_start(&add_revealer);
     header.pack_end(&fullscreen_btn);
     header.pack_end(&stats_btn);
+    header.pack_end(&sound_btn);
 
     let stats = gtk::Label::builder()
         .halign(gtk::Align::Start)
@@ -403,6 +414,7 @@ fn build_ui(app: &adw::Application, cli: &Cli) {
         active: RefCell::new(None),
         view_size: Cell::new((0, 0)),
         view_scale: Cell::new(1.0),
+        sound_btn: sound_btn.clone(),
         pressed_keys: RefCell::new(BTreeSet::new()),
         released: Cell::new(false),
         config_path: Config::default_path(),
@@ -416,6 +428,7 @@ fn build_ui(app: &adw::Application, cli: &Cli) {
     });
     install_input_handlers(&ui, &video, &window, hotkey);
     install_resize_handler(&ui);
+    install_sound_button(&ui);
     install_address_bar(&ui, &connect_btn);
     refresh_tabs(&ui);
 
@@ -846,6 +859,7 @@ fn show_session(ui: &Rc<App>, s: &Rc<Session>) {
     // shown.
     request_resize(ui);
     request_zoom(ui);
+    update_sound(ui);
     refresh_tabs(ui);
 }
 
@@ -858,6 +872,7 @@ fn show_nothing(ui: &Rc<App>) {
     ui.stats.set_text("");
     ui.frame.clear();
     ui.video.set_cursor(None);
+    update_sound(ui);
     refresh_tabs(ui);
 }
 
@@ -1007,6 +1022,7 @@ fn start_session(ui: Rc<App>, s: Rc<Session>) {
         })
         .expect("spawn network thread");
 
+    update_sound(&ui);
     poll_frames(ui.clone(), s.clone(), frame_rx, generation);
     poll_status(ui, s, status_rx, generation);
 }
@@ -1179,6 +1195,7 @@ fn poll_status(ui: Rc<App>, s: Rc<Session>, rx: Receiver<Status>, generation: u6
                     mbit,
                     decode_ms,
                     video,
+                    audio_ms,
                 } => {
                     let (sw, sh) = s.stream_size.get();
                     let (vw, vh) = s.stream_view.get();
@@ -1192,7 +1209,8 @@ fn poll_status(ui: Rc<App>, s: Rc<Session>, rx: Receiver<Status>, generation: u6
                         &ui,
                         &s,
                         &format!(
-                            "{video}  {fps:.0} fps  {mbit:.1} Mbit/s  decode {decode_ms:.1} ms  {stream} @{cap}"
+                            "{video}  {fps:.0} fps  {mbit:.1} Mbit/s  decode {decode_ms:.1} ms  {stream} @{cap}{}",
+                            audio_ms.map(|ms| format!("  audio {ms:.0} ms")).unwrap_or_default()
                         ),
                     );
                 }
@@ -1960,6 +1978,49 @@ fn device_scale(ui: &App) -> f64 {
     ui.window
         .surface()
         .map_or(ui.video.scale_factor() as f64, |s| s.scale())
+}
+
+/// The sound button: on plays the shown machine's sound. `--no-audio` starts
+/// it off; the choice is kept in the config.
+fn install_sound_button(ui: &Rc<App>) {
+    let on = !ui.cli.no_audio && !Config::load(&ui.config_path).muted;
+    set_sound_icon(&ui.sound_btn, on);
+    ui.sound_btn.set_active(on);
+    let weak = Rc::downgrade(ui);
+    ui.sound_btn.connect_toggled(move |btn| {
+        let Some(ui) = weak.upgrade() else {
+            return;
+        };
+        set_sound_icon(btn, btn.is_active());
+        let mut config = Config::load(&ui.config_path);
+        config.muted = !btn.is_active();
+        save_config(&ui, &config);
+        update_sound(&ui);
+    });
+}
+
+fn set_sound_icon(btn: &gtk::ToggleButton, on: bool) {
+    btn.set_icon_name(if on {
+        "audio-volume-high-symbolic"
+    } else {
+        "audio-volume-muted-symbolic"
+    });
+    btn.set_tooltip_text(Some(if on {
+        "Mute the remote's sound"
+    } else {
+        "Play the remote's sound"
+    }));
+}
+
+/// Only the shown session plays sound, and only while the button is on;
+/// every other session's server stops capturing it.
+fn update_sound(ui: &App) {
+    let on = ui.sound_btn.is_active();
+    for s in ui.sessions.borrow().iter() {
+        if let Some(tx) = s.input_tx.borrow().as_ref() {
+            let _ = tx.send(clipboard::ToWorker::Audio(on && is_active(ui, s)));
+        }
+    }
 }
 
 #[cfg(test)]

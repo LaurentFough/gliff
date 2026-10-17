@@ -19,6 +19,8 @@ both ends, and falls back to the CPU on machines where it cannot.
   exists only for your session and follows the size of your window.
 - Your keyboard layout, not the remote's: keys map the same on both ends.
 - A shared clipboard in both directions: text, images, and copied files.
+- The remote machine's sound, in both directions, so two machines can show
+  each other at once without echo.
 - Quality that adapts to the link, giving up frame rate before sharpness.
 - Reconnection when the link drops.
 - A window that follows your Omarchy theme.
@@ -26,6 +28,8 @@ both ends, and falls back to the CPU on machines where it cannot.
 ## Requirements
 
 - Hyprland on both machines, with a session running on the remote one.
+- For sound from the remote: PipeWire (`pw-record`, `pw-dump`, `pw-link`),
+  or PulseAudio's `parec`.
 - ssh access from your machine to the remote one.
 - For GPU video: an AMD or Intel GPU with its Vulkan and VA-API drivers
   (on Arch, `vulkan-radeon` and `mesa` for AMD, or `vulkan-intel` and
@@ -102,6 +106,14 @@ Clipboard sharing trusts every connected host: a host can request the
 advertised clipboard contents without a local paste. Use `gliff --no-clipboard`
 to disable sharing in both directions when connecting to an untrusted host.
 Local selections marked `x-kde-passwordManagerHint` are not shared.
+
+**Sound.** The window plays the sound of the machine it shows. The speaker
+button in the header mutes it and remembers that; `gliff --no-audio` starts
+muted. Only the tab you look at plays, and other tabs' hosts stop recording.
+A host sends what its applications play except Gliff itself, so when two
+machines show each other, neither hears its own sound come back. Hosts keep
+playing their sound on their own speakers. Sound is Opus at 128 kbit/s, and
+the client buffers 40 to 250 ms of it, more on a jittery link.
 
 **Slow links.** gliff measures the link and lowers the frame rate, then the
 colour detail, then the resolution, and raises them again when there is

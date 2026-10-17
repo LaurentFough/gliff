@@ -55,6 +55,7 @@ video, cursor and pongs flow server→client.
 | `hypr-input` | virtual keyboard (xkb state) + virtual pointer + clipboard bridge (mime types and pipes) on calloop threads | none |
 | `gliff-va` | libva display, H.264 encode/decode contexts on driver-owned surfaces, dmabuf export, the H.264 header parser and writer | yes, libva calls through committed bindgen output |
 | `gliff-vk` | Vulkan device, dmabuf import/export, split/recombine compute, the pipeline that hands surfaces to `gliff-va` | yes, Vulkan API calls |
+| `gliff-audio` | Opus encode/decode, the client's playout buffer and resampler, and its output device (cpal over ALSA) | none |
 | `gliff-sw` | CPU fallback with OpenH264 encode/decode, fused BGRA<->I420 conversion | the encoder trace level through the raw API, and the AVX2 row kernels (pointer loads and stores) |
 | `gliff-server` | ties capture+input+encoder to the protocol; `--stdio`/`--listen` | none |
 | `gliff` | GTK4/libadwaita UI, decode worker | one block: hands GTK a dmabuf fd |
@@ -258,6 +259,28 @@ Every crate with `unsafe` documents the safety requirements at each block.
   notification with a progress bar and a Cancel action over
   `org.freedesktop.Notifications`. Cancel drops the fetch, which sends
   `Abort`. A failed paste is always reported, however short.
+
+- **Sound.** A client that wants sound sends `ClientMsg::Audio` to a
+  server that listed the `audio` feature; the Linux client asks only for
+  the tab it shows, so background sessions record nothing. The server
+  answers with `AudioStart` and then one `AudioFrame` per 10 ms Opus packet
+  (48 kHz stereo, restricted low-delay, 128 kbit/s). Packets share the TCP
+  stream with video: the Linux writer queues them ahead of a video frame
+  still waiting and keeps at most half a second of them, and the client
+  conceals a short gap in the sequence numbers.
+  The client plays through a buffer read by a cubic resampler (`gliff-audio`
+  `Jitter`): the ratio converts 48 kHz to the device rate and leans by at
+  most 0.5% toward the target fill, which absorbs clock drift without
+  dropping samples. The target starts at 60 ms, grows by 20 ms on an
+  underrun and shrinks after 30 s of calm, between 40 and 250 ms; a burst
+  more than 150 ms past it (after a stall) is cut back at once.
+  Hosts record what applications play, except Gliff, so two machines that
+  show each other do not echo. The server runs `pw-record` unconnected and
+  links every application's output stream into it except the `gliff`
+  client's, following `pw-dump --monitor` and adding links with `pw-link`;
+  without `pw-dump` it records the default output's monitor, and without
+  `pw-record`, `parec`. The recorders run as children so the server links
+  no audio library.
 
 ## Measurements
 
