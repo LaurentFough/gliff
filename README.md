@@ -17,8 +17,8 @@ currently decode on the CPU.
 
 - Mirror a physical screen on either platform. Hyprland hosts also provide
   private screens that follow the size of your window.
-- Remote keyboard, mouse and scrolling. Linux clients send their keyboard
-  layout; Mac clients use physical key positions and the host layout.
+- Remote keyboard, mouse and scrolling. Linux and Mac clients send their
+  keyboard layout to Hyprland hosts. Mac hosts use their active local layout.
 - Shared text clipboard in both directions. Linux-to-Linux sessions also
   transfer images and copied files.
 - Linux hosts adapt quality to the link, giving up frame rate before sharpness.

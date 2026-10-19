@@ -4,6 +4,7 @@ import CoreMedia
 import CoreVideo
 import ApplicationServices
 import VideoToolbox
+import Carbon
 
 // stdout belongs exclusively to the bridge. Diagnostics go to stderr.
 let outputLock = NSLock()
@@ -66,6 +67,46 @@ func readCommands(onClose: @escaping () -> Void = {}, _ callback: @escaping (UIn
 }
 func json(_ data: Data) -> [String: Any] {
     (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? [:]
+}
+
+// Read a Unicode layout without selecting it or changing the user's input source.
+// Keep the actual Mac symbols, including Option levels and dead keys, rather
+// than guessing an XKB layout from the input source's display name.
+func keyboardLayout(_ identifier: String? = nil) -> [String: Any]? {
+    let source: TISInputSource
+    if let identifier = identifier {
+        guard let list = TISCreateInputSourceList([kTISPropertyInputSourceID as String: identifier] as CFDictionary, true)?.takeRetainedValue() else { return nil }
+        let matches = list as! [TISInputSource]
+        guard let first = matches.first else { return nil }
+        source = first
+    } else {
+        guard let current = TISCopyCurrentKeyboardLayoutInputSource()?.takeRetainedValue() else { return nil }
+        source = current
+    }
+    guard let raw = TISGetInputSourceProperty(source, kTISPropertyUnicodeKeyLayoutData) else { return nil }
+    let data = Unmanaged<CFData>.fromOpaque(raw).takeUnretainedValue()
+    guard let bytes = CFDataGetBytePtr(data) else { return nil }
+    let layout = UnsafeRawPointer(bytes).assumingMemoryBound(to: UCKeyboardLayout.self)
+    var keys: [[String: Any]] = []
+    for code in UInt16(0)..<128 {
+        var levels: [[String: Any]] = []
+        for level in 0..<8 {
+            let flags = (level & 1 == 0 ? 0 : shiftKey) | (level & 2 == 0 ? 0 : optionKey) | (level & 4 == 0 ? 0 : alphaLock)
+            var state: UInt32 = 0
+            var length = 0
+            var chars = [UniChar](repeating: 0, count: 16)
+            var status = UCKeyTranslate(layout, code, UInt16(kUCKeyActionDown), UInt32(flags >> 8), UInt32(LMGetKbdType()), 0, &state, chars.count, &length, &chars)
+            let dead = state != 0
+            if dead {
+                state = 0
+                status = UCKeyTranslate(layout, code, UInt16(kUCKeyActionDisplay), UInt32(flags >> 8), UInt32(LMGetKbdType()), OptionBits(kUCKeyTranslateNoDeadKeysMask), &state, chars.count, &length, &chars)
+            }
+            levels.append(["text": status == noErr && length <= chars.count ? String(utf16CodeUnits: chars, count: length) : "", "dead": dead])
+        }
+        keys.append(["keycode": Int(code), "levels": levels])
+    }
+    let name = TISGetInputSourceProperty(source, kTISPropertyInputSourceID).map { Unmanaged<CFString>.fromOpaque($0).takeUnretainedValue() as String } ?? "unknown"
+    return ["type": "keyboard_layout", "source": name, "keys": keys]
 }
 
 // NSPasteboard requests data only when an application pastes. The pipe reader
@@ -495,6 +536,8 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
         w.center(); w.makeKeyAndOrderFront(nil); w.makeFirstResponder(view); window = w
         NSApplication.shared.activate(ignoringOtherApps: true)
         clipboard.start()
+        keyboardLayoutChanged(nil)
+        DistributedNotificationCenter.default().addObserver(self, selector: #selector(keyboardLayoutChanged(_:)), name: Notification.Name(kTISNotifySelectedKeyboardInputSourceChanged as String), object: nil)
         resizeEvent()
         NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .keyUp]) { [weak self] e in
             guard let self = self, self.window?.isKeyWindow == true, !self.view.released, self.view.hovering, self.view.image != nil else { return e }
@@ -536,10 +579,16 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let factor = window?.backingScaleFactor ?? 1
         event(["type": "resize", "width": Int(view.bounds.width * factor), "height": Int(view.bounds.height * factor), "scale": factor])
     }
+    @objc func keyboardLayoutChanged(_ note: Notification?) {
+        if let layout = keyboardLayout() { event(layout) }
+    }
     func windowDidResize(_ note: Notification) { resizeEvent() }
+    func windowDidEnterFullScreen(_ note: Notification) { resizeEvent() }
+    func windowDidExitFullScreen(_ note: Notification) { resizeEvent() }
+    func windowDidChangeBackingProperties(_ note: Notification) { resizeEvent() }
     func windowDidResignKey(_ note: Notification) { view.release() }
     func applicationShouldTerminateAfterLastWindowClosed(_ app: NSApplication) -> Bool { true }
-    func applicationWillTerminate(_ note: Notification) { view.release(); event(["type": "bye"]) }
+    func applicationWillTerminate(_ note: Notification) { DistributedNotificationCenter.default().removeObserver(self); view.release(); event(["type": "bye"]) }
 }
 
 struct NearbyComputer {
@@ -640,12 +689,21 @@ final class ComputerPicker: NSObject, NSApplicationDelegate, NSWindowDelegate, N
     let port = NSTextField(string: "22")
     let status = NSTextField(wrappingLabelWithString: "Searching the local network…")
     let progress = NSProgressIndicator()
+    let screen = NSPopUpButton()
+    let screenDetail = NSTextField(wrappingLabelWithString: "")
+    let preferences: UserDefaults
+    let screenOverride: String?
+    var preferenceTarget: String?
     var window: NSWindow?
     var listHeight: NSLayoutConstraint?
     var rows: [NearbyComputer] = []
     var updating = false
     var finished = false
     var selectedID: String?
+    init(screenOverride: String? = nil, preferences: UserDefaults = UserDefaults(suiteName: "org.omacom.gliff")!) {
+        self.screenOverride = screenOverride; self.preferences = preferences
+        super.init()
+    }
     func label(_ text: String, _ size: CGFloat = 13) -> NSTextField {
         let label = NSTextField(labelWithString: text)
         label.font = NSFont.systemFont(ofSize: size); return label
@@ -667,20 +725,9 @@ final class ComputerPicker: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         NSApplication.shared.mainMenu = menu
         let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 600, height: 340), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
         w.title = "Gliff"; w.delegate = self
-        let background = NSBox()
-        background.boxType = .custom; background.titlePosition = .noTitle
-        background.borderWidth = 0; background.fillColor = .underPageBackgroundColor
-        w.contentView = background
+        w.backgroundColor = .windowBackgroundColor
+        w.titlebarAppearsTransparent = true
         let view = w.contentView!
-        let card = NSBox()
-        card.boxType = .custom; card.titlePosition = .noTitle
-        card.fillColor = .controlBackgroundColor; card.borderColor = .separatorColor
-        card.borderWidth = 0.5; card.cornerRadius = 16
-        card.contentViewMargins = .zero; card.translatesAutoresizingMaskIntoConstraints = false
-        card.wantsLayer = true; card.layer?.cornerRadius = 16
-        card.layer?.shadowColor = NSColor.black.cgColor; card.layer?.shadowOpacity = 0.12
-        card.layer?.shadowRadius = 12; card.layer?.shadowOffset = NSSize(width: 0, height: -4)
-        view.addSubview(card)
         let title = label("Connect to a Computer", 18)
         title.font = NSFont.systemFont(ofSize: 18, weight: .semibold)
         let subtitle = label("Choose a nearby computer or enter an SSH address.")
@@ -722,26 +769,30 @@ final class ComputerPicker: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         address.setContentHuggingPriority(.defaultLow, for: .horizontal)
         address.delegate = self; port.delegate = self
         let fields = stack([label("SSH Address:"), address, label("Port:"), port], .horizontal, 10)
+        screen.addItems(withTitles: ["Mirror screen", "Private screen"])
+        screen.setAccessibilityLabel("Screen mode")
+        screen.target = self; screen.action = #selector(screenChanged)
+        screen.isEnabled = screenOverride == nil
+        screenDetail.font = NSFont.systemFont(ofSize: 12); screenDetail.textColor = .secondaryLabelColor
+        let screenRow = stack([label("Screen:"), screen, screenDetail], .horizontal, 10)
+        screenDetail.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        screenDetail.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         let cancel = NSButton(title: "Cancel", target: self, action: #selector(cancel))
         cancel.bezelStyle = .rounded; cancel.controlSize = .large; cancel.keyEquivalent = "\u{1b}"
         let connect = NSButton(title: "Connect", target: self, action: #selector(connect))
         connect.bezelStyle = .rounded; connect.controlSize = .large; connect.keyEquivalent = "\r"
         let actions = stack([NSView(), cancel, connect], .horizontal, 8)
-        let content = stack([heading, list, statusRow, fields, actions], .vertical, 12)
-        card.contentView!.addSubview(content)
-        for row in [heading, list, statusRow, fields, actions] { row.translatesAutoresizingMaskIntoConstraints = false }
+        let content = stack([heading, list, statusRow, fields, screenRow, actions], .vertical, 12)
+        view.addSubview(content)
+        for row in [heading, list, statusRow, fields, screenRow, actions] { row.translatesAutoresizingMaskIntoConstraints = false }
         let listHeight = list.heightAnchor.constraint(equalToConstant: 66)
         self.listHeight = listHeight
         NSLayoutConstraint.activate([
             view.widthAnchor.constraint(greaterThanOrEqualToConstant: 600),
-            card.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 12),
-            card.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -12),
-            card.topAnchor.constraint(equalTo: view.topAnchor, constant: 12),
-            card.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -12),
-            content.leadingAnchor.constraint(equalTo: card.contentView!.leadingAnchor, constant: 20),
-            content.trailingAnchor.constraint(equalTo: card.contentView!.trailingAnchor, constant: -20),
-            content.topAnchor.constraint(equalTo: card.contentView!.topAnchor, constant: 20),
-            content.bottomAnchor.constraint(equalTo: card.contentView!.bottomAnchor, constant: -20),
+            content.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 20),
+            content.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -20),
+            content.topAnchor.constraint(equalTo: view.topAnchor, constant: 20),
+            content.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -20),
             list.widthAnchor.constraint(equalTo: content.widthAnchor),
             listHeight,
             scroll.leadingAnchor.constraint(equalTo: list.contentView!.leadingAnchor),
@@ -754,15 +805,17 @@ final class ComputerPicker: NSObject, NSApplicationDelegate, NSWindowDelegate, N
             progress.heightAnchor.constraint(equalToConstant: 16),
             fields.widthAnchor.constraint(equalTo: content.widthAnchor),
             port.widthAnchor.constraint(equalToConstant: 64),
+            screenRow.widthAnchor.constraint(equalTo: content.widthAnchor),
+            screen.widthAnchor.constraint(equalToConstant: 140),
             actions.widthAnchor.constraint(equalTo: content.widthAnchor),
             cancel.widthAnchor.constraint(greaterThanOrEqualToConstant: 80),
             connect.widthAnchor.constraint(greaterThanOrEqualToConstant: 90),
         ])
         table.nextKeyView = address; address.nextKeyView = port
-        port.nextKeyView = connect; connect.nextKeyView = cancel; cancel.nextKeyView = refresh
+        port.nextKeyView = screen; screen.nextKeyView = connect; connect.nextKeyView = cancel; cancel.nextKeyView = refresh
         refresh.nextKeyView = table
         w.defaultButtonCell = connect.cell as? NSButtonCell
-        window = w; fitWindow()
+        window = w; restoreScreenPreference(); fitWindow()
         w.center(); w.makeKeyAndOrderFront(nil); w.makeFirstResponder(address)
         NSApplication.shared.activate(ignoringOtherApps: true)
         nearby.onChange = { [weak self] in self?.update() }
@@ -778,7 +831,7 @@ final class ComputerPicker: NSObject, NSApplicationDelegate, NSWindowDelegate, N
                     self.window?.makeFirstResponder(self.table)
                 }
                 if cmd["type"] as? String == "inspect" {
-                    event(["type": "picker_state", "hosts": self.rows.map { $0.value }, "rows": self.table.numberOfRows, "host": self.address.stringValue, "port": self.port.stringValue])
+                    event(["type": "picker_state", "hosts": self.rows.map { $0.value }, "rows": self.table.numberOfRows, "host": self.address.stringValue, "port": self.port.stringValue, "screen": self.screenMode])
                 }
             }
         }
@@ -841,7 +894,31 @@ final class ComputerPicker: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         guard !updating, rows.indices.contains(table.selectedRow) else { return }
         let computer = rows[table.selectedRow]; selectedID = computer.id
         address.stringValue = computer.address; port.stringValue = String(computer.port)
+        restoreScreenPreference()
     }
+    var screenMode: String { screen.indexOfSelectedItem == 1 ? "private" : "mirror" }
+    var screenPreferenceKey: String? {
+        let host = address.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !host.isEmpty, let number = Int(port.stringValue), (1...65535).contains(number) else { return nil }
+        return "screen.\(host):\(number)"
+    }
+    func restoreScreenPreference() {
+        let key = screenPreferenceKey
+        guard key != preferenceTarget || preferenceTarget == nil else { return }
+        preferenceTarget = key
+        let mode = screenOverride ?? key.flatMap { preferences.string(forKey: $0) } ?? "mirror"
+        screen.selectItem(at: mode == "private" ? 1 : 0)
+        updateScreenDetail()
+    }
+    func updateScreenDetail() {
+        screenDetail.stringValue = screenMode == "private" ? "A separate Linux desktop that follows this window." : "Shows the host desktop, keeping its proportions."
+        fitWindow()
+    }
+    @objc func screenChanged(_ sender: Any?) {
+        if let key = screenPreferenceKey { preferences.set(screenMode, forKey: key) }
+        updateScreenDetail()
+    }
+    func controlTextDidChange(_ note: Notification) { restoreScreenPreference() }
     @objc func refresh(_ sender: Any?) { nearby.start() }
     func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
         if commandSelector == #selector(NSResponder.insertNewline(_:)) { connect(nil); return true }
@@ -855,7 +932,8 @@ final class ComputerPicker: NSObject, NSApplicationDelegate, NSWindowDelegate, N
               let number = Int(port.stringValue), (1...65535).contains(number) else {
             status.stringValue = "Enter an SSH address and a port between 1 and 65535."; fitWindow(); return
         }
-        complete(["type": "connect", "host": host, "port": number])
+        if let key = screenPreferenceKey { preferences.set(screenMode, forKey: key) }
+        complete(["type": "connect", "host": host, "port": number, "screen": screenMode])
     }
     @objc func cancel(_ sender: Any?) { complete(["type": "cancel"]) }
     func complete(_ value: [String: Any]) {
@@ -909,8 +987,11 @@ if mode == "encode" {
     exit(0)
 } else if mode == "choose" {
     app.setActivationPolicy(.regular)
-    let picker = ComputerPicker(); app.delegate = picker
+    let picker = ComputerPicker(screenOverride: CommandLine.arguments.dropFirst(2).first); app.delegate = picker
     withExtendedLifetime(picker) { app.run() }
+} else if mode == "keyboard-layout" {
+    guard let layout = keyboardLayout(CommandLine.arguments.dropFirst(2).first) else { fail("Cannot read the Mac Unicode keyboard layout") }
+    event(layout)
 } else if mode == "discover" {
     app.setActivationPolicy(.accessory)
     let nearby = NearbyComputers(); nearby.start()

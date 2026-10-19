@@ -21,7 +21,13 @@ it uses ad-hoc signing, which can require renewed grants after each rebuild.
 Open Gliff to show **Nearby Computers**. Select a computer to fill in its
 SSH username, hostname and port, then choose **Connect**. You can edit these
 fields or enter a manual address. Cancel closes the picker without connecting.
-The connection panel follows the Mac's appearance and accent color. Tab moves
+Choose **Mirror screen** to see the host's existing desktop, or **Private
+screen** for a separate desktop on a Linux host that follows the Mac window.
+Mirror is the initial default; Gliff remembers the choice for each SSH address
+and port. Mirroring keeps the host screen's proportions, so screens with a
+different aspect ratio can have empty bands. Private mode follows the window
+and fullscreen aspect ratio, within the viewer's 3840×2160 video limit.
+The standalone connection window follows the Mac's appearance and accent color. Tab moves
 between fields, Return connects, and Escape cancels; changing focus does not
 start a connection.
 It opens at the minimum size that fits its controls. The computer list grows
@@ -159,9 +165,11 @@ logical display coordinates. macOS hosts mirror physical screens and reject
   decodes with OpenH264 on the CPU. A Linux viewer's `--video cpu` setting
   controls its own decoding, and does not disable hardware on the Mac host.
 - Command maps to Super; Option maps to Alt. Hardware key positions are
-  translated between macOS and evdev. Keyboard layouts use US on a Hyprland
-  host when the Mac client supplies no XKB keymap, and the active Mac layout
-  on a Mac host.
+  translated between macOS and evdev. Mac clients export their active Unicode
+  keyboard layout to Hyprland, including Shift, Caps Lock, Option symbols and
+  common dead keys, and update it when the input source changes. Mac hosts
+  use their active local layout. Input-method composition and custom keys
+  that produce multiple Unicode characters are not forwarded as text.
 - Keyboard input is captured over the picture. Shift+Esc releases it;
   clicking the picture captures it again. Held keys and buttons are released
   when the window loses focus or disconnects.
@@ -175,6 +183,9 @@ native pipe-reader memory regression,
 without opening a window or capturing a screen. It verifies that temporary
 Foundation buffers are released after each packet and that Retina-size
 packets use bounded read buffers rather than churning large allocations.
+Native keyboard checks read real German and US layouts without selecting them;
+Linux tests compile the captured German symbols with the host's XKB library.
+Picker checks cover screen preferences independently for each host and port.
 
 The opt-in viewer regression feeds240 Retina-size frames to a temporary
 window, bounds memory and cleans up without SSH or capture:

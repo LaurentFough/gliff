@@ -1,0 +1,12 @@
+{
+  "source": "com.apple.keylayout.German",
+  "keys": [
+    {"levels":[{"text":"y","dead":false},{"text":"Y","dead":false},{"text":"¥","dead":false},{"dead":false,"text":"‡"},{"dead":false,"text":"Y"},{"dead":false,"text":"Y"},{"text":"¥","dead":false},{"dead":false,"text":"‡"}],"keycode":6},
+    {"levels":[{"dead":false,"text":"z"},{"text":"Z","dead":false},{"dead":false,"text":"Ω"},{"text":"ˇ","dead":false},{"text":"Z","dead":false},{"text":"Z","dead":false},{"text":"Ω","dead":false},{"text":"ˇ","dead":false}],"keycode":16},
+    {"keycode":24,"levels":[{"dead":true,"text":"´"},{"dead":true,"text":"`"},{"dead":false,"text":"'"},{"dead":false,"text":"˚"},{"text":"´","dead":true},{"text":"`","dead":true},{"text":"'","dead":false},{"dead":false,"text":"˚"}]},
+    {"keycode":33,"levels":[{"text":"ü","dead":false},{"dead":false,"text":"Ü"},{"text":"•","dead":false},{"text":"°","dead":false},{"dead":false,"text":"Ü"},{"text":"Ü","dead":false},{"text":"•","dead":false},{"text":"°","dead":false}]},
+    {"levels":[{"text":"l","dead":false},{"text":"L","dead":false},{"text":"@","dead":false},{"text":"ﬂ","dead":false},{"text":"L","dead":false},{"dead":false,"text":"L"},{"text":"@","dead":false},{"dead":false,"text":"ﬂ"}],"keycode":37},
+    {"levels":[{"dead":false,"text":"ä"},{"text":"Ä","dead":false},{"text":"æ","dead":false},{"dead":false,"text":"Æ"},{"text":"Ä","dead":false},{"dead":false,"text":"Ä"},{"dead":false,"text":"Æ"},{"text":"Æ","dead":false}],"keycode":39},
+    {"keycode":41,"levels":[{"text":"ö","dead":false},{"dead":false,"text":"Ö"},{"text":"œ","dead":false},{"dead":false,"text":"Œ"},{"dead":false,"text":"Ö"},{"dead":false,"text":"Ö"},{"text":"Œ","dead":false},{"text":"Œ","dead":false}]}
+  ]
+}

@@ -23,3 +23,6 @@ tracing-subscriber.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+xkbcommon.workspace = true

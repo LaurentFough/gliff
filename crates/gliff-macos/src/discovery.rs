@@ -17,6 +17,25 @@ pub struct Host {
 pub struct Selection {
     pub host: String,
     pub port: u16,
+    #[serde(default)]
+    pub screen: ScreenMode,
+}
+
+#[derive(Debug, Default, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ScreenMode {
+    #[default]
+    Mirror,
+    Private,
+}
+
+impl ScreenMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Mirror => "mirror",
+            Self::Private => "private",
+        }
+    }
 }
 
 impl Selection {
@@ -67,6 +86,7 @@ pub fn hosts(event: &serde_json::Value) -> Result<Vec<Host>> {
         Selection {
             host: address,
             port: host.port,
+            screen: ScreenMode::Mirror,
         }
         .validate()?;
     }
@@ -74,8 +94,11 @@ pub fn hosts(event: &serde_json::Value) -> Result<Vec<Host>> {
 }
 
 #[cfg(target_os = "macos")]
-pub async fn choose() -> Result<Option<Selection>> {
-    let mut child = crate::native::spawn("choose", &[])?;
+pub async fn choose(screen: Option<ScreenMode>) -> Result<Option<Selection>> {
+    let args = screen
+        .map(|mode| vec![mode.as_str().into()])
+        .unwrap_or_default();
+    let mut child = crate::native::spawn("choose", &args)?;
     let mut rd = child.stdout.take().unwrap();
     let result = async {
         let (kind, bytes) = crate::native::read(&mut rd).await?;
@@ -159,7 +182,8 @@ mod tests {
         ] {
             assert!(Selection {
                 host: address.into(),
-                port: 22
+                port: 22,
+                screen: ScreenMode::Mirror,
             }
             .validate()
             .is_ok());
@@ -167,11 +191,25 @@ mod tests {
         for address in ["", "-oProxyCommand=x", "x\ny", "user@host command"] {
             assert!(Selection {
                 host: address.into(),
-                port: 22
+                port: 22,
+                screen: ScreenMode::Mirror,
             }
             .validate()
             .is_err());
         }
         assert!(hosts(&json!({"hosts":[]})).unwrap().is_empty());
+    }
+
+    #[test]
+    fn private_screen_selection_is_explicit_and_older_pickers_mirror() {
+        let old: Selection = serde_json::from_value(json!({"host":"host", "port":22})).unwrap();
+        assert_eq!(old.screen, ScreenMode::Mirror);
+        let private: Selection =
+            serde_json::from_value(json!({"host":"host", "port":22,"screen":"private"})).unwrap();
+        assert_eq!(private.screen, ScreenMode::Private);
+        assert!(serde_json::from_value::<Selection>(
+            json!({"host":"host", "port":22,"screen":"unknown"})
+        )
+        .is_err());
     }
 }

@@ -2,6 +2,7 @@
 #![forbid(unsafe_code)]
 
 pub mod discovery;
+pub mod keymap;
 pub mod keys;
 pub mod native;
 

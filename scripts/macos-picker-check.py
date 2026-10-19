@@ -6,6 +6,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import uuid
 from pathlib import Path
 
 
@@ -21,7 +22,8 @@ def main():
     harness = '''
 let app=NSApplication.shared
 app.setActivationPolicy(.regular)
-let picker=ComputerPicker();app.delegate=picker
+let preferences=UserDefaults(suiteName:CommandLine.arguments[2])!
+let picker=ComputerPicker(preferences:preferences);app.delegate=picker
 Timer.scheduledTimer(withTimeInterval:0.4,repeats:false) { _ in
     let window=picker.window!
     let emptySize=window.contentLayoutRect.size
@@ -55,7 +57,18 @@ Timer.scheduledTimer(withTimeInterval:0.4,repeats:false) { _ in
     }
     diagnostic("LAYOUT PASS: compact list, scrolling, wrapped status and user resize")
     picker.table.selectRowIndexes(IndexSet(integer:0),byExtendingSelection:false)
+    precondition(picker.screenMode=="mirror","New targets must keep the existing mirror default")
+    picker.screen.selectItem(at:1);picker.screenChanged(nil)
+    picker.address.stringValue="other.example";picker.restoreScreenPreference()
+    precondition(picker.screenMode=="mirror","Private mode leaked to a different host")
+    picker.address.stringValue="tester@keyboard.example";picker.restoreScreenPreference()
+    precondition(picker.screenMode=="private","Private mode was not remembered for the host")
     picker.port.stringValue="2222"
+    picker.restoreScreenPreference()
+    precondition(picker.screenMode=="mirror","Screen preference leaked to a different SSH port")
+    picker.screen.selectItem(at:1);picker.screenChanged(nil)
+    precondition(!picker.screenDetail.stringValue.isEmpty)
+    diagnostic("SCREEN PASS: mirror default, private selection and independent per-host/port preferences")
     window.makeFirstResponder(picker.address)
     let tab=NSEvent.keyEvent(with:.keyDown,location:.zero,modifierFlags:[],timestamp:0,windowNumber:window.windowNumber,context:nil,characters:"\\t",charactersIgnoringModifiers:"\\t",isARepeat:false,keyCode:48)!
     window.sendEvent(tab)
@@ -79,7 +92,8 @@ withExtendedLifetime(picker) { app.run() }
             str(swift), "-o", str(binary),
         ], check=True, timeout=45)
         for mode in ("connect", "cancel"):
-            child = subprocess.Popen([str(binary), mode], stdin=subprocess.PIPE,
+            suite = f"org.omacom.gliff.picker-check.{uuid.uuid4()}"
+            child = subprocess.Popen([str(binary), mode, suite], stdin=subprocess.PIPE,
                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             try:
                 code = child.wait(timeout=15)
@@ -93,10 +107,13 @@ withExtendedLifetime(picker) { app.run() }
                 assert event["type"] == mode, event
                 if mode == "connect":
                     assert event["host"] == "tester@keyboard.example" and event["port"] == 2222, event
+                    assert event["screen"] == "private", event
                 print(f"PICKER LAYOUT/KEYBOARD PASS: compact list, scrolling, wrapped status, user resize; Tab focuses Port without connecting; {mode}: {event}")
             finally:
                 if child.poll() is None:
                     child.kill(); child.wait()
+                subprocess.run(["defaults", "delete", suite], stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL, check=False)
 
 
 if __name__ == "__main__":

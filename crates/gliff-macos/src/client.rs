@@ -69,13 +69,22 @@ pub fn client_main() -> Result<()> {
             Some(h) => crate::discovery::Selection {
                 host: h.into(),
                 port: cli.port.unwrap_or(22),
+                screen: crate::discovery::ScreenMode::Mirror,
             },
             None if cli.connect.is_some() => crate::discovery::Selection {
                 host: String::new(),
                 port: 22,
+                screen: crate::discovery::ScreenMode::Mirror,
             },
             None => {
-                let Some(selection) = crate::discovery::choose().await? else {
+                let screen = if cli.headless {
+                    Some(crate::discovery::ScreenMode::Private)
+                } else if cli.output.is_some() {
+                    Some(crate::discovery::ScreenMode::Mirror)
+                } else {
+                    None
+                };
+                let Some(selection) = crate::discovery::choose(screen).await? else {
                     return Ok(());
                 };
                 selection
@@ -101,7 +110,7 @@ pub fn client_main() -> Result<()> {
             if cli.check_frames.is_none() {
                 target.askpass = Some(native::helper_path()?);
             }
-            if cli.headless {
+            if cli.headless || selected.screen == crate::discovery::ScreenMode::Private {
                 target.server_args.push("--headless".into());
             }
             if let Some(output) = cli.output {
@@ -125,7 +134,11 @@ where
     writer
         .write_msg(&ClientMsg::Hello {
             version: PROTOCOL_VERSION,
-            keymap: String::new(),
+            keymap: if check.is_none() {
+                local_keymap().await?
+            } else {
+                String::new()
+            },
             caps: ClientCaps {
                 codecs: vec![Codec::H264],
                 max_width: 3840,
@@ -222,6 +235,10 @@ where
                 if ev["type"] == "bye" { out.send((ClientMsg::Bye, Bytes::new())).await?; break; }
                 if ev["type"] == "clipboard" { clipboard.local(&ev).await?; }
                 else if ev["type"] == "paste" { clipboard.paste(&ev); }
+                else if ev["type"] == "keyboard_layout" {
+                    let keymap = crate::keymap::from_event(&ev)?;
+                    out.send((ClientMsg::Keymap { keymap }, Bytes::new())).await?;
+                }
                 else if let Some(msg) = input(&ev) { out.send((msg, Bytes::new())).await?; }
             }
             Some((msg, payload)) = clips.recv() => { out.send((ClientMsg::from(msg), payload)).await?; }
@@ -357,11 +374,24 @@ fn input(ev: &Value) -> Option<ClientMsg> {
             },
             pressed: ev["pressed"].as_bool()?,
         }),
-        "resize" => Some(ClientMsg::Resize {
-            width: u32::try_from(ev["width"].as_u64()?).ok()?.clamp(2, 3840),
-            height: u32::try_from(ev["height"].as_u64()?).ok()?.clamp(2, 2160),
-            scale: ev["scale"].as_f64()? as f32,
-        }),
+        "resize" => {
+            let width = u32::try_from(ev["width"].as_u64()?).ok()?;
+            let height = u32::try_from(ev["height"].as_u64()?).ok()?;
+            let scale = ev["scale"].as_f64()?;
+            if width == 0 || height == 0 || !scale.is_finite() || scale <= 0.0 {
+                return None;
+            }
+            // Cap Retina viewports proportionally: independent width/height
+            // clamps change the remote aspect ratio and create letterboxing.
+            let ratio = (3840.0 / f64::from(width))
+                .min(2160.0 / f64::from(height))
+                .min(1.0);
+            Some(ClientMsg::Resize {
+                width: (f64::from(width) * ratio).round().max(2.0) as u32,
+                height: (f64::from(height) * ratio).round().max(2.0) as u32,
+                scale: (scale * ratio) as f32,
+            })
+        }
         "axis" => Some(ClientMsg::PointerAxis {
             axis: if ev["horizontal"].as_bool()? {
                 gliff_proto::Axis::Horizontal
@@ -374,6 +404,28 @@ fn input(ev: &Value) -> Option<ClientMsg> {
         }),
         _ => None,
     }
+}
+
+async fn local_keymap() -> Result<String> {
+    #[cfg(target_os = "macos")]
+    {
+        let mut child = native::spawn("keyboard-layout", &[])?;
+        let result = async {
+            let (kind, bytes) = tokio::time::timeout(
+                Duration::from_secs(5),
+                native::read(child.stdout.as_mut().unwrap()),
+            )
+            .await
+            .context("Mac keyboard layout query timed out")??;
+            ensure!(kind == native::EVENT, "invalid keyboard layout response");
+            crate::keymap::from_event(&serde_json::from_slice(&bytes)?)
+        }
+        .await;
+        let _ = child.kill().await;
+        result
+    }
+    #[cfg(not(target_os = "macos"))]
+    Ok(String::new())
 }
 
 pub(crate) fn now_ms() -> u64 {
@@ -579,5 +631,27 @@ mod tests {
             input(&json!({"type":"key", "keycode":65536, "pressed":true})),
             None
         );
+    }
+
+    #[test]
+    fn retina_resize_preserves_aspect_and_logical_coordinates() {
+        for (width, height, scale) in [(2940, 1912, 2.0), (4112, 2658, 2.0), (6016, 3384, 2.0)] {
+            let Some(ClientMsg::Resize {
+                width: w,
+                height: h,
+                scale: s,
+            }) = input(&json!({"type":"resize", "width":width, "height":height, "scale":scale}))
+            else {
+                panic!("missing resize")
+            };
+            assert!(w <= 3840 && h <= 2160);
+            assert!(
+                (f64::from(w) / f64::from(h) - f64::from(width) / f64::from(height)).abs() < 0.001
+            );
+            assert!((f64::from(w) / f64::from(s) - f64::from(width) / scale).abs() < 1.0);
+            assert!((f64::from(h) / f64::from(s) - f64::from(height) / scale).abs() < 1.0);
+        }
+        assert!(input(&json!({"type":"resize", "width":0, "height":720, "scale":2})).is_none());
+        assert!(input(&json!({"type":"resize", "width":1100, "height":720, "scale":0})).is_none());
     }
 }

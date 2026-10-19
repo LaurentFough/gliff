@@ -57,6 +57,19 @@ precondition(observedEvents.count == 1 && observedEvents[0]["pressed"] as? Bool 
 observedEvents.removeAll()
 view.keyDown(with: keyEvent(1))
 precondition(observedEvents.isEmpty, "letterbox key reached the host")
+let app = NSApplication.shared
+let delegate = App()
+let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1470, height: 956), styleMask: [.titled, .resizable], backing: .buffered, defer: false)
+window.contentView = delegate.view; delegate.window = window
+let pixels = Data(repeating: 0, count: 1470 * 956 * 4)
+delegate.view.image = CGImage(width: 1470, height: 956, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: 1470 * 4, space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipFirst.rawValue), provider: CGDataProvider(data: pixels as CFData)!, decode: nil, shouldInterpolate: false, intent: .defaultIntent)
+precondition(delegate.view.pictureRect == delegate.view.bounds, "A matching private desktop did not fill the viewport")
+observedEvents.removeAll()
+let note = Notification(name: NSWindow.didEnterFullScreenNotification, object: window)
+delegate.windowDidEnterFullScreen(note)
+delegate.windowDidExitFullScreen(note)
+delegate.windowDidChangeBackingProperties(note)
+precondition(observedEvents.count == 3 && observedEvents.allSatisfy { $0["type"] as? String == "resize" }, "Fullscreen or backing changes did not update the remote viewport")
 let input = Input()
 input.capsLock = false
 input.handle(["type": "key", "keycode": UInt16(57), "pressed": true])
@@ -69,7 +82,7 @@ input.handle(["type": "key", "keycode": UInt16(57), "pressed": true])
 input.handle(["type": "key", "keycode": UInt16(57), "pressed": false])
 input.handle(["type": "key", "keycode": UInt16(0), "pressed": false])
 precondition(observedNativeEvents.allSatisfy { !$0.flags.contains(.maskAlphaShift) }, "host did not turn Caps Lock off")
-print("INPUT PASS: picture boundary, Caps Lock client/host state, Shift+Esc and held-input release")
+print("INPUT PASS: picture boundary, Caps Lock client/host state, Shift+Esc, held-input release, private viewport fill and fullscreen/backing resize")
 '''
     with tempfile.TemporaryDirectory(prefix="gliff-input-check-") as folder:
         swift = Path(folder, "main.swift")

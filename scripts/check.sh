@@ -26,6 +26,8 @@ if [ "$(uname -s)" = Darwin ]; then
     python3 scripts/macos-memory-check.py
     echo "== native viewer input"
     python3 scripts/macos-input-check.py
+    echo "== native keyboard layout"
+    python3 scripts/macos-keyboard-layout-check.py
     echo "== native picker keyboard"
     python3 scripts/macos-picker-check.py
 fi
