@@ -18,7 +18,7 @@ use ash::vk;
 
 use crate::compute::{Recombine, Split};
 use crate::device::{Commands, Gpu, Timeline};
-use crate::image::{DmabufPlane, ExportedDmabuf, HostBuffer, Image};
+use crate::image::{DecodedImage, DmabufPlane, ExportedDmabuf, HostBuffer, Image};
 use crate::vkenc::{self, VkH264Encoder};
 use crate::Result;
 use gliff_va::{EncodedPacket, EncoderSettings, H264Decoder, H264Encoder};
@@ -636,7 +636,7 @@ impl Decoder {
 struct DecodeStream {
     gpu: Arc<Gpu>,
     dec: H264Decoder,
-    images: Vec<Image>,
+    images: Vec<DecodedImage>,
     generation: u64,
 }
 
@@ -658,7 +658,7 @@ impl DecodeStream {
                 .dec
                 .surfaces()
                 .iter()
-                .map(|s| Image::import_nv12(&self.gpu, &s.export()?, false))
+                .map(|s| DecodedImage::import(&self.gpu, &s.export()?))
                 .collect::<Result<Vec<_>>>()?;
             self.generation = self.dec.generation();
         }
@@ -669,7 +669,7 @@ impl DecodeStream {
         Ok(self.dec.surfaces()[idx].sync()?)
     }
 
-    fn last_image(&self) -> Option<&Image> {
+    fn last_image(&self) -> Option<&DecodedImage> {
         self.dec.last_output().and_then(|i| self.images.get(i))
     }
 }

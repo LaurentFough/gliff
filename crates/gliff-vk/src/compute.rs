@@ -6,7 +6,7 @@ use std::sync::Arc;
 use ash::vk;
 
 use crate::device::Gpu;
-use crate::image::Image;
+use crate::image::{DecodedImage, Image};
 use crate::Result;
 
 const SPLIT_SPV: &[u8] = include_bytes!("../shaders/split.spv");
@@ -287,20 +287,19 @@ impl Recombine {
     pub(crate) fn record(
         &self,
         cmd: vk::CommandBuffer,
-        main: &Image,
-        aux: Option<&Image>,
+        main: &DecodedImage,
+        aux: Option<&DecodedImage>,
         dst: &Image,
         (width, height): (u32, u32),
         zoom: u32,
     ) -> Result<()> {
-        let aux_views = aux
-            .map(|a| (a.plane_views[0], a.plane_views[1]))
-            .unwrap_or((main.plane_views[0], main.plane_views[1]));
+        let main_views = main.views();
+        let aux_views = aux.map(DecodedImage::views).unwrap_or(main_views);
         let views = [
-            main.plane_views[0],
-            main.plane_views[1],
-            aux_views.0,
-            aux_views.1,
+            main_views[0],
+            main_views[1],
+            aux_views[0],
+            aux_views[1],
             dst.view0(),
         ];
         self.0

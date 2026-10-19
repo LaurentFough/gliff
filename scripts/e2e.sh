@@ -88,6 +88,13 @@ if echo "$PROBE_GPU" | grep -q '^PASS VA-API H.264 encode'; then
 fi
 if [ "$HAS_GPU" = 1 ]; then
     $PROBE roundtrip --decode "$CLIENT_VIDEO" 2>/dev/null | grep -q "^PASS min RGB PSNR" || fail "GPU codec round-trip"
+    $PROBE roundtrip --single --decode "$CLIENT_VIDEO" 2>/dev/null | grep -q "^PASS min RGB PSNR" || fail "GPU Single420 codec round-trip"
+fi
+if [ "$CLIENT_VIDEO" = gpu ]; then
+    # Check pixels, not just whether decode returned a frame. A driver can
+    # decode correctly while the exported surface is imported with bad tiling.
+    $PROBE --video cpu roundtrip --decode gpu --frame-delay-ms 50 2>/dev/null | grep -q "^PASS min RGB PSNR" || fail "CPU encode -> GPU Dual420 decode quality"
+    $PROBE --video cpu roundtrip --single --decode gpu --frame-delay-ms 50 2>/dev/null | grep -q "^PASS min RGB PSNR" || fail "CPU encode -> GPU Single420 decode quality"
 fi
 $PROBE --video cpu roundtrip 2>/dev/null | grep -q "^PASS min RGB PSNR" || fail "CPU codec round-trip"
 echo "   probe checks PASS"

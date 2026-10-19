@@ -43,6 +43,54 @@ pub struct Image {
     pub(crate) layout: std::cell::Cell<vk::ImageLayout>,
 }
 
+/// One decoded NV12 surface as the recombine shader samples it. Keep
+/// NVIDIA's separate R8/RG88 layers in their exported formats: combining
+/// them as disjoint NV12 misreads their tiling on current drivers.
+pub(crate) struct DecodedImage {
+    images: Vec<Image>,
+    views: [vk::ImageView; 2],
+}
+
+impl DecodedImage {
+    pub(crate) fn import(gpu: &Arc<Gpu>, desc: &PrimeDescriptor) -> Result<Self> {
+        if desc.objects.len() == 1 {
+            let image = Image::import_nv12(gpu, desc, false)?;
+            return Ok(Self {
+                views: [image.plane_views[0], image.plane_views[1]],
+                images: vec![image],
+            });
+        }
+        if desc.objects.len() != 2 || desc.planes.len() != 2 {
+            return Err(Error::Unsupported(
+                "decoded NV12 requires one shared object or two separate planes".into(),
+            ));
+        }
+        let images = (0..2)
+            .map(|i| Image::import_nv12_plane(gpu, desc, i))
+            .collect::<Result<Vec<_>>>()?;
+        Ok(Self {
+            views: [images[0].view0(), images[1].view0()],
+            images,
+        })
+    }
+
+    pub(crate) fn views(&self) -> [vk::ImageView; 2] {
+        self.views
+    }
+
+    pub(crate) fn acquire_foreign(&self, cmd: vk::CommandBuffer, new: vk::ImageLayout) {
+        for image in &self.images {
+            image.acquire_foreign(cmd, new);
+        }
+    }
+
+    pub(crate) fn release_foreign(&self, cmd: vk::CommandBuffer) {
+        for image in &self.images {
+            image.release_foreign(cmd);
+        }
+    }
+}
+
 impl Image {
     /// Create an NV12 image the compute shaders read and write through its
     /// plane views, and that copies to and from imported surfaces.
@@ -402,6 +450,90 @@ impl Image {
             0,
             vk::ImageUsageFlags::SAMPLED,
         )?);
+        Ok(img)
+    }
+
+    /// Import one separate DRM layer of an NV12 surface in its exported
+    /// format, keeping its dimensions, pitch, offset and modifier intact.
+    fn import_nv12_plane(gpu: &Arc<Gpu>, desc: &PrimeDescriptor, index: usize) -> Result<Self> {
+        let plane = &desc.planes[index];
+        let (fourcc, format, width, height) = if index == 0 {
+            (DrmFourcc::R8, vk::Format::R8_UNORM, desc.width, desc.height)
+        } else {
+            (
+                DrmFourcc::Gr88,
+                vk::Format::R8G8_UNORM,
+                desc.width.div_ceil(2),
+                desc.height.div_ceil(2),
+            )
+        };
+        // NVIDIA labels the chroma layer RG88, Mesa uses GR88. The NV12
+        // surface fixes the byte order to U then V in either descriptor.
+        let nvidia_uv = index == 1 && plane.drm_format == DrmFourcc::Rg88 as u32;
+        if plane.drm_format != fourcc as u32 && !nvidia_uv {
+            return Err(Error::Unsupported(format!(
+                "NV12 layer {index} has format {:#x}, expected {fourcc:?}",
+                plane.drm_format
+            )));
+        }
+        let fd = desc.objects.get(plane.object).ok_or_else(|| {
+            Error::Unsupported(format!("NV12 layer {index} refers to a missing object"))
+        })?;
+        let (memory_planes, _) =
+            gpu.modifier_properties(format, desc.modifier)
+                .ok_or_else(|| {
+                    Error::Unsupported(format!(
+                        "{fourcc:?} with modifier {:#x} is not importable",
+                        desc.modifier
+                    ))
+                })?;
+        if memory_planes != 1 {
+            return Err(Error::Unsupported(format!(
+                "NV12 layer {index} requires {memory_planes} memory planes"
+            )));
+        }
+        let layouts = [vk::SubresourceLayout {
+            offset: plane.offset as u64,
+            row_pitch: plane.pitch as u64,
+            ..Default::default()
+        }];
+        let mut explicit = vk::ImageDrmFormatModifierExplicitCreateInfoEXT::default()
+            .drm_format_modifier(desc.modifier)
+            .plane_layouts(&layouts);
+        let mut external = vk::ExternalMemoryImageCreateInfo::default()
+            .handle_types(vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT);
+        let usage = vk::ImageUsageFlags::SAMPLED;
+        let info = vk::ImageCreateInfo::default()
+            .image_type(vk::ImageType::TYPE_2D)
+            .format(format)
+            .extent(vk::Extent3D {
+                width,
+                height,
+                depth: 1,
+            })
+            .mip_levels(1)
+            .array_layers(1)
+            .samples(vk::SampleCountFlags::TYPE_1)
+            .tiling(vk::ImageTiling::DRM_FORMAT_MODIFIER_EXT)
+            .usage(usage)
+            .initial_layout(vk::ImageLayout::UNDEFINED)
+            .push_next(&mut explicit)
+            .push_next(&mut external);
+        let (image, memory) = Self::create_imported(gpu, &info, fd.as_fd())?;
+        let mut img = Self {
+            gpu: gpu.clone(),
+            image,
+            memory: vec![memory],
+            format,
+            width,
+            height,
+            layers: 1,
+            layer_views: Vec::new(),
+            plane_views: Vec::new(),
+            layout: vk::ImageLayout::GENERAL.into(),
+        };
+        img.layer_views
+            .push(img.view(format, vk::ImageAspectFlags::COLOR, 0, usage)?);
         Ok(img)
     }
 
