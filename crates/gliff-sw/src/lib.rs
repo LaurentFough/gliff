@@ -456,8 +456,28 @@ impl Decoder {
     /// every following decode with `dsOutOfMemory`. With a POC step of one
     /// only the first picture after a new decoder is ever held.
     pub fn flush(&mut self) -> Result<Option<BgraFrame>> {
+        let frame = match self.flush_remaining() {
+            Ok(frame) => frame,
+            Err(e) => {
+                // Stop draining after an error. The client asks for a
+                // keyframe to recover.
+                self.held = 0;
+                return Err(e);
+            }
+        };
+        let Some(frame) = frame else {
+            // Nothing came out, so nothing is drainable: correct any drift
+            // the counter picked up from failed decodes.
+            self.held = 0;
+            return Ok(None);
+        };
+        self.held = self.held.saturating_sub(1);
+        Ok(Some(frame))
+    }
+
+    fn flush_remaining(&mut self) -> Result<Option<BgraFrame>> {
         let size = self.size;
-        let frame = match &mut self.aux {
+        Ok(match &mut self.aux {
             Some(dec) => {
                 let (main, aux) = (self.main.flush_remaining()?, dec.flush_remaining()?);
                 match (main.first(), aux.first()) {
@@ -469,15 +489,7 @@ impl Decoder {
                 Some(m) => Some(convert_checked(m, size)?),
                 None => None,
             },
-        };
-        let Some(frame) = frame else {
-            // Nothing came out, so nothing is drainable: correct any drift
-            // the counter picked up from failed decodes.
-            self.held = 0;
-            return Ok(None);
-        };
-        self.held = self.held.saturating_sub(1);
-        Ok(Some(frame))
+        })
     }
 }
 
@@ -897,6 +909,8 @@ mod tests {
             assert!(decoder.decode(idr, aux).expect("decode").is_none());
             let result = decoder.flush();
             assert!(is_size_error(&result), "dual={dual}: {:?}", result.err());
+            // The refused picture is gone, so the idle drain stops.
+            assert!(!decoder.has_pending());
         }
     }
 
