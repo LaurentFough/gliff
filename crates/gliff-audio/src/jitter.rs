@@ -18,7 +18,12 @@ use crate::{CHANNELS, SAMPLE_RATE};
 
 /// Source frames per millisecond.
 const MS: usize = SAMPLE_RATE as usize / 1000;
-const START_TARGET: usize = 60 * MS;
+/// Where the target starts. Underruns raise it 20 ms at a time, each one
+/// audible, while calm only lowers it 5 ms per 30 s, so starting a little
+/// high costs a few minutes of extra delay and saves a burst of crackles
+/// on a slow or busy server (from 60 ms, one climbed to 195 ms through 7
+/// underruns in the first 40 s).
+const START_TARGET: usize = 100 * MS;
 const MIN_TARGET: usize = 40 * MS;
 const MAX_TARGET: usize = 250 * MS;
 /// The target grows this much on an underrun...
