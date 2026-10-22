@@ -71,7 +71,8 @@ impl Queue {
             // Sound goes ahead of a video frame still waiting, in its own
             // order, so a frame queued behind a slow write does not delay
             // it; past a bound the oldest packet goes (the client conceals
-            // a gap).
+            // a gap). A restart supersedes the old stream and what is left
+            // of it, so at most one start waits.
             ServerMsg::AudioStart { .. } | ServerMsg::AudioFrame { .. } => {
                 let audio = |m: &ServerMsg| {
                     matches!(
@@ -79,7 +80,10 @@ impl Queue {
                         ServerMsg::AudioStart { .. } | ServerMsg::AudioFrame { .. }
                     )
                 };
-                if self.packets.iter().filter(|(m, _)| audio(m)).count() >= MAX_QUEUED_AUDIO {
+                if matches!(msg, ServerMsg::AudioStart { .. }) {
+                    self.packets.retain(|(m, _)| !audio(m));
+                } else if self.packets.iter().filter(|(m, _)| audio(m)).count() >= MAX_QUEUED_AUDIO
+                {
                     if let Some(i) = self
                         .packets
                         .iter()
@@ -316,6 +320,30 @@ mod tests {
         assert!(matches!(
             queue.packets[MAX_QUEUED_AUDIO].0,
             ServerMsg::VideoFrame { frame_id: 1, .. }
+        ));
+    }
+
+    #[test]
+    fn audio_restarts_replace_the_queued_stream() {
+        let mut queue = Queue::default();
+        let (msg, payloads) = video(1);
+        queue.push(msg, payloads);
+        for seq in 0..1000 {
+            queue.push(
+                ServerMsg::AudioStart {
+                    codec: gliff_proto::AudioCodec::Opus,
+                    sample_rate: 48000,
+                    channels: 2,
+                },
+                Vec::new(),
+            );
+            queue.push(ServerMsg::AudioFrame { seq, data_len: 1 }, vec![vec![0]]);
+            assert_eq!(queue.packets.len(), 3);
+        }
+        assert!(matches!(queue.packets[0].0, ServerMsg::AudioStart { .. }));
+        assert!(matches!(
+            queue.packets[1].0,
+            ServerMsg::AudioFrame { seq: 999, .. }
         ));
     }
 
