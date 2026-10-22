@@ -16,7 +16,7 @@ const QUEUE: usize = 50;
 pub struct Capture {
     _child: Child,
     _linker: Option<Linker>,
-    pub packets: mpsc::Receiver<Vec<u8>>,
+    pub packets: mpsc::Receiver<(u32, Vec<u8>)>,
 }
 
 impl Capture {
@@ -36,6 +36,7 @@ impl Capture {
             let mut bytes = vec![0u8; gliff_audio::FRAME * gliff_audio::CHANNELS * 4];
             let mut have = 0;
             let mut pcm = Vec::with_capacity(bytes.len() / 4);
+            let mut seq = 0;
             loop {
                 match stdout.read(&mut bytes[have..]).await {
                     Ok(0) | Err(_) => break,
@@ -58,9 +59,8 @@ impl Capture {
                     }
                 };
                 for packet in coded {
-                    match tx.try_send(packet) {
-                        Ok(()) | Err(mpsc::error::TrySendError::Full(_)) => {}
-                        Err(mpsc::error::TrySendError::Closed(_)) => return,
+                    if !offer(&tx, &mut seq, packet) {
+                        return;
                     }
                 }
             }
@@ -72,6 +72,18 @@ impl Capture {
             packets,
         })
     }
+}
+
+/// Number a packet and queue it. A packet dropped on a full queue keeps its
+/// number, so the client sees the gap. False once the session stopped
+/// listening.
+fn offer(tx: &mpsc::Sender<(u32, Vec<u8>)>, seq: &mut u32, packet: Vec<u8>) -> bool {
+    let numbered = (*seq, packet);
+    *seq = seq.wrapping_add(1);
+    !matches!(
+        tx.try_send(numbered),
+        Err(mpsc::error::TrySendError::Closed(_))
+    )
 }
 
 /// A command that finds the sound server: Tailscale SSH starts commands
@@ -349,7 +361,6 @@ fn missing_links(
 #[derive(Default)]
 pub struct Sound {
     capture: Option<Capture>,
-    seq: u32,
 }
 
 impl Sound {
@@ -369,7 +380,6 @@ impl Sound {
             Ok(capture) => {
                 tracing::info!("audio on");
                 self.capture = Some(capture);
-                self.seq = 0;
                 writer.send(
                     gliff_proto::ServerMsg::AudioStart {
                         codec: gliff_proto::AudioCodec::Opus,
@@ -388,23 +398,22 @@ impl Sound {
     }
 
     /// The next coded packet; `None` when the recorder stopped.
-    pub async fn next(&mut self) -> Option<Vec<u8>> {
+    pub async fn next(&mut self) -> Option<(u32, Vec<u8>)> {
         self.capture.as_mut()?.packets.recv().await
     }
 
-    pub fn send(&mut self, packet: Option<Vec<u8>>, writer: &crate::writer::Writer) {
-        let Some(packet) = packet else {
+    pub fn send(&mut self, packet: Option<(u32, Vec<u8>)>, writer: &crate::writer::Writer) {
+        let Some((seq, packet)) = packet else {
             self.capture = None;
             return;
         };
         writer.send(
             gliff_proto::ServerMsg::AudioFrame {
-                seq: self.seq,
+                seq,
                 data_len: packet.len() as u32,
             },
             vec![packet],
         );
-        self.seq = self.seq.wrapping_add(1);
     }
 }
 
@@ -482,5 +491,21 @@ mod tests {
             vec![(22, 12), (41, 11), (41, 12)]
         );
         assert!(missing_links(&graph, "gliff-audio-2").is_empty());
+    }
+
+    #[test]
+    fn a_packet_dropped_on_a_full_queue_leaves_a_gap() {
+        let (tx, mut rx) = mpsc::channel(QUEUE);
+        let mut seq = 0;
+        for _ in 0..=QUEUE {
+            assert!(offer(&tx, &mut seq, vec![0]));
+        }
+        for expected in 0..QUEUE as u32 {
+            assert_eq!(rx.try_recv().unwrap().0, expected);
+        }
+        assert!(offer(&tx, &mut seq, vec![0]));
+        assert_eq!(rx.try_recv().unwrap().0, QUEUE as u32 + 1);
+        drop(rx);
+        assert!(!offer(&tx, &mut seq, vec![0]));
     }
 }
