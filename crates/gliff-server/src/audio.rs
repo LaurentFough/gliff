@@ -166,38 +166,41 @@ impl Linker {
             .spawn()?;
         let stdout = child.stdout.take().context("pw-dump has no output")?;
         let capture = capture.to_string();
+        let linker = Self { child };
+        let (updates, batches) = std::sync::mpsc::sync_channel(4);
         std::thread::Builder::new()
-            .name("gliff-audio-links".into())
+            .name("gliff-audio-graph".into())
             .spawn(move || {
-                let mut graph = std::collections::HashMap::new();
-                let mut tried = std::collections::HashSet::new();
-                let batches =
+                let objects =
                     serde_json::Deserializer::from_reader(std::io::BufReader::new(stdout))
                         .into_iter::<Vec<serde_json::Value>>();
-                for batch in batches {
+                for batch in objects {
                     let Ok(batch) = batch else { break };
-                    for object in batch {
-                        let Some(id) = object["id"].as_u64() else {
-                            continue;
-                        };
-                        if object["info"].is_null() {
-                            graph.remove(&id);
-                        } else {
-                            graph.insert(id, object);
-                        }
-                    }
-                    for (out, input) in missing_links(&graph, &capture) {
-                        if tried.insert((out, input)) {
-                            let linked = command("pw-link")
-                                .args([out.to_string(), input.to_string()])
-                                .stdout(std::process::Stdio::null())
-                                .status();
-                            tracing::debug!(out, input, ?linked, "linked audio into the recorder");
-                        }
+                    if updates.send(batch).is_err() {
+                        break;
                     }
                 }
             })?;
-        Ok(Self { child })
+        std::thread::Builder::new()
+            .name("gliff-audio-links".into())
+            .spawn(move || {
+                let mut links = LinkState::default();
+                loop {
+                    match batches.recv_timeout(LINK_RETRY) {
+                        Ok(batch) => links.update(batch),
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                    }
+                    for (out, input) in links.pending(&capture, std::time::Instant::now()) {
+                        let linked = command("pw-link")
+                            .args([out.to_string(), input.to_string()])
+                            .stdout(std::process::Stdio::null())
+                            .status();
+                        tracing::debug!(out, input, ?linked, "linked audio into the recorder");
+                    }
+                }
+            })?;
+        Ok(linker)
     }
 }
 
@@ -205,6 +208,57 @@ impl Drop for Linker {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+    }
+}
+
+const LINK_RETRY: std::time::Duration = std::time::Duration::from_secs(1);
+
+#[derive(Default)]
+struct LinkState {
+    graph: std::collections::HashMap<u64, serde_json::Value>,
+    attempted: std::collections::HashMap<(u64, u64), std::time::Instant>,
+}
+
+impl LinkState {
+    fn update(&mut self, batch: Vec<serde_json::Value>) {
+        for object in batch {
+            let Some(id) = object["id"].as_u64() else {
+                continue;
+            };
+            let prior = self
+                .graph
+                .get(&id)
+                .and_then(|o| o["info"]["props"]["object.serial"].as_u64());
+            let next = object["info"]["props"]["object.serial"].as_u64();
+            if object["info"].is_null() || (prior.is_some() && next.is_some() && prior != next) {
+                // Object IDs may be reused as soon as an application exits.
+                self.attempted
+                    .retain(|&(out, input), _| out != id && input != id);
+            }
+            if object["info"].is_null() {
+                self.graph.remove(&id);
+            } else {
+                self.graph.insert(id, object);
+            }
+        }
+    }
+
+    fn pending(&mut self, capture: &str, now: std::time::Instant) -> Vec<(u64, u64)> {
+        let wanted = missing_links(&self.graph, capture);
+        self.attempted.retain(|key, _| wanted.contains(key));
+        wanted
+            .into_iter()
+            .filter(|key| {
+                let retry = self
+                    .attempted
+                    .get(key)
+                    .is_none_or(|at| now.duration_since(*at) >= LINK_RETRY);
+                if retry {
+                    self.attempted.insert(*key, now);
+                }
+                retry
+            })
+            .collect()
     }
 }
 
@@ -372,6 +426,26 @@ mod tests {
             json!({"id": id, "type": "PipeWire:Interface:Port",
                    "info": {"direction": direction, "props": {"node.id": node, "audio.channel": channel}}}),
         )
+    }
+
+    #[test]
+    fn reused_ports_are_linked_again_and_failed_links_retry() {
+        let objects = vec![
+            node(10, json!({"node.name": "capture"})).1,
+            port(11, 10, "input", "FL").1,
+            node(20, json!({"media.class": "Stream/Output/Audio"})).1,
+            port(21, 20, "output", "FL").1,
+        ];
+        let now = std::time::Instant::now();
+        let mut state = LinkState::default();
+        state.update(objects.clone());
+        assert_eq!(state.pending("capture", now), [(21, 11)]);
+        assert!(state.pending("capture", now).is_empty());
+        // Even without graph updates, a failed or disappeared link is retried.
+        assert_eq!(state.pending("capture", now + LINK_RETRY), [(21, 11)]);
+        state.update(vec![json!({"id": 21, "info": null})]);
+        state.update(objects);
+        assert_eq!(state.pending("capture", now + LINK_RETRY), [(21, 11)]);
     }
 
     #[test]
