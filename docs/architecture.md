@@ -274,13 +274,14 @@ Every crate with `unsafe` documents the safety requirements at each block.
   dropping samples. The target starts at 100 ms, grows by 20 ms on an
   underrun and shrinks after 30 s of calm, between 40 and 250 ms; a burst
   more than 150 ms past it (after a stall) is cut back at once.
-  Hosts record what applications play, except Gliff, so two machines that
-  show each other do not echo. The server runs `pw-record` unconnected and
-  links every application's output stream into it except the `gliff`
-  client's, following `pw-dump --monitor` and adding links with `pw-link`;
-  without `pw-dump` it records the default output's monitor, and without
-  `pw-record`, `parec`. The recorders run as children so the server links
-  no audio library.
+  With PipeWire, hosts record what applications play, except Gliff, so two
+  machines that show each other do not echo. The server runs `pw-record`
+  unconnected and links every application's output stream into it except
+  the `gliff` client's, following `pw-dump --monitor` and adding links with
+  `pw-link`. Without `pw-dump` it records the default output's monitor, and
+  without `pw-record` the same monitor through `parec`; both hold what a
+  local Gliff client plays, so two such hosts that show each other echo.
+  The recorders run as children so the server links no audio library.
 
 ## Measurements
 

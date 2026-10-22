@@ -110,10 +110,13 @@ Local selections marked `x-kde-passwordManagerHint` are not shared.
 **Sound.** The window plays the sound of the machine it shows. The speaker
 button in the header mutes it and remembers that; `gliff --no-audio` starts
 muted. Only the tab you look at plays, and other tabs' hosts stop recording.
-A host sends what its applications play except Gliff itself, so when two
-machines show each other, neither hears its own sound come back. Hosts keep
-playing their sound on their own speakers. Sound is Opus at 128 kbit/s, and
-the client buffers 40 to 250 ms of it, more on a jittery link.
+A host with PipeWire's `pw-record` and `pw-dump` sends what its applications
+play except Gliff itself, so when two machines show each other, neither hears
+its own sound come back. A host missing either sends its whole output, Gliff
+included, and two such machines that show each other echo; mute one side to
+stop it. Hosts keep playing their sound on their own speakers. Sound is Opus
+at 128 kbit/s, and the client buffers 40 to 250 ms of it, more on a jittery
+link.
 
 **Slow links.** gliff measures the link and lowers the frame rate, then the
 colour detail, then the resolution, and raises them again when there is
