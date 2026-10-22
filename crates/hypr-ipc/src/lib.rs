@@ -318,6 +318,65 @@ mod tests {
         assert!(Instance::discover_in(tmp.path(), Some("missing")).is_err());
     }
 
+    /// Run `call` against a socket that answers each connection with the next
+    /// of `responses`, and return what it got back and the commands sent.
+    fn against_socket(
+        responses: &'static [&'static str],
+        call: impl FnOnce(&Instance) -> Result<()>,
+    ) -> (Result<()>, Vec<String>) {
+        let tmp = tempfile::tempdir().unwrap();
+        let inst = Instance {
+            signature: "test".into(),
+            dir: tmp.path().to_path_buf(),
+        };
+        let listener = std::os::unix::net::UnixListener::bind(inst.socket_path()).unwrap();
+        let mut responses = responses.iter().copied();
+        let server = std::thread::spawn(move || {
+            let mut commands = Vec::new();
+            loop {
+                let (mut conn, _) = listener.accept().unwrap();
+                let mut buf = [0; 512];
+                let n = conn.read(&mut buf).unwrap();
+                // An empty connection is the test hanging up.
+                if n == 0 {
+                    return commands;
+                }
+                commands.push(String::from_utf8_lossy(&buf[..n]).into_owned());
+                conn.write_all(responses.next().unwrap_or("unexpected").as_bytes())
+                    .unwrap();
+            }
+        });
+        let result = call(&inst);
+        drop(UnixStream::connect(inst.socket_path()).unwrap());
+        (result, server.join().unwrap())
+    }
+
+    #[test]
+    fn set_dpms_falls_back_to_lua_only_when_asked() {
+        let (result, commands) = against_socket(&["ok"], |i| i.set_dpms("gliff-7", false));
+        assert!(result.is_ok());
+        assert_eq!(commands, ["dispatch dpms off gliff-7"]);
+
+        // What a Lua config answers the legacy form with.
+        const LUA: &str = "error: [string \"return hl.dispatch(dpms on gliff-7)...\"]:1: ')' expected near 'on'\n\n \u{2192} Note: dispatch in lua is a shorthand for hl.dispatch(...), your syntax might need to be updated.";
+        let (result, commands) = against_socket(&[LUA, "ok"], |i| i.set_dpms("gliff-7", true));
+        assert!(result.is_ok());
+        assert_eq!(
+            commands,
+            [
+                "dispatch dpms on gliff-7",
+                r#"dispatch hl.dsp.dpms({ action = "on", monitor = "gliff-7" })"#,
+            ]
+        );
+
+        let (result, commands) =
+            against_socket(&["monitor not found"], |i| i.set_dpms("gliff-7", true));
+        assert!(
+            matches!(result, Err(Error::Command { response, .. }) if response == "monitor not found")
+        );
+        assert_eq!(commands, ["dispatch dpms on gliff-7"]);
+    }
+
     #[test]
     fn parses_dpms_status() {
         let m: Monitor =
