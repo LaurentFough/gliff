@@ -534,16 +534,49 @@ fn parameter_sets(s: &EncoderSettings) -> (Sps, Pps) {
     (sps, pps)
 }
 
-/// CBR, except on the i965 driver (Haswell and older). Its rate control may
+/// CBR, except on the verified Haswell i965 path. Its rate control may
 /// not pad the stream with bit stuffing off, and then logs "Unrepairable
 /// overflow!" on near-static content; VBR needs no padding, at a sharper
 /// starting QP than the driver's default.
 fn pick_rate_control(display: &Display, caps: &Caps) -> u32 {
-    let vbr = caps.rate_control & va::VA_RC_VBR != 0 && display.vendor.contains("i965");
+    let vbr = use_i965_vbr(&display.vendor, caps.rate_control);
     let choice = if vbr { va::VA_RC_VBR } else { va::VA_RC_CBR };
     tracing::info!(
         mode = if vbr { "VBR" } else { "CBR" },
         "va-api encoder rate control"
     );
     choice
+}
+
+fn use_i965_vbr(vendor: &str, supported: u32) -> bool {
+    vendor.contains("i965")
+        && vendor.to_ascii_lowercase().contains("haswell")
+        && supported & va::VA_RC_VBR != 0
+}
+
+#[cfg(test)]
+mod driver_tests {
+    use super::*;
+
+    #[test]
+    fn vbr_is_limited_to_the_verified_driver_and_generation() {
+        let supported = va::VA_RC_CBR | va::VA_RC_VBR;
+        assert!(use_i965_vbr(
+            "Intel i965 driver for Intel(R) Haswell Mobile",
+            supported
+        ));
+        for vendor in [
+            "Intel i965 driver for Intel(R) Broadwell",
+            "Intel i965 driver for Intel(R) Skylake",
+            "Intel i965 driver for Intel(R) Sandybridge",
+            "Intel iHD driver",
+            "Mesa Gallium",
+        ] {
+            assert!(!use_i965_vbr(vendor, supported));
+        }
+        assert!(!use_i965_vbr(
+            "Intel i965 driver for Intel(R) Haswell",
+            va::VA_RC_CBR
+        ));
+    }
 }

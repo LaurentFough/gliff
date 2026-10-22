@@ -116,7 +116,7 @@ incomplete".
 - **CBR logs "Unrepairable overflow!" on near-static content.** The i965
   rate control cannot pad the stream with `disable_bit_stuffing` set, so on
   an idle desktop its HRD buffer fills and it prints the line to stderr
-  repeatedly. The encoder therefore uses VBR on i965 (`pick_rate_control`),
+  repeatedly. The encoder therefore uses VBR on Haswell with i965 (`pick_rate_control`),
   which needs no padding.
 - **VBR needs an initial QP.** Left at the driver's default, VBR was silent
   (0 messages over an extended session at 1920x1080) but visibly softer
