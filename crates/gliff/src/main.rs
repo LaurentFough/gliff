@@ -1148,10 +1148,6 @@ fn poll_status(ui: Rc<App>, s: Rc<Session>, rx: Receiver<Status>, generation: u6
                     headless,
                 } => {
                     s.server_view.set((view_width, view_height));
-                    // The worker drops its zoom to 1 when the stream size
-                    // changes; forget the last request so the next poll
-                    // asks again for the zoom this view allows.
-                    s.zoom.set(0);
                     s.fps_cap.set(fps_cap);
                     s.headless.set(headless);
                     s.resize_requested.set((0, 0));

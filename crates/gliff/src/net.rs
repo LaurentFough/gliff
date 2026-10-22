@@ -210,14 +210,10 @@ impl Config {
     }
 
     /// Take a later config. True when the coded stream changed and needs a
-    /// new decoder. A new stream size also drops the zoom to 1, so a zoom
-    /// chosen for a small stream never applies to a larger one; the UI asks
-    /// again once it sees the new view.
+    /// new decoder. Keep the requested zoom: each frame clamps it against
+    /// its actual size, without another UI request or CPU keyframe.
     fn update(&mut self, next: Config, zoom: &mut Zoom) -> bool {
         let rebuild = (next.stream, next.chroma) != (self.stream, self.chroma);
-        if next.stream != self.stream {
-            zoom.wanted = 1;
-        }
         if rebuild {
             zoom.asked_gpu = 1;
         }
@@ -1066,7 +1062,7 @@ mod stream_tests {
     }
 
     #[test]
-    fn a_new_stream_size_resets_the_zoom() {
+    fn a_new_stream_size_preserves_the_requested_zoom() {
         let mut cfg = config((1920, 1080), (1920, 1080)).unwrap();
         let mut zoom = Zoom::new();
         assert!(zoom.want(4));
@@ -1082,10 +1078,11 @@ mod stream_tests {
         next.chroma = ChromaMode::Single420;
         assert!(cfg.update(next, &mut zoom));
         assert_eq!((zoom.wanted, zoom.asked_gpu), (4, 1));
-        // A larger stream starts over at zoom 1.
+        // A larger stream keeps the wish but applies its own safe clamp.
         let big = config((4096, 4096), (4096, 4096)).unwrap();
         assert!(cfg.update(big, &mut zoom));
-        assert_eq!((zoom.wanted, zoom.asked_gpu), (1, 1));
+        assert_eq!((zoom.wanted, zoom.asked_gpu), (4, 1));
+        assert_eq!(clamp_zoom(zoom.wanted, big.stream), 1);
         assert_eq!(cfg, big);
     }
 
@@ -1467,7 +1464,7 @@ mod session_tests {
     }
 
     #[test]
-    fn a_new_stream_size_resets_the_session_zoom() {
+    fn a_new_stream_size_does_not_request_an_extra_keyframe() {
         with_session(|mut server| async move {
             server.handshake(config((1920, 1080), (1920, 1080))).await;
             server.statuses_until(connected).await;
@@ -1482,11 +1479,14 @@ mod session_tests {
                 .await
                 .unwrap();
             server.statuses_until(connected).await;
-            // The same zoom again is a change only because it was reset.
+            // The UI's unchanged zoom must not request a second keyframe.
             let _ = server.input.send(ToWorker::Zoom(2));
-            server
-                .expect(|m| matches!(m, ClientMsg::RequestKeyframe))
-                .await;
+            assert!(tokio::time::timeout(
+                Duration::from_millis(200),
+                server.rd.read_msg::<ClientMsg>()
+            )
+            .await
+            .is_err());
         })
         .unwrap();
     }
