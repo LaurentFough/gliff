@@ -142,6 +142,8 @@ struct Session {
     generation: Cell<u64>,
     /// Consecutive failed connection attempts, reset on a successful connect.
     retries: Cell<u32>,
+    /// Retained across slow reconnect attempts until a connection succeeds.
+    last_error: RefCell<Option<String>>,
     /// Automatic reconnects have given up; selecting the tab tries again.
     gave_up: Cell<bool>,
     /// Recorded in the config on the first successful connect.
@@ -190,6 +192,7 @@ impl Session {
             input_tx: RefCell::new(None),
             generation: Cell::new(0),
             retries: Cell::new(0),
+            last_error: RefCell::new(None),
             gave_up: Cell::new(false),
             remembered: Cell::new(false),
             connected: Cell::new(false),
@@ -987,7 +990,11 @@ fn start_session(ui: Rc<App>, s: Rc<Session>) {
     s.reset_resize();
     let generation = s.generation.get() + 1;
     s.generation.set(generation);
-    set_status(&ui, &s, "Connecting…");
+    set_status(
+        &ui,
+        &s,
+        &connecting_status(s.last_error.borrow().as_deref()),
+    );
 
     let endpoint = s.endpoint.clone();
     let video = gliff_sw::VideoMode::resolve(ui.cli.video.as_deref());
@@ -1033,7 +1040,14 @@ fn remember_machine(ui: &Rc<App>, s: &Session) {
 fn schedule_reconnect(ui: Rc<App>, s: Rc<Session>, generation: u64, error: Option<&str>) {
     let n = s.retries.get() + 1;
     s.retries.set(n);
-    set_status(&ui, &s, &reconnect_status(error, n));
+    if let Some(error) = error {
+        *s.last_error.borrow_mut() = Some(error.to_owned());
+    }
+    set_status(
+        &ui,
+        &s,
+        &reconnect_status(s.last_error.borrow().as_deref(), n),
+    );
     if n > MAX_RETRIES {
         s.gave_up.set(true);
         return;
@@ -1047,6 +1061,13 @@ fn schedule_reconnect(ui: Rc<App>, s: Rc<Session>, generation: u64, error: Optio
 
 /// The status for reconnect `attempt`, under the error that ended the
 /// connection, if any.
+fn connecting_status(error: Option<&str>) -> String {
+    match error {
+        Some(e) => format!("Error: {e}\nConnecting…"),
+        None => "Connecting…".into(),
+    }
+}
+
 fn reconnect_status(error: Option<&str>, attempt: u32) -> String {
     let next = if attempt > MAX_RETRIES {
         "Disconnected — click the tab to reconnect".to_string()
@@ -1166,6 +1187,7 @@ fn poll_status(ui: Rc<App>, s: Rc<Session>, rx: Receiver<Status>, generation: u6
                     s.fps_cap.set(fps_cap);
                     s.headless.set(headless);
                     s.resize_requested.set((0, 0));
+                    s.last_error.borrow_mut().take();
                     s.retries.set(0);
                     s.gave_up.set(false);
                     if !s.connected.replace(true) {
@@ -1995,6 +2017,11 @@ mod tests {
     #[test]
     fn reconnect_status_keeps_the_error() {
         let e = "Connection refused (os error 111)";
+        assert_eq!(
+            connecting_status(Some(e)),
+            "Error: Connection refused (os error 111)\nConnecting…"
+        );
+        assert_eq!(connecting_status(None), "Connecting…");
         assert_eq!(
             reconnect_status(Some(e), 1),
             "Error: Connection refused (os error 111)\nReconnecting… (attempt 1)"
