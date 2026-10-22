@@ -1282,6 +1282,7 @@ fn poll_status(ui: Rc<App>, s: Rc<Session>, rx: Receiver<Status>, generation: u6
                     return glib::ControlFlow::Break;
                 }
                 Status::Incompatible(message) => {
+                    *s.last_error.borrow_mut() = Some(message.clone());
                     tracing::error!(machine = %s.name, error = %message, "incompatible server");
                     set_status(&ui, &s, &message);
                     show_disconnected(&ui, &s);
