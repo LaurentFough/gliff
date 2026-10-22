@@ -1059,8 +1059,7 @@ fn schedule_reconnect(ui: Rc<App>, s: Rc<Session>, generation: u64, error: Optio
     });
 }
 
-/// The status for reconnect `attempt`, under the error that ended the
-/// connection, if any.
+/// Keep the latest failure visible while a new connection attempt runs.
 fn connecting_status(error: Option<&str>) -> String {
     match error {
         Some(e) => format!("Error: {e}\nConnecting…"),
@@ -1068,6 +1067,8 @@ fn connecting_status(error: Option<&str>) -> String {
     }
 }
 
+/// The status for reconnect `attempt`, under the error that ended the
+/// connection, if any.
 fn reconnect_status(error: Option<&str>, attempt: u32) -> String {
     let next = if attempt > MAX_RETRIES {
         "Disconnected — click the tab to reconnect".to_string()
