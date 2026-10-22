@@ -2053,7 +2053,7 @@ mod tests {
     fn gtk_buttons_map_back_to_their_evdev_codes() {
         // GDK on Wayland numbers a button past the first three as its evdev
         // code - BTN_LEFT + 5, so the remote app sees the same number.
-        let codes: Vec<u32> = (1..=11).map(evdev_button).collect();
+        let codes: Vec<u32> = (1..=11).map(super::evdev_button).collect();
         assert_eq!(&codes[..3], [0x110, 0x112, 0x111]);
         assert_eq!(&codes[7..], [0x113, 0x114, 0x115, 0x116]);
     }
