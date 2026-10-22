@@ -1609,11 +1609,11 @@ fn setup_output(
         });
     }
     let requested = format!("gliff-{}", std::process::id());
-    let wait = match instance.create_headless_output(&requested) {
-        Ok(()) => Duration::from_secs(1),
+    let (wait, timed_out) = match instance.create_headless_output(&requested) {
+        Ok(()) => (Duration::from_secs(1), None),
         Err(e) if creation_may_complete(&e) => {
             tracing::warn!(error = %e, "headless request timed out; waiting for its named output");
-            Duration::from_secs(10)
+            (Duration::from_secs(10), Some(e))
         }
         Err(e) => return Err(e).context("create headless output"),
     };
@@ -1631,6 +1631,13 @@ fn setup_output(
         instance
             .monitors()
             .map(|mons| mons.into_iter().map(|m| m.name).collect())
+    })
+    .map_err(|e| match timed_out {
+        // Report why the output was waited for, not only that it never came.
+        Some(cause) => anyhow::Error::new(cause)
+            .context("create headless output")
+            .context(e),
+        None => e,
     })?;
     let width = caps.max_width.clamp(320, 1920) & !1;
     let height = caps.max_height.clamp(240, 1080) & !1;
