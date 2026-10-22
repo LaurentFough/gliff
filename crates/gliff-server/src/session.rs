@@ -1556,43 +1556,29 @@ fn setup_output(
             headless: None,
         });
     }
-    let before: Vec<String> = instance.monitors()?.into_iter().map(|m| m.name).collect();
     let requested = format!("gliff-{}", std::process::id());
-    // Hyprland can take longer than the socket timeout to create an output
-    // (seen on NVIDIA), and creates it anyway. So a failed request is not
-    // the end: wait for the output, and adopt it if it comes.
-    let created = instance.create_headless_output(&requested);
-    if let Err(e) = &created {
-        tracing::warn!(error = %e, "headless output request failed; waiting for the output");
-    }
-    // Hyprland names the output itself, so find the one that appeared.
-    let wait = if created.is_ok() { 4 } else { 50 };
-    let mut appeared = None;
-    for _ in 0..wait {
-        std::thread::sleep(Duration::from_millis(200));
-        appeared = instance
-            .monitors()?
-            .into_iter()
-            .find(|m| !before.contains(&m.name))
-            .map(|m| m.name);
-        if appeared.is_some() {
-            break;
+    let wait = match instance.create_headless_output(&requested) {
+        Ok(()) => Duration::from_secs(1),
+        Err(e) if creation_may_complete(&e) => {
+            tracing::warn!(error = %e, "headless request timed out; waiting for its named output");
+            Duration::from_secs(10)
         }
-    }
-    let Some(name) = appeared else {
-        return Err(created
-            .err()
-            .map(anyhow::Error::from)
-            .unwrap_or_else(|| anyhow::anyhow!("headless output did not appear"))
-            .context("create headless output"));
+        Err(e) => return Err(e).context("create headless output"),
     };
+    // Own cleanup immediately, including timeouts while polling. Never adopt
+    // another session's output or a physical monitor hotplugged during setup.
     let mut output = SessionOutput {
-        name,
+        name: requested,
         width: 0,
         height: 0,
         scale: 1.0,
         headless: Some(instance.clone()),
     };
+    wait_for_output(&output.name, wait, || {
+        instance
+            .monitors()
+            .map(|mons| mons.into_iter().map(|m| m.name).collect())
+    })?;
     let width = caps.max_width.clamp(320, 1920) & !1;
     let height = caps.max_height.clamp(240, 1080) & !1;
     if let Err(e) = instance.set_monitor_mode(&output.name, width, height, 60, 1.0) {
@@ -1617,6 +1603,33 @@ fn setup_output(
     output.height = h & !1;
     output.scale = scale;
     Ok(output)
+}
+
+/// A timed-out request may still finish in the compositor. An explicit
+/// rejection must fail immediately instead of waiting for an unrelated output.
+fn creation_may_complete(error: &hypr_ipc::Error) -> bool {
+    matches!(error, hypr_ipc::Error::Io(e)
+        if matches!(e.kind(), std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock))
+}
+
+fn wait_for_output(
+    requested: &str,
+    wait: Duration,
+    mut monitors: impl FnMut() -> hypr_ipc::Result<Vec<String>>,
+) -> Result<()> {
+    let deadline = Instant::now() + wait;
+    loop {
+        match monitors() {
+            Ok(names) if names.iter().any(|name| name == requested) => return Ok(()),
+            Ok(_) => {}
+            Err(e) => tracing::debug!(error = %e, "waiting for headless output discovery"),
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            anyhow::bail!("headless output {requested} did not appear before the setup deadline");
+        }
+        std::thread::sleep(Duration::from_millis(200).min(deadline - now));
+    }
 }
 
 /// The screen the user is most likely looking at: the focused monitor, else
@@ -1698,6 +1711,42 @@ fn stream_limit(encoder: (u32, u32), caps: &ClientCaps) -> Result<(u32, u32)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn only_the_requested_output_is_adopted() {
+        let result = wait_for_output("gliff-42", Duration::ZERO, || {
+            Ok(vec!["DP-2".into(), "gliff-420".into(), "gliff-99".into()])
+        });
+        assert!(result.is_err());
+        assert!(
+            wait_for_output("gliff-42", Duration::ZERO, || Ok(vec!["gliff-42".into()])).is_ok()
+        );
+    }
+
+    #[test]
+    fn discovery_recovers_after_an_ipc_timeout() {
+        let mut calls = 0;
+        wait_for_output("gliff-42", Duration::from_millis(500), || {
+            calls += 1;
+            if calls == 1 {
+                Err(hypr_ipc::Error::Io(std::io::ErrorKind::TimedOut.into()))
+            } else {
+                Ok(vec!["gliff-42".into()])
+            }
+        })
+        .unwrap();
+        assert_eq!(calls, 2);
+        assert!(creation_may_complete(&hypr_ipc::Error::Io(
+            std::io::ErrorKind::WouldBlock.into()
+        )));
+        assert!(!creation_may_complete(&hypr_ipc::Error::Io(
+            std::io::ErrorKind::PermissionDenied.into()
+        )));
+        assert!(!creation_may_complete(&hypr_ipc::Error::Command {
+            command: "output create".into(),
+            response: "refused".into()
+        }));
+    }
+
     #[test]
     fn initial_stream_respects_client_limits_before_first_resize() {
         let caps = ClientCaps {
