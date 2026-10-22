@@ -103,6 +103,9 @@ advertised clipboard contents without a local paste. Use `gliff --no-clipboard`
 to disable sharing in both directions when connecting to an untrusted host.
 Local selections marked `x-kde-passwordManagerHint` are not shared.
 
+Changing the clipboard cancels unfinished pastes from this machine to the
+remote host. Wait for a file paste to finish before copying something else.
+
 **Slow links.** gliff measures the link and lowers the frame rate, then the
 colour detail, then the resolution, and raises them again when there is
 room. Two flags change the video, and you pass them to the server through
