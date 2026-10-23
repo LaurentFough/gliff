@@ -122,6 +122,16 @@ Found on a GeForce RTX 5070 Ti, driver 610.57.04, Hyprland on DP-1 at
   modes. The validation layers report nothing, and the spec makes it
   optional. The driver prefers CBR with an endless regular flat GOP at every
   quality level.
+- **Pascal refuses the usage hints.** On a GeForce GTX 1080 Mobile with
+  driver 580.178.04 (580 is the last branch for Pascal),
+  `vkGetPhysicalDeviceVideoCapabilitiesKHR` fails with
+  `VK_ERROR_VIDEO_PROFILE_FORMAT_NOT_SUPPORTED_KHR` for any H.264 profile,
+  High or Main, that chains a `VkVideoEncodeUsageInfoKHR` with the
+  streaming, desktop and ultra-low-latency hints. Without the usage info
+  (or with every hint left at DEFAULT) it reports CBR, 17 DPB slots and
+  4096x4096, so `query_caps` asks once more without it and the session,
+  images and buffers use the profile the driver took. 2560x1440 Dual420
+  then streams at 56 fps, against 21 fps on the CPU tier of the same laptop.
 - **The encoder input refuses STORAGE.** No `VIDEO_ENCODE_SRC` format allows
   it, so the split writes a scratch NV12 image that is copied into the
   encoder's input.

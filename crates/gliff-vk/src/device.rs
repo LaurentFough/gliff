@@ -37,6 +37,7 @@ pub(crate) struct VideoEncode {
     pub(crate) max_extent: (u32, u32),
     pub(crate) std_header: vk::ExtensionProperties,
     pub(crate) bitstream_alignment: u64,
+    pub(crate) usage_hints: bool,
 }
 
 /// What the Vulkan Video H.264 encoder offers, for `gliff-probe`.
@@ -241,6 +242,7 @@ impl Gpu {
                         max_extent: caps.max_extent,
                         std_header: caps.std_header,
                         bitstream_alignment: caps.bitstream_alignment,
+                        usage_hints: caps.usage_hints,
                     })
                 }
                 _ => None,
