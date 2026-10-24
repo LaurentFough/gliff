@@ -1475,35 +1475,49 @@ impl VideoEncoder {
 /// One worker per headless output also prevents overlapping slow polls.
 struct KeepAwake {
     stop: std::sync::mpsc::Sender<()>,
+    cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
     task: Option<std::thread::JoinHandle<()>>,
 }
 
 impl KeepAwake {
     fn start(instance: hypr_ipc::Instance, name: String) -> std::io::Result<Self> {
-        Self::poll(Duration::from_secs(2), move || match instance.monitors() {
-            Ok(mons) if mons.iter().any(|m| m.name == name && !m.dpms_status) => {
-                if let Err(e) = instance.set_dpms(&name, true) {
-                    tracing::warn!(error = %e, "could not switch the headless output on");
+        Self::poll(Duration::from_secs(2), move |cancelled| {
+            match instance.monitors() {
+                Ok(mons) if mons.iter().any(|m| m.name == name && !m.dpms_status) => {
+                    if let Err(e) = instance.set_dpms_if(&name, true, || {
+                        !cancelled.load(std::sync::atomic::Ordering::Acquire)
+                    }) {
+                        tracing::warn!(error = %e, "could not switch the headless output on");
+                    }
                 }
+                Ok(_) => {}
+                Err(e) => tracing::debug!(error = %e, "cannot read the output's DPMS state"),
             }
-            Ok(_) => {}
-            Err(e) => tracing::debug!(error = %e, "cannot read the output's DPMS state"),
         })
     }
 
-    fn poll(every: Duration, mut check: impl FnMut() + Send + 'static) -> std::io::Result<Self> {
+    fn poll(
+        every: Duration,
+        mut check: impl FnMut(&std::sync::atomic::AtomicBool) + Send + 'static,
+    ) -> std::io::Result<Self> {
         use std::sync::mpsc::{channel, RecvTimeoutError};
         let (stop, rx) = channel();
+        let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let task_cancelled = cancelled.clone();
         let task = std::thread::Builder::new()
             .name("gliff-output-awake".into())
             .spawn(move || loop {
-                check();
+                if task_cancelled.load(std::sync::atomic::Ordering::Acquire) {
+                    break;
+                }
+                check(&task_cancelled);
                 if !matches!(rx.recv_timeout(every), Err(RecvTimeoutError::Timeout)) {
                     break;
                 }
             })?;
         Ok(Self {
             stop,
+            cancelled,
             task: Some(task),
         })
     }
@@ -1511,6 +1525,8 @@ impl KeepAwake {
 
 impl Drop for KeepAwake {
     fn drop(&mut self) {
+        self.cancelled
+            .store(true, std::sync::atomic::Ordering::Release);
         let _ = self.stop.send(());
         if let Some(task) = self.task.take() {
             let _ = task.join();
@@ -1893,7 +1909,7 @@ mod tests {
     fn slow_dpms_ipc_does_not_block_the_streaming_runtime() {
         let (started, ready) = std::sync::mpsc::channel();
         let (release, blocked) = std::sync::mpsc::channel();
-        let poll = KeepAwake::poll(Duration::from_secs(60), move || {
+        let poll = KeepAwake::poll(Duration::from_secs(60), move |_| {
             started.send(()).unwrap();
             blocked.recv().unwrap();
         })
