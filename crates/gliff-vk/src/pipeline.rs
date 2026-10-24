@@ -20,7 +20,7 @@ use crate::compute::{Recombine, Split};
 use crate::device::{Commands, Gpu, Timeline};
 use crate::image::{DmabufPlane, ExportedDmabuf, HostBuffer, Image};
 use crate::vkenc::{self, VkH264Encoder};
-use crate::Result;
+use crate::{Error, Result};
 use gliff_va::{EncodedPacket, EncoderSettings, H264Decoder, H264Encoder};
 
 pub struct EncodedFrame {
@@ -385,9 +385,9 @@ impl Decoder {
             timeline: Timeline::new(gpu)?,
             compute: Commands::new(gpu, gpu.families.compute, gpu.compute_queue)?,
             recombine: Recombine::new(gpu)?,
-            main: DecodeStream::new(gpu)?,
+            main: DecodeStream::new(gpu, width, height)?,
             aux: if dual {
-                Some(DecodeStream::new(gpu)?)
+                Some(DecodeStream::new(gpu, width, height)?)
             } else {
                 None
             },
@@ -604,6 +604,11 @@ impl Decoder {
         let aux_img = self.aux.as_ref().zip(aux_idx).map(|(d, i)| &d.images[i]);
         let (dst, _) = &self.outputs[idx];
         let (recombine, w, h, zoom) = (&self.recombine, self.width, self.height, self.zoom);
+        // The shader fetches the whole stream size from both pictures, aux
+        // rows included, so neither may be smaller than it.
+        for img in std::iter::once(main_img).chain(aux_img) {
+            check_covers((img.width, img.height), (w, h))?;
+        }
         self.compute
             .run(self.timeline.semaphore, None, None, true, |cmd| {
                 main_img.acquire_foreign(cmd, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
@@ -641,10 +646,10 @@ struct DecodeStream {
 }
 
 impl DecodeStream {
-    fn new(gpu: &Arc<Gpu>) -> Result<Self> {
+    fn new(gpu: &Arc<Gpu>, width: u32, height: u32) -> Result<Self> {
         Ok(Self {
             gpu: gpu.clone(),
-            dec: H264Decoder::new(&gpu.va, &gpu.va_caps)?,
+            dec: H264Decoder::new(&gpu.va, &gpu.va_caps, width, height)?,
             images: Vec::new(),
             generation: 0,
         })
@@ -672,6 +677,18 @@ impl DecodeStream {
     fn last_image(&self) -> Option<&Image> {
         self.dec.last_output().and_then(|i| self.images.get(i))
     }
+}
+
+/// A decoded picture of `extent` must hold every pixel of the `stream` size
+/// the recombine reads.
+fn check_covers(extent: (u32, u32), stream: (u32, u32)) -> Result<()> {
+    if extent.0 < stream.0 || extent.1 < stream.1 {
+        return Err(Error::StreamSize(format!(
+            "decoded picture {}x{} is smaller than the {}x{} stream",
+            extent.0, extent.1, stream.0, stream.1
+        )));
+    }
+    Ok(())
 }
 
 impl Drop for Decoder {
@@ -741,4 +758,150 @@ pub fn split_into_surface(
     })?;
     compute.wait()?;
     Ok(path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use gliff_va::h264::annexb::{nal_units, NAL_SPS};
+
+    /// A GPU that decodes, or `None` to skip.
+    fn decode_gpu() -> Option<Arc<Gpu>> {
+        let Ok(gpu) = Gpu::open(None) else {
+            eprintln!("no GPU; skipping");
+            return None;
+        };
+        if !gpu.can_decode() {
+            eprintln!("no VA-API decoder; skipping");
+            return None;
+        }
+        Some(gpu)
+    }
+
+    /// A hardware encoder, or `None` to skip: a device may decode without
+    /// being able to encode.
+    fn encoder(gpu: &Arc<Gpu>, width: u32, height: u32, dual: bool) -> Option<Encoder> {
+        let settings = EncoderSettings {
+            width,
+            height,
+            bitrate: 4_000_000,
+            framerate: 60,
+            vbv_ms: EncoderSettings::DEFAULT_VBV_MS,
+        };
+        match Encoder::new(gpu, settings, dual) {
+            Ok(e) => Some(e),
+            Err(e) => {
+                eprintln!("no encoder ({e}); skipping");
+                None
+            }
+        }
+    }
+
+    fn keyframe(encoder: &mut Encoder, width: u32, height: u32) -> EncodedFrame {
+        let bgra = vec![128; (width * height * 4) as usize];
+        encoder.encode_bgra(&bgra, true).unwrap()
+    }
+
+    fn is_size_error<T>(result: &Result<T>) -> bool {
+        matches!(
+            result,
+            Err(Error::StreamSize(_)) | Err(Error::Va(gliff_va::Error::StreamSize(_)))
+        )
+    }
+
+    /// A server that announces 640x480 and sends a 320x240 stream gets a
+    /// size error from the GPU tier instead of a recombine that reads past
+    /// the decoded pictures.
+    #[test]
+    fn an_undersized_stream_is_a_size_error() {
+        let Some(gpu) = decode_gpu() else { return };
+        for dual in [false, true] {
+            let Some(mut small) = encoder(&gpu, 320, 240, dual) else {
+                return;
+            };
+            let frame = keyframe(&mut small, 320, 240);
+            let mut decoder = Decoder::new(&gpu, dual, 640, 480).unwrap();
+            let aux = frame.aux.as_deref().unwrap_or(&[]);
+            let result = decoder.decode_to_bgra(&frame.main, aux);
+            assert!(is_size_error(&result), "dual={dual}: {:?}", result.err());
+        }
+    }
+
+    /// A Dual420 pair whose main picture matches but whose aux is smaller.
+    #[test]
+    fn an_undersized_aux_picture_is_a_size_error() {
+        let Some(gpu) = decode_gpu() else { return };
+        let (Some(mut full), Some(mut small)) =
+            (encoder(&gpu, 640, 480, true), encoder(&gpu, 320, 240, true))
+        else {
+            return;
+        };
+        let main = keyframe(&mut full, 640, 480).main;
+        let aux = keyframe(&mut small, 320, 240).aux.unwrap();
+        let mut decoder = Decoder::new(&gpu, true, 640, 480).unwrap();
+        let result = decoder.decode_to_bgra(&main, &aux);
+        assert!(is_size_error(&result), "{:?}", result.err());
+    }
+
+    /// A refused SPS is refused again when it repeats, slices after it do
+    /// not decode against the previous stream, and a valid SPS recovers.
+    #[test]
+    fn a_refused_sps_stays_refused_until_a_valid_one() {
+        let Some(gpu) = decode_gpu() else { return };
+        let (Some(mut full), Some(mut small)) = (
+            encoder(&gpu, 640, 480, false),
+            encoder(&gpu, 320, 240, false),
+        ) else {
+            return;
+        };
+        let mut decoder = Decoder::new(&gpu, false, 640, 480).unwrap();
+        let valid = keyframe(&mut full, 640, 480).main;
+        assert!(decoder.decode_to_bgra(&valid, &[]).unwrap().is_some());
+
+        let refused = keyframe(&mut small, 320, 240).main;
+        let again = keyframe(&mut small, 320, 240).main;
+        let sps = |au: &[u8]| {
+            nal_units(au)
+                .into_iter()
+                .find(|n| n.nal_type == NAL_SPS)
+                .map(|n| n.data.to_vec())
+        };
+        assert!(sps(&refused).is_some());
+        assert_eq!(sps(&refused), sps(&again), "the same SPS repeats");
+        let result = decoder.decode_to_bgra(&refused, &[]);
+        assert!(is_size_error(&result), "{:?}", result.err());
+        let result = decoder.decode_to_bgra(&again, &[]);
+        assert!(is_size_error(&result), "{:?}", result.err());
+        let bgra = vec![64; 320 * 240 * 4];
+        let p_slice = small.encode_bgra(&bgra, false).unwrap().main;
+        assert!(sps(&p_slice).is_none());
+        // The refused SPS left no stream for the slice to decode against.
+        let result = decoder.decode_to_bgra(&p_slice, &[]);
+        assert!(
+            matches!(
+                result,
+                Err(Error::Va(gliff_va::Error::Bitstream(
+                    "slice before parameter sets"
+                )))
+            ),
+            "{:?}",
+            result.err()
+        );
+
+        let recovered = keyframe(&mut full, 640, 480).main;
+        let pixels = decoder.decode_to_bgra(&recovered, &[]).unwrap();
+        assert_eq!(pixels.map(|p| p.len()), Some(640 * 480 * 4));
+    }
+
+    #[test]
+    fn decoded_pictures_must_cover_the_stream() {
+        // Macroblock padding past the stream size is fine.
+        assert!(check_covers((1920, 1088), (1920, 1080)).is_ok());
+        assert!(check_covers((1920, 1080), (1920, 1080)).is_ok());
+        assert!(check_covers((16, 16), (4096, 4096)).is_err());
+        // An aux picture short of the bottom rows the shader fetches.
+        assert!(check_covers((1920, 544), (1920, 1080)).is_err());
+        assert!(check_covers((1904, 1088), (1920, 1080)).is_err());
+    }
 }
