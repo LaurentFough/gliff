@@ -208,7 +208,8 @@ impl Image {
             .push_next(&mut external)
             .push_next(&mut format_list);
         // SAFETY: valid create info; dedicated exportable allocation bound
-        // before use.
+        // before use. On failure the image and memory are released before
+        // returning, since a refused large output can be asked for again.
         let (image, memory) = unsafe {
             let image = gpu.device.create_image(&info, None)?;
             let mut dedicated_reqs = vk::MemoryDedicatedRequirements::default();
@@ -220,16 +221,33 @@ impl Image {
             let mut export = vk::ExportMemoryAllocateInfo::default()
                 .handle_types(vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT);
             let mut dedicated = vk::MemoryDedicatedAllocateInfo::default().image(image);
+            let memory_type = match gpu.memory_type(
+                reqs.memory_requirements.memory_type_bits,
+                vk::MemoryPropertyFlags::DEVICE_LOCAL,
+            ) {
+                Ok(t) => t,
+                Err(e) => {
+                    gpu.device.destroy_image(image, None);
+                    return Err(e);
+                }
+            };
             let alloc = vk::MemoryAllocateInfo::default()
                 .allocation_size(reqs.memory_requirements.size)
-                .memory_type_index(gpu.memory_type(
-                    reqs.memory_requirements.memory_type_bits,
-                    vk::MemoryPropertyFlags::DEVICE_LOCAL,
-                )?)
+                .memory_type_index(memory_type)
                 .push_next(&mut export)
                 .push_next(&mut dedicated);
-            let memory = gpu.device.allocate_memory(&alloc, None)?;
-            gpu.device.bind_image_memory(image, memory, 0)?;
+            let memory = match gpu.device.allocate_memory(&alloc, None) {
+                Ok(m) => m,
+                Err(e) => {
+                    gpu.device.destroy_image(image, None);
+                    return Err(e.into());
+                }
+            };
+            if let Err(e) = gpu.device.bind_image_memory(image, memory, 0) {
+                gpu.device.destroy_image(image, None);
+                gpu.device.free_memory(memory, None);
+                return Err(e.into());
+            }
             (image, memory)
         };
         let mut img = Self {
