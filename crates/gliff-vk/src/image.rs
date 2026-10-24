@@ -602,10 +602,10 @@ impl Image {
             }
         };
         for i in 0..2 {
-            if gpu.modifier_properties(formats[i], desc.modifier).is_none() {
+            if !sampled_plane_modifier(gpu.modifier_properties(formats[i], desc.modifier)) {
                 release(&images, &memory);
                 return Err(Error::Unsupported(format!(
-                    "{:?} with modifier {:#x} is not importable",
+                    "{:?} with modifier {:#x} requires one sampleable memory plane",
                     formats[i], desc.modifier
                 )));
             }
@@ -633,7 +633,7 @@ impl Image {
                 .array_layers(1)
                 .samples(vk::SampleCountFlags::TYPE_1)
                 .tiling(vk::ImageTiling::DRM_FORMAT_MODIFIER_EXT)
-                .usage(vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_SRC)
+                .usage(vk::ImageUsageFlags::SAMPLED)
                 .initial_layout(vk::ImageLayout::UNDEFINED)
                 .push_next(&mut explicit)
                 .push_next(&mut external);
@@ -828,6 +828,14 @@ impl Image {
     /// Record a plane-by-plane copy of another NV12 image of the same size.
     /// `src` must be in TRANSFER_SRC_OPTIMAL and `self` in TRANSFER_DST_OPTIMAL.
     pub(crate) fn copy_nv12_from(&self, cmd: vk::CommandBuffer, src: &Image) {
+        debug_assert!(
+            self.extra.is_empty(),
+            "operation needs a single Vulkan image"
+        );
+        debug_assert!(
+            src.extra.is_empty(),
+            "copy needs a single Vulkan source image"
+        );
         let region = |aspect: vk::ImageAspectFlags, w: u32, h: u32| vk::ImageCopy {
             src_subresource: vk::ImageSubresourceLayers {
                 aspect_mask: aspect,
@@ -896,6 +904,10 @@ impl Image {
     }
 
     pub(crate) fn view0(&self) -> vk::ImageView {
+        debug_assert!(
+            self.extra.is_empty(),
+            "operation needs a single Vulkan image"
+        );
         self.layer_views[0]
     }
 
@@ -993,6 +1005,10 @@ impl Image {
 
     /// Record a copy of packed 32-bit pixels from `buf` into the image.
     pub(crate) fn copy_rgba_from_buffer(&self, cmd: vk::CommandBuffer, buf: &HostBuffer) {
+        debug_assert!(
+            self.extra.is_empty(),
+            "operation needs a single Vulkan image"
+        );
         let regions = [vk::BufferImageCopy {
             buffer_offset: 0,
             buffer_row_length: self.width,
@@ -1019,6 +1035,10 @@ impl Image {
 
     /// Record a copy of a single-plane 32-bit image into `buf`, packed.
     pub(crate) fn copy_rgba_to_buffer(&self, cmd: vk::CommandBuffer, buf: &HostBuffer) {
+        debug_assert!(
+            self.extra.is_empty(),
+            "operation needs a single Vulkan image"
+        );
         let regions = [vk::BufferImageCopy {
             buffer_offset: 0,
             buffer_row_length: self.width,
@@ -1180,5 +1200,35 @@ impl Drop for HostBuffer {
             self.gpu.device.destroy_buffer(self.buffer, None);
             self.gpu.device.free_memory(self.memory, None);
         }
+    }
+}
+
+/// A separately imported color plane needs exactly its one supplied layout
+/// and must support the sampled-image use requested when it is created.
+fn sampled_plane_modifier(properties: Option<(u32, vk::FormatFeatureFlags)>) -> bool {
+    properties.is_some_and(|(planes, features)| {
+        planes == 1 && features.contains(vk::FormatFeatureFlags::SAMPLED_IMAGE)
+    })
+}
+
+#[cfg(test)]
+mod plane_modifier_tests {
+    use super::*;
+
+    #[test]
+    fn a_plane_import_rejects_metadata_planes_and_unsampleable_formats() {
+        assert!(sampled_plane_modifier(Some((
+            1,
+            vk::FormatFeatureFlags::SAMPLED_IMAGE
+        ))));
+        assert!(!sampled_plane_modifier(Some((
+            2,
+            vk::FormatFeatureFlags::SAMPLED_IMAGE
+        ))));
+        assert!(!sampled_plane_modifier(Some((
+            1,
+            vk::FormatFeatureFlags::TRANSFER_SRC
+        ))));
+        assert!(!sampled_plane_modifier(None));
     }
 }
