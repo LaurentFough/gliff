@@ -268,7 +268,10 @@ Every crate with `unsafe` documents the safety requirements at each block.
   stream with video: the Linux writer normally queues them ahead of a waiting
   video frame, keeping audio order and at most half a second of packets. Pending
   Pings/Pongs limit that priority so heartbeats still make progress; cursor and
-  clipboard updates do not. The client conceals short gaps in sequence numbers.
+  clipboard updates do not. At most 50 audio messages can overtake any one
+  waiting video frame, so video and control messages also progress on slow links
+  without heartbeat support. Audio restarts do not reset this budget. The client
+  conceals short gaps in sequence numbers.
   The client plays through a buffer read by a cubic resampler (`gliff-audio`
   `Jitter`): the ratio converts 48 kHz to the device rate and leans by at
   most 0.5% toward the target fill, which absorbs clock drift without

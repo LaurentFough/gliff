@@ -15,12 +15,16 @@ use tokio::task::JoinHandle;
 
 /// Sound packets that may wait for the socket: half a second.
 const MAX_QUEUED_AUDIO: usize = 50;
+/// Maximum audio messages allowed to overtake one waiting video frame.
+/// This guarantees progress even for peers without heartbeat support.
+const MAX_AUDIO_OVERTAKES: usize = 50;
 
 /// Messages waiting for the writer task. Bounded by coalescing: stale
 /// entries a newer one supersedes are dropped rather than queued behind it.
 #[derive(Default)]
 struct Queue {
     packets: VecDeque<(ServerMsg, Vec<Vec<u8>>)>,
+    audio_overtakes: usize,
 }
 
 impl Queue {
@@ -35,7 +39,10 @@ impl Queue {
 
     fn push(&mut self, msg: ServerMsg, payloads: Vec<Vec<u8>>) {
         match &msg {
-            ServerMsg::VideoFrame { .. } => debug_assert!(self.video_ready()),
+            ServerMsg::VideoFrame { .. } => {
+                debug_assert!(self.video_ready());
+                self.audio_overtakes = 0;
+            }
             ServerMsg::StreamConfig { .. } => {
                 let after_video = self
                     .packets
@@ -71,6 +78,7 @@ impl Queue {
             // Sound normally overtakes a waiting video frame, preserving
             // audio order. Pending Pings/Pongs limit that priority so they
             // cannot starve; cursor and clipboard updates are not barriers.
+            // A per-video budget also guarantees progress without Pings.
             // Past a bound the oldest frame goes, and a restart replaces
             // the old stream so at most one start waits.
             ServerMsg::AudioStart { .. } | ServerMsg::AudioFrame { .. } => {
@@ -107,13 +115,19 @@ impl Queue {
                     .rposition(|(m, _)| audio(m))
                     .map_or(0, |index| index + 1);
                 let first = after_control.max(after_audio);
-                let at = self
-                    .packets
-                    .iter()
-                    .enumerate()
-                    .skip(first)
-                    .find(|(_, (m, _))| matches!(m, ServerMsg::VideoFrame { .. }))
-                    .map_or(self.packets.len(), |(index, _)| index);
+                let at = if self.audio_overtakes < MAX_AUDIO_OVERTAKES {
+                    self.packets
+                        .iter()
+                        .enumerate()
+                        .skip(first)
+                        .find(|(_, (m, _))| matches!(m, ServerMsg::VideoFrame { .. }))
+                        .map_or(self.packets.len(), |(index, _)| index)
+                } else {
+                    self.packets.len()
+                };
+                if at < self.packets.len() {
+                    self.audio_overtakes += 1;
+                }
                 self.packets.insert(at, (msg, payloads));
                 return;
             }
@@ -416,16 +430,56 @@ mod tests {
         assert!(matches!(queue.packets[0].0, ServerMsg::AudioStart { .. }));
         assert!(matches!(
             queue.packets[1].0,
+            ServerMsg::VideoFrame { frame_id: 1, .. }
+        ));
+        assert!(matches!(
+            queue.packets[2].0,
             ServerMsg::AudioFrame { seq: 51, .. }
         ));
         assert!(matches!(
-            queue.packets[MAX_QUEUED_AUDIO - 1].0,
+            queue.packets[MAX_QUEUED_AUDIO].0,
             ServerMsg::AudioFrame { seq: 99, .. }
         ));
-        assert!(matches!(
-            queue.packets[MAX_QUEUED_AUDIO].0,
-            ServerMsg::VideoFrame { frame_id: 1, .. }
-        ));
+    }
+
+    #[test]
+    fn slow_links_make_video_and_control_progress_without_heartbeats() {
+        for restarting in [false, true] {
+            let mut queue = Queue::default();
+            let (msg, payloads) = video(1);
+            queue.push(msg, payloads);
+            queue.push(ServerMsg::ClipboardAck { id: 1, received: 0 }, Vec::new());
+            let mut video_written = false;
+            let mut control_written = false;
+            for seq in 0..600 {
+                if seq == 0 || restarting {
+                    queue.push(
+                        ServerMsg::AudioStart {
+                            codec: gliff_proto::AudioCodec::Opus,
+                            sample_rate: 48000,
+                            channels: 2,
+                        },
+                        Vec::new(),
+                    );
+                }
+                queue.push(ServerMsg::AudioFrame { seq, data_len: 1 }, vec![vec![0]]);
+                // The link drains four times slower than audio arrives.
+                if seq % 4 == 0 {
+                    match queue.packets.pop_front().map(|(msg, _)| msg) {
+                        Some(ServerMsg::VideoFrame { .. }) => video_written = true,
+                        Some(ServerMsg::ClipboardAck { .. }) => control_written = true,
+                        _ => {}
+                    }
+                }
+                if video_written && control_written {
+                    break;
+                }
+            }
+            assert!(
+                video_written && control_written,
+                "starved with restarting={restarting}"
+            );
+        }
     }
 
     #[test]
@@ -445,9 +499,10 @@ mod tests {
             queue.push(ServerMsg::AudioFrame { seq, data_len: 1 }, vec![vec![0]]);
             assert_eq!(queue.packets.len(), 3);
         }
-        assert!(matches!(queue.packets[0].0, ServerMsg::AudioStart { .. }));
+        assert!(matches!(queue.packets[0].0, ServerMsg::VideoFrame { .. }));
+        assert!(matches!(queue.packets[1].0, ServerMsg::AudioStart { .. }));
         assert!(matches!(
-            queue.packets[1].0,
+            queue.packets[2].0,
             ServerMsg::AudioFrame { seq: 999, .. }
         ));
     }
