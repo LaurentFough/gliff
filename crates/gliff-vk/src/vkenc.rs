@@ -107,9 +107,18 @@ pub(crate) fn query_caps(
     pd: vk::PhysicalDevice,
 ) -> Option<Caps> {
     let fns = ash::khr::video_queue::Instance::new(entry, instance);
+    select_profile(|usage_hints| profile_caps(&fns, pd, usage_hints))
+}
+
+/// Retry without optional hints when the hinted profile is rejected or
+/// lacks required capabilities. Only a usable profile ends the search.
+fn select_profile<T>(
+    mut query: impl FnMut(bool) -> std::result::Result<Option<T>, vk::Result>,
+) -> Option<T> {
     for usage_hints in [true, false] {
-        match profile_caps(&fns, pd, usage_hints) {
-            Ok(caps) => return caps,
+        match query(usage_hints) {
+            Ok(Some(caps)) => return Some(caps),
+            Ok(None) => {}
             Err(r) => tracing::debug!(
                 result = ?r,
                 usage_hints,
@@ -934,4 +943,70 @@ fn step_error(step: &str, e: vk::Result) -> Error {
 
 fn has_start_code(data: &[u8]) -> bool {
     data.starts_with(&[0, 0, 1]) || data.starts_with(&[0, 0, 0, 1])
+}
+
+#[cfg(test)]
+mod profile_tests {
+    use super::*;
+
+    #[test]
+    fn accepted_hinted_profiles_are_used_without_retrying() {
+        let mut attempts = Vec::new();
+        assert_eq!(
+            select_profile(|hints| {
+                attempts.push(hints);
+                Ok(Some(hints))
+            }),
+            Some(true)
+        );
+        assert_eq!(attempts, [true]);
+    }
+
+    #[test]
+    fn rejected_hints_retry_once_and_select_the_unhinted_profile() {
+        let mut attempts = Vec::new();
+        assert_eq!(
+            select_profile(|hints| {
+                attempts.push(hints);
+                if hints {
+                    Err(vk::Result::ERROR_VIDEO_PROFILE_FORMAT_NOT_SUPPORTED_KHR)
+                } else {
+                    Ok(Some(hints))
+                }
+            }),
+            Some(false)
+        );
+        assert_eq!(attempts, [true, false]);
+    }
+
+    #[test]
+    fn an_accepted_but_unusable_hinted_profile_can_fall_back() {
+        let mut attempts = Vec::new();
+        assert_eq!(
+            select_profile(|hints| {
+                attempts.push(hints);
+                Ok(if hints { None } else { Some(hints) })
+            }),
+            Some(false)
+        );
+        assert_eq!(attempts, [true, false]);
+    }
+
+    #[test]
+    fn missing_required_capabilities_also_retry_without_hints() {
+        let mut attempts = Vec::new();
+        let selected: Option<()> = select_profile(|hints| {
+            attempts.push(hints);
+            Ok(None)
+        });
+        assert_eq!(selected, None);
+        assert_eq!(attempts, [true, false]);
+        let mut attempts = Vec::new();
+        let selected: Option<()> = select_profile(|hints| {
+            attempts.push(hints);
+            Err(vk::Result::ERROR_VIDEO_PROFILE_FORMAT_NOT_SUPPORTED_KHR)
+        });
+        assert_eq!(selected, None);
+        assert_eq!(attempts, [true, false]);
+    }
 }
