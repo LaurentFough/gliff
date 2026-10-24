@@ -93,7 +93,8 @@ tiers independently, so every pairing can be tested on one machine.
 - **`scripts/e2e.sh`** boots a nested Hyprland and asserts PASS across the probe
   checks, the capture pipeline, both Dual420 and Single420 server-plus-client
   streams, the CPU tier matrix (cpu<->cpu and each mixed pairing), the
-  rotated-output capture on both video tiers, clipboard in both directions (as text, as a 1 MiB binary item and as a
+  rotated-output and odd-sized-output capture on both video tiers,
+  clipboard in both directions (as text, as a 1 MiB binary item and as a
   copied directory tree), a mirrored-output resize, a keymap sent
   mid-session, and the GTK client's shortcut inhibit across repeated focus
   changes. It needs a Hyprland session, so it is not a CI unit test; run

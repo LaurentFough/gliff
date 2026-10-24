@@ -27,6 +27,9 @@ pub enum Error {
     Codec(#[from] openh264::Error),
     #[error("unsupported: {0}")]
     Unsupported(String),
+    /// A decoded picture's size differs from the announced stream size.
+    #[error("stream size: {0}")]
+    StreamSize(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -99,14 +102,19 @@ const POOL_KEEP: usize = 3;
 impl PixelPool {
     /// A buffer of exactly `len` bytes: a free one with the capacity when
     /// there is one, so its pages are mapped already, else a new one.
-    fn take(&self, len: usize) -> Vec<u8> {
+    /// `None` when the allocation fails, which a frame survives unzoomed.
+    fn take(&self, len: usize) -> Option<Vec<u8>> {
         let mut free = self.0.lock().unwrap_or_else(|e| e.into_inner());
         let mut buf = match free.iter().position(|b| b.capacity() >= len) {
             Some(i) => free.swap_remove(i),
-            None => Vec::with_capacity(len),
+            None => {
+                let mut buf = Vec::new();
+                buf.try_reserve_exact(len).ok()?;
+                buf
+            }
         };
         buf.resize(len, 0);
-        buf
+        Some(buf)
     }
 
     /// Keep `buf` for reuse. When the pool is full, a larger buffer
@@ -159,10 +167,23 @@ pub struct PooledFrame {
 impl BgraFrame {
     /// Replicate every pixel into a `zoom` x `zoom` block, so the display
     /// side can show the frame at an integer scale without resampling. At
-    /// zoom 1 the pixels move without a copy.
+    /// zoom 1 the pixels move without a copy, as they do when the enlarged
+    /// frame cannot be allocated (the caller bounds the zoom).
     pub fn zoomed(self, zoom: u32, pool: &PixelPool) -> PooledFrame {
         let pool = pool.clone();
-        if zoom <= 1 {
+        let z = zoom as usize;
+        let (w, h) = (self.width as usize, self.height as usize);
+        let zoomed = (|| {
+            if zoom <= 1 {
+                return None;
+            }
+            let dst_stride = w.checked_mul(4)?.checked_mul(z)?;
+            let len = dst_stride.checked_mul(h)?.checked_mul(z)?;
+            let width = self.width.checked_mul(zoom)?;
+            let height = self.height.checked_mul(zoom)?;
+            Some((dst_stride, pool.take(len)?, width, height))
+        })();
+        let Some((dst_stride, mut buf, width, height)) = zoomed else {
             return PooledFrame {
                 width: self.width,
                 height: self.height,
@@ -171,12 +192,8 @@ impl BgraFrame {
                     pool,
                 },
             };
-        }
-        let z = zoom as usize;
-        let (w, h) = (self.width as usize, self.height as usize);
+        };
         let src_stride = w * 4;
-        let dst_stride = src_stride * z;
-        let mut buf = pool.take(dst_stride * h * z);
         {
             use rayon::prelude::*;
             buf.par_chunks_exact_mut(dst_stride * z)
@@ -194,8 +211,8 @@ impl BgraFrame {
                 });
         }
         PooledFrame {
-            width: self.width * zoom,
-            height: self.height * zoom,
+            width,
+            height,
             pixels: PooledPixels { buf, pool },
         }
     }
@@ -396,14 +413,19 @@ pub struct Decoder {
     /// that OpenH264 releases each picture at once, since our encoder steps
     /// the POC by one (see `gliff_vk` encoder).
     held: u32,
+    /// The display size the stream was announced with (`StreamConfig`).
+    size: (u32, u32),
 }
 
 impl Decoder {
-    pub fn new(dual: bool) -> Result<Self> {
+    /// A decoder for a stream of `width` x `height` display pixels. A
+    /// picture of any other size is a decode error.
+    pub fn new(dual: bool, width: u32, height: u32) -> Result<Self> {
         Ok(Self {
             main: new_h264_decoder()?,
             aux: dual.then(new_h264_decoder).transpose()?,
             held: 0,
+            size: (width, height),
         })
     }
 
@@ -419,9 +441,10 @@ impl Decoder {
     /// unit so the pair stays in step.
     pub fn decode(&mut self, main: &[u8], aux: &[u8]) -> Result<Option<BgraFrame>> {
         self.held += 1;
+        let size = self.size;
         let frame = match &mut self.aux {
             Some(dec) => match (self.main.decode(main)?, dec.decode(aux)?) {
-                (Some(m), Some(a)) => Some(recombine_to_bgra(&m, &a)?),
+                (Some(m), Some(a)) => Some(recombine_checked(&m, &a, size)?),
                 (None, None) => None,
                 _ => {
                     return Err(Error::Unsupported(
@@ -429,7 +452,10 @@ impl Decoder {
                     ))
                 }
             },
-            None => self.main.decode(main)?.as_ref().map(decoded_to_bgra),
+            None => match self.main.decode(main)? {
+                Some(m) => Some(convert_checked(&m, size)?),
+                None => None,
+            },
         };
         let Some(frame) = frame else {
             return Ok(None);
@@ -444,15 +470,14 @@ impl Decoder {
     /// every following decode with `dsOutOfMemory`. With a POC step of one
     /// only the first picture after a new decoder is ever held.
     pub fn flush(&mut self) -> Result<Option<BgraFrame>> {
-        let frame = match &mut self.aux {
-            Some(dec) => {
-                let (main, aux) = (self.main.flush_remaining()?, dec.flush_remaining()?);
-                match (main.first(), aux.first()) {
-                    (Some(m), Some(a)) => Some(recombine_to_bgra(m, a)?),
-                    _ => None,
-                }
+        let frame = match self.flush_remaining() {
+            Ok(frame) => frame,
+            Err(e) => {
+                // Stop draining after an error. The client asks for a
+                // keyframe to recover.
+                self.held = 0;
+                return Err(e);
             }
-            None => self.main.flush_remaining()?.first().map(decoded_to_bgra),
         };
         let Some(frame) = frame else {
             // Nothing came out, so nothing is drainable: correct any drift
@@ -462,6 +487,23 @@ impl Decoder {
         };
         self.held = self.held.saturating_sub(1);
         Ok(Some(frame))
+    }
+
+    fn flush_remaining(&mut self) -> Result<Option<BgraFrame>> {
+        let size = self.size;
+        Ok(match &mut self.aux {
+            Some(dec) => {
+                let (main, aux) = (self.main.flush_remaining()?, dec.flush_remaining()?);
+                match (main.first(), aux.first()) {
+                    (Some(m), Some(a)) => Some(recombine_checked(m, a, size)?),
+                    _ => None,
+                }
+            }
+            None => match self.main.flush_remaining()?.first() {
+                Some(m) => Some(convert_checked(m, size)?),
+                None => None,
+            },
+        })
     }
 }
 
@@ -474,6 +516,35 @@ fn new_h264_decoder() -> Result<H264Decoder> {
         OpenH264API::from_source(),
         DecoderConfig::new().flush_after_decode(Flush::NoFlush),
     )?)
+}
+
+/// Refuse a decoded picture whose size, cropped to even dimensions as the
+/// conversion does, is not the announced `expected` size. An empty picture
+/// is refused whatever was announced: the conversion cannot cut it into rows.
+fn check_picture_size(dimensions: (usize, usize), expected: (u32, u32)) -> Result<()> {
+    let (w, h) = (dimensions.0 & !1, dimensions.1 & !1);
+    if w == 0 || h == 0 || (w, h) != (expected.0 as usize, expected.1 as usize) {
+        return Err(Error::StreamSize(format!(
+            "decoded picture {}x{} does not match the announced {}x{}",
+            dimensions.0, dimensions.1, expected.0, expected.1
+        )));
+    }
+    Ok(())
+}
+
+fn convert_checked(image: &DecodedYUV, expected: (u32, u32)) -> Result<BgraFrame> {
+    check_picture_size(image.dimensions(), expected)?;
+    Ok(decoded_to_bgra(image))
+}
+
+fn recombine_checked(
+    main: &DecodedYUV,
+    aux: &DecodedYUV,
+    expected: (u32, u32),
+) -> Result<BgraFrame> {
+    check_picture_size(main.dimensions(), expected)?;
+    check_picture_size(aux.dimensions(), expected)?;
+    recombine_to_bgra(main, aux)
 }
 
 /// Convert a decoded picture straight to BGRA, cropped to even dimensions,
@@ -560,6 +631,39 @@ mod tests {
     }
 
     #[test]
+    fn a_zoom_past_the_address_space_leaves_the_frame_as_it_is() {
+        let pool = PixelPool::default();
+        let frame = BgraFrame {
+            width: 2,
+            height: 1,
+            pixels: vec![1, 2, 3, 4, 5, 6, 7, 8],
+        };
+        let z = frame.zoomed(u32::MAX, &pool);
+        assert_eq!(
+            (z.width, z.height, z.pixels.as_ref()),
+            (2, 1, &[1u8, 2, 3, 4, 5, 6, 7, 8][..])
+        );
+    }
+
+    #[test]
+    fn a_zoomed_frame_that_cannot_be_allocated_stays_unzoomed() {
+        // One pixel at zoom two billion: every size fits its type, but the
+        // 16 EB buffer is past isize::MAX, so the reservation fails
+        // deterministically, before the allocator is asked.
+        let pool = PixelPool::default();
+        let frame = BgraFrame {
+            width: 1,
+            height: 1,
+            pixels: vec![7; 4],
+        };
+        let z = frame.zoomed(2_000_000_000, &pool);
+        assert_eq!(
+            (z.width, z.height, z.pixels.as_ref()),
+            (1, 1, &[7u8; 4][..])
+        );
+    }
+
+    #[test]
     fn dropped_frames_return_their_buffers_to_the_pool() {
         let pool = PixelPool::default();
         let frame = BgraFrame {
@@ -571,7 +675,7 @@ mod tests {
         assert_eq!(pool.len(), 0);
         drop(z);
         assert_eq!(pool.len(), 1);
-        let small = pool.take(16);
+        let small = pool.take(16).unwrap();
         assert_eq!(
             (small.len(), pool.len()),
             (16, 0),
@@ -579,7 +683,7 @@ mod tests {
         );
         drop(small);
         pool.give(vec![0; 8]);
-        let big = pool.take(64);
+        let big = pool.take(64).unwrap();
         assert_eq!((big.len(), pool.len()), (64, 1), "a too-small buffer stays");
     }
 
@@ -592,7 +696,7 @@ mod tests {
         pool.give(vec![0; 64]);
         assert_eq!(pool.len(), POOL_KEEP);
         assert_eq!(
-            pool.take(64).len(),
+            pool.take(64).unwrap().len(),
             64,
             "the large buffer replaced a small one"
         );
@@ -671,7 +775,7 @@ mod tests {
             framerate: 60,
         };
         let mut encoder = Encoder::new(settings, dual).expect("encoder");
-        let mut decoder = Decoder::new(dual).expect("decoder");
+        let mut decoder = Decoder::new(dual, w, h).expect("decoder");
         let mut sources = Vec::new();
         let mut outputs = Vec::new();
         for i in 0..10 {
@@ -724,7 +828,7 @@ mod tests {
             framerate: 60,
         };
         let mut encoder = Encoder::new(settings, false).expect("encoder");
-        let mut decoder = Decoder::new(false).expect("decoder");
+        let mut decoder = Decoder::new(false, 320, 240).expect("decoder");
         let mut decoded = 0;
         for i in 0..6 {
             if i == 3 {
@@ -749,7 +853,7 @@ mod tests {
             framerate: 60,
         };
         let mut encoder = Encoder::new(settings, true).expect("encoder");
-        let mut decoder = Decoder::new(true).expect("decoder");
+        let mut decoder = Decoder::new(true, w as u32, h as u32).expect("decoder");
         let dark = vec![16u8; w * h * 4];
         let detail = detailed_bgra(w, h);
         let mut last = None;
@@ -763,6 +867,98 @@ mod tests {
         let reference = reference_bgra(&detail, w, h, true);
         let p = psnr(&rgb_channels(&reference), &rgb_channels(&out.pixels));
         assert!(p > 34.5, "detailed change PSNR {p:.1} dB");
+    }
+
+    #[test]
+    fn picture_size_must_match_the_stream() {
+        assert!(check_picture_size((640, 360), (640, 360)).is_ok());
+        // An odd picture is cropped to even before conversion.
+        assert!(check_picture_size((641, 361), (640, 360)).is_ok());
+        assert!(check_picture_size((16, 16), (640, 360)).is_err());
+        assert!(check_picture_size((640, 368), (640, 360)).is_err());
+        // Empty pictures never convert, whatever was announced.
+        assert!(check_picture_size((1, 1), (0, 0)).is_err());
+        assert!(check_picture_size((0, 360), (0, 360)).is_err());
+    }
+
+    fn is_size_error<T>(result: &Result<T>) -> bool {
+        matches!(result, Err(Error::StreamSize(_)))
+    }
+
+    fn keyframe(width: u32, height: u32, dual: bool) -> EncodedFrame {
+        let settings = EncoderSettings {
+            width,
+            height,
+            bitrate: 4_000_000,
+            framerate: 60,
+        };
+        let mut encoder = Encoder::new(settings, dual).expect("encoder");
+        let src = synthetic_bgra(width as usize, height as usize, 0);
+        encoder.encode_bgra(&src, true).expect("encode")
+    }
+
+    /// A stream smaller than its StreamConfig is a size error in both chroma
+    /// modes, never a frame of the wrong size.
+    #[test]
+    fn an_undersized_stream_is_a_size_error() {
+        for dual in [false, true] {
+            let packet = keyframe(320, 240, dual);
+            let mut decoder = Decoder::new(dual, 640, 480).expect("decoder");
+            let aux = packet.aux.as_deref().unwrap_or(&[]);
+            let result = decoder.decode(&packet.main, aux);
+            assert!(is_size_error(&result), "dual={dual}: {:?}", result.err());
+        }
+    }
+
+    /// A Dual420 pair whose main picture matches but whose aux is smaller.
+    #[test]
+    fn an_undersized_aux_picture_is_a_size_error() {
+        let main = keyframe(640, 480, true).main;
+        let aux = keyframe(320, 240, true).aux.expect("aux");
+        let mut decoder = Decoder::new(true, 640, 480).expect("decoder");
+        let result = decoder.decode(&main, &aux);
+        assert!(is_size_error(&result), "{:?}", result.err());
+    }
+
+    /// x264 High profile, 64x64: its first picture stays in OpenH264's
+    /// reorder buffer until a flush, unlike our Baseline streams.
+    const HIGH_PROFILE: &[u8] = include_bytes!("../../gliff-va/src/h264/testdata/x264-64x64.264");
+
+    /// The parameter sets and IDR picture of `HIGH_PROFILE`, up to the
+    /// start code of its P slice (NAL type 1).
+    fn high_profile_idr() -> &'static [u8] {
+        let p_slice = HIGH_PROFILE
+            .windows(4)
+            .position(|w| w[..3] == [0, 0, 1] && w[3] & 0x1f == 1)
+            .expect("a P slice");
+        let start = if p_slice > 0 && HIGH_PROFILE[p_slice - 1] == 0 {
+            p_slice - 1
+        } else {
+            p_slice
+        };
+        &HIGH_PROFILE[..start]
+    }
+
+    /// A picture that only comes out at flush is checked like any other: it
+    /// converts at the announced size and is a size error at another.
+    #[test]
+    fn a_picture_released_at_flush_is_size_checked() {
+        let idr = high_profile_idr();
+        for dual in [false, true] {
+            let aux = if dual { idr } else { &[][..] };
+            let mut decoder = Decoder::new(dual, 64, 64).expect("decoder");
+            assert!(decoder.decode(idr, aux).expect("decode").is_none());
+            assert!(decoder.has_pending());
+            let frame = decoder.flush().expect("flush").expect("a picture");
+            assert_eq!((frame.width, frame.height), (64, 64));
+
+            let mut decoder = Decoder::new(dual, 128, 128).expect("decoder");
+            assert!(decoder.decode(idr, aux).expect("decode").is_none());
+            let result = decoder.flush();
+            assert!(is_size_error(&result), "dual={dual}: {:?}", result.err());
+            // The refused picture is gone, so the idle drain stops.
+            assert!(!decoder.has_pending());
+        }
     }
 
     #[test]

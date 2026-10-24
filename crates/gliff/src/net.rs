@@ -7,7 +7,7 @@
 
 use std::rc::Rc;
 use std::sync::mpsc::{Sender as StdSender, SyncSender};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use anyhow::Context;
 use bytes::Bytes;
@@ -35,6 +35,16 @@ const MAX_STREAM: (u32, u32) = (3840, 2160);
 // Older protocol-v1 GPU servers ignore the advertised limits on their first
 // stream. Accept their bounded encoder maximum so they can reach the resize.
 const MAX_DECODE: (u32, u32) = (4096, 4096);
+// The largest frame the integer zoom may produce: an 8K display's worth,
+// about 127 MiB as BGRA. The UI derives the zoom from the server's view, so
+// the worker bounds it here. With a fixed GPU ring and a bounded frame
+// channel, a server can then cost at most what a real 8K session does.
+// A larger window loses only the exact integer enlargement.
+const MAX_ZOOMED_PIXELS: u64 = 7680 * 4320;
+// No side past this, whatever the pixel budget allows for a thin stream.
+const MAX_ZOOMED_SIDE: u32 = 8192;
+// Matches the cursor size the UI accepts (`remote_cursor`).
+const MAX_CURSOR: u32 = 1024;
 
 /// A decoded frame with the geometry it was configured under, so the UI
 /// never paints a frame with another configuration's view or scale (frames
@@ -70,14 +80,9 @@ pub enum Status {
         /// "server tier→client tier", e.g. "GPU→CPU".
         video: String,
     },
-    /// The remote cursor image, for the client to set as its widget cursor.
-    Cursor {
-        width: u32,
-        height: u32,
-        hot_x: i32,
-        hot_y: i32,
-        argb: Vec<u8>,
-    },
+    /// A new remote cursor image waits in this slot, for the client to set
+    /// as its widget cursor.
+    Cursor(LatestCursor),
     /// The remote selection changed: put a proxy for these on the local
     /// clipboard, or clear ours when both lists are empty. Pastes from the
     /// proxy echo `serial`, so one racing a newer offer is refused.
@@ -90,6 +95,8 @@ pub enum Status {
     /// `reply` chunk by chunk and drop the sender at the end.
     ClipboardRead {
         mime_type: String,
+        /// The UI's generation of the offer the request was made against.
+        generation: u64,
         reply: mpsc::Sender<std::io::Result<Bytes>>,
     },
     /// A paste from the server's offer that is taking a while, or ended.
@@ -107,6 +114,177 @@ pub enum Status {
 #[derive(Debug, thiserror::Error)]
 #[error("{0}")]
 struct Incompatible(String);
+
+/// A remote cursor image: `argb` holds `width` x `height` BGRA pixels.
+pub struct CursorShape {
+    pub width: u32,
+    pub height: u32,
+    pub hot_x: i32,
+    pub hot_y: i32,
+    pub argb: Vec<u8>,
+}
+
+/// The newest cursor shape the UI has not taken yet. Shapes replace each
+/// other here instead of queueing on the status channel, so a server that
+/// sends shapes faster than the UI polls holds at most one in memory.
+#[derive(Clone, Default)]
+pub struct LatestCursor(Arc<Mutex<Option<CursorShape>>>);
+
+impl LatestCursor {
+    /// Store `shape` over any untaken one. True when the slot was empty, so
+    /// the UI needs a fresh notice; otherwise one is already on its way.
+    fn put(&self, shape: CursorShape) -> bool {
+        let mut slot = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        slot.replace(shape).is_none()
+    }
+
+    pub fn take(&self) -> Option<CursorShape> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).take()
+    }
+}
+
+/// Hand `shape` to the UI through `slot`, sending a notice only when none
+/// is pending already.
+fn offer_cursor(slot: &LatestCursor, shape: CursorShape, status: &StdSender<Status>) {
+    if slot.put(shape) {
+        let _ = status.send(Status::Cursor(slot.clone()));
+    }
+}
+
+/// Read a CursorShape's payload when it is exactly the shape's pixels.
+/// Otherwise `read_msg` skips the payload and the shape comes back empty,
+/// which the UI treats as a shape it cannot show.
+async fn read_cursor<R: AsyncRead + Unpin>(
+    reader: &mut Framed<R>,
+    width: u32,
+    height: u32,
+    hot_x: i32,
+    hot_y: i32,
+    argb_len: u32,
+) -> Result<CursorShape, gliff_transport::Error> {
+    let argb = if cursor_payload_fits(width, height, argb_len) {
+        reader.read_payload(argb_len).await?.to_vec()
+    } else {
+        tracing::debug!(width, height, argb_len, "ignoring a malformed cursor shape");
+        Vec::new()
+    };
+    Ok(CursorShape {
+        width,
+        height,
+        hot_x,
+        hot_y,
+        argb,
+    })
+}
+
+/// The stream geometry a StreamConfig sets, only made by `Config::new`,
+/// which checks the server's values.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Config {
+    stream: (u32, u32),
+    chroma: ChromaMode,
+    scale_milli: u32,
+    view: (u32, u32),
+    fps_cap: u32,
+}
+
+impl Config {
+    fn new(
+        stream: (u32, u32),
+        chroma: ChromaMode,
+        scale_milli: u32,
+        view: (u32, u32),
+        fps_cap: u32,
+    ) -> anyhow::Result<Self> {
+        validate_stream_size(stream.0, stream.1)?;
+        validate_view_size(view, stream)?;
+        Ok(Self {
+            stream,
+            chroma,
+            scale_milli,
+            view,
+            fps_cap,
+        })
+    }
+
+    fn geometry(&self) -> Geometry {
+        (self.stream, self.view, self.scale_milli)
+    }
+
+    /// Take a later config. True when the coded stream changed and needs a
+    /// new decoder. Keep the requested zoom: each frame clamps it against
+    /// its actual size, without another UI request or CPU keyframe.
+    fn update(&mut self, next: Config, zoom: &mut Zoom) -> bool {
+        let rebuild = (next.stream, next.chroma) != (self.stream, self.chroma);
+        if rebuild {
+            zoom.asked_gpu = 1;
+        }
+        *self = next;
+        rebuild
+    }
+}
+
+/// The GPU decoder's zoom control, behind a trait so the rule that a
+/// refused zoom is asked for only once can be tested without a GPU.
+trait ZoomOutput {
+    fn set_zoom(&mut self, zoom: u32) -> gliff_vk::Result<u32>;
+}
+
+impl ZoomOutput for Decoder {
+    fn set_zoom(&mut self, zoom: u32) -> gliff_vk::Result<u32> {
+        Decoder::set_zoom(self, zoom)
+    }
+}
+
+/// The decoder output zoom: what the UI wants, bounded per frame size.
+struct Zoom {
+    /// Display pixels per stream pixel the UI asked for.
+    wanted: u32,
+    /// The zoom last asked of the current GPU decoder, granted or not, so
+    /// one it refused is not asked for again on every frame. A decoder made
+    /// by a StreamConfig starts at zoom 1.
+    asked_gpu: u32,
+}
+
+impl Zoom {
+    fn new() -> Self {
+        Self {
+            wanted: 1,
+            asked_gpu: 1,
+        }
+    }
+
+    /// Take the UI's request. False when it is the zoom already wanted.
+    fn want(&mut self, zoom: u32) -> bool {
+        let zoom = zoom.max(1);
+        zoom != std::mem::replace(&mut self.wanted, zoom)
+    }
+
+    /// Enlarge a CPU frame by the wanted zoom, within the budget.
+    fn cpu_frame(
+        &self,
+        f: gliff_sw::BgraFrame,
+        pool: &gliff_sw::PixelPool,
+    ) -> gliff_sw::PooledFrame {
+        let z = clamp_zoom(self.wanted, (f.width, f.height));
+        f.zoomed(z, pool)
+    }
+
+    /// Ask the GPU decoder for the wanted zoom of a `stream`-sized output,
+    /// within the budget. `None` when that zoom was asked for already.
+    fn sync_gpu(
+        &mut self,
+        d: &mut impl ZoomOutput,
+        stream: (u32, u32),
+    ) -> Option<gliff_vk::Result<u32>> {
+        let want = clamp_zoom(self.wanted, stream);
+        if want == self.asked_gpu {
+            return None;
+        }
+        self.asked_gpu = want;
+        Some(d.set_zoom(want))
+    }
+}
 
 /// How to reach the server.
 #[derive(Clone)]
@@ -235,7 +413,9 @@ fn new_decoder(
             }
         }
     }
-    Ok(VideoDecoder::Cpu(Box::new(gliff_sw::Decoder::new(dual)?)))
+    Ok(VideoDecoder::Cpu(Box::new(gliff_sw::Decoder::new(
+        dual, width, height,
+    )?)))
 }
 
 impl VideoDecoder {
@@ -306,7 +486,7 @@ where
     // estimate is seeded ahead of the first frame ack.
     let mut got_ack = false;
     let mut headless = false;
-    let (mut width, mut height, mut chroma, mut scale_milli, pipeline, mut view, mut fps_cap) = loop {
+    let (mut cfg, pipeline) = loop {
         match reader.read_msg::<ServerMsg>().await? {
             ServerMsg::HelloAck {
                 version,
@@ -335,15 +515,14 @@ where
                 fps_cap,
                 ..
             } if got_ack => {
-                break (
-                    width,
-                    height,
+                let cfg = Config::new(
+                    (width, height),
                     chroma,
                     scale_milli,
-                    pipeline,
                     (view_width, view_height),
                     fps_cap,
-                )
+                )?;
+                break (cfg, pipeline);
             }
             ServerMsg::Error { code, message, .. } if is_incompatible(code) => {
                 return Err(Incompatible(message).into())
@@ -354,19 +533,20 @@ where
             other => anyhow::bail!("unexpected message before StreamConfig: {other:?}"),
         }
     };
-    let mut decoder = new_decoder(&gpu, chroma, width, height)?;
+    let mut decoder = new_decoder(&gpu, cfg.chroma, cfg.stream.0, cfg.stream.1)?;
     let mut video_label = tier_label(pipeline, &decoder);
     let _ = status.send(Status::Connected {
         video: video_label.clone(),
-        view_width: view.0,
-        view_height: view.1,
-        fps_cap,
+        view_width: cfg.view.0,
+        view_height: cfg.view.1,
+        fps_cap: cfg.fps_cap,
         headless,
     });
     let decode_on = match (&decoder, &gpu) {
         (VideoDecoder::Gpu(_), Some(g)) => g.name.as_str(),
         _ => "cpu",
     };
+    let ((width, height), scale_milli) = (cfg.stream, cfg.scale_milli);
     tracing::info!(width, height, scale_milli, decode_on, video = %video_label, "connected");
     let mut logged_first = false;
 
@@ -428,7 +608,7 @@ where
                     cmd = input.recv() => match cmd {
                         Some(ToWorker::Send(m)) => m,
                         Some(ToWorker::Zoom(z)) => {
-                            let _ = zoom_tx.send(z.max(1));
+                            let _ = zoom_tx.send(z);
                             continue;
                         }
                         Some(other) => {
@@ -465,7 +645,8 @@ where
     // config can land in between: a picture must carry the geometry of the
     // config it was encoded under, not whatever is current when it emerges.
     let mut in_decoder: std::collections::VecDeque<Geometry> = std::collections::VecDeque::new();
-    let mut zoom = 1u32;
+    let mut zoom = Zoom::new();
+    let cursor = LatestCursor::default();
     let pool = gliff_sw::PixelPool::default();
     // Geometry of the picture the GPU decoder holds, for a redraw: a
     // geometry-only StreamConfig may have moved `view` on since.
@@ -475,23 +656,25 @@ where
             read = reader.read_msg::<ServerMsg>() => read,
             _ = &mut ui_gone => return Ok(()),
             Some(z) = zoom_rx.recv() => {
-                if z == zoom {
+                if !zoom.want(z) {
                     continue;
                 }
-                zoom = z;
                 // A still screen sends no frame, so redraw the last picture
                 // at the new zoom now. The CPU tier has no copy to redraw
                 // and asks for a keyframe instead.
                 let redrawn = match &mut decoder {
-                    VideoDecoder::Gpu(d) => match d.set_zoom(zoom).and_then(|_| d.redraw()) {
-                        Ok(frame) => {
-                            tracing::info!(zoom = d.zoom(), "decoder output zoom");
-                            frame.map(Frame::Dmabuf)
-                        }
-                        Err(e) => {
-                            tracing::warn!(error = %e, "could not change the output zoom");
-                            None
-                        }
+                    VideoDecoder::Gpu(d) => match zoom.sync_gpu(d.as_mut(), cfg.stream) {
+                        None => None,
+                        Some(set) => match set.and_then(|_| d.redraw()) {
+                            Ok(frame) => {
+                                tracing::info!(zoom = d.zoom(), "decoder output zoom");
+                                frame.map(Frame::Dmabuf)
+                            }
+                            Err(e) => {
+                                tracing::warn!(error = %e, "could not change the output zoom");
+                                None
+                            }
+                        },
                     },
                     VideoDecoder::Cpu(_) => {
                         let _ = out_tx.send((ClientMsg::RequestKeyframe, Bytes::new()));
@@ -500,7 +683,7 @@ where
                 };
                 if let Some(frame) = redrawn {
                     let (stream, view, scale_milli) =
-                        last_gpu_geometry.unwrap_or(((width, height), view, scale_milli));
+                        last_gpu_geometry.unwrap_or(cfg.geometry());
                     let picture = Picture {
                         frame,
                         stream,
@@ -534,16 +717,20 @@ where
                             Ok(frame) => frame.map(|f| {
                                 let (stream, view, scale_milli) = in_decoder
                                     .pop_front()
-                                    .unwrap_or(((width, height), view, scale_milli));
+                                    .unwrap_or(cfg.geometry());
                                 Picture {
-                                    frame: Frame::Bgra(f.zoomed(zoom, &pool)),
+                                    frame: Frame::Bgra(zoom.cpu_frame(f, &pool)),
                                     stream,
                                     view,
                                     scale_milli,
                                 }
                             }),
                             Err(e) => {
-                                tracing::warn!(error = %e, "idle drain failed");
+                                // As for a decode error: the picture is
+                                // gone, and so is its geometry entry.
+                                tracing::warn!(error = %e, "idle drain failed; requesting keyframe");
+                                in_decoder.clear();
+                                let _ = out_tx.send((ClientMsg::RequestKeyframe, Bytes::new()));
                                 None
                             }
                         },
@@ -581,15 +768,12 @@ where
                 };
                 bytes_since += (data_len + aux_len) as u64;
                 drain_at = tokio::time::Instant::now() + IDLE_DRAIN;
-                in_decoder.push_back(((width, height), view, scale_milli));
+                in_decoder.push_back(cfg.geometry());
                 let t0 = std::time::Instant::now();
                 let decoded = match &mut decoder {
                     VideoDecoder::Gpu(d) => {
-                        // A decoder made by a StreamConfig starts at zoom 1.
-                        if d.zoom() != zoom {
-                            if let Err(e) = d.set_zoom(zoom) {
-                                tracing::warn!(error = %e, "could not change the output zoom");
-                            }
+                        if let Some(Err(e)) = zoom.sync_gpu(d.as_mut(), cfg.stream) {
+                            tracing::warn!(error = %e, "could not change the output zoom");
                         }
                         d.decode(&main, &aux)
                             .map(|f| f.map(Frame::Dmabuf))
@@ -597,7 +781,7 @@ where
                     }
                     VideoDecoder::Cpu(d) => d
                         .decode(&main, &aux)
-                        .map(|f| f.map(|f| Frame::Bgra(f.zoomed(zoom, &pool))))
+                        .map(|f| f.map(|f| Frame::Bgra(zoom.cpu_frame(f, &pool))))
                         .map_err(anyhow::Error::from),
                 };
                 let dec_ms = t0.elapsed().as_secs_f32() * 1000.0;
@@ -623,9 +807,7 @@ where
                         // decoder returns the one just fed; the CPU decoder
                         // returns the previous one).
                         let (stream, pic_view, pic_scale) =
-                            in_decoder
-                                .pop_front()
-                                .unwrap_or(((width, height), view, scale_milli));
+                            in_decoder.pop_front().unwrap_or(cfg.geometry());
                         if matches!(frame, Frame::Dmabuf(_)) {
                             last_gpu_geometry = Some((stream, pic_view, pic_scale));
                         }
@@ -662,27 +844,31 @@ where
                 }
             }
             ServerMsg::StreamConfig {
-                width: w,
-                height: h,
-                chroma: c,
-                scale_milli: s,
+                width,
+                height,
+                chroma,
+                scale_milli,
                 pipeline,
                 view_width,
                 view_height,
-                fps_cap: f,
+                fps_cap,
                 ..
             } => {
-                validate_stream_size(w, h)?;
+                let next = Config::new(
+                    (width, height),
+                    chroma,
+                    scale_milli,
+                    (view_width, view_height),
+                    fps_cap,
+                )?;
                 // A pace-only change (fps cap) must not reset the decoder;
                 // a coded-stream change does, and drops the frame waiting
                 // for the UI with it.
-                if (w, h, c) != (width, height, chroma) {
-                    decoder = new_decoder(&gpu, c, w, h)?;
+                if cfg.update(next, &mut zoom) {
+                    decoder = new_decoder(&gpu, chroma, width, height)?;
                     undelivered = None;
                     in_decoder.clear();
                 }
-                (width, height, chroma, scale_milli) = (w, h, c, s);
-                (view, fps_cap) = ((view_width, view_height), f);
                 video_label = tier_label(pipeline, &decoder);
                 let _ = status.send(Status::Connected {
                     video: video_label.clone(),
@@ -700,14 +886,8 @@ where
                 argb_len,
                 ..
             } => {
-                let argb = reader.read_payload(argb_len).await?.to_vec();
-                let _ = status.send(Status::Cursor {
-                    width,
-                    height,
-                    hot_x,
-                    hot_y,
-                    argb,
-                });
+                let shape = read_cursor(&mut reader, width, height, hot_x, hot_y, argb_len).await?;
+                offer_cursor(&cursor, shape, &status);
             }
             ServerMsg::Ping { t } => {
                 let _ = out_tx.send((ClientMsg::Pong { t }, Bytes::new()));
@@ -773,6 +953,44 @@ fn validate_stream_size(width: u32, height: u32) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Servers send the full-quality size the stream is scaled down from as
+/// the view, so it is never smaller than the stream. Allowing half the
+/// stream is conservative slack that still refuses a tiny view, which
+/// would drive the UI's integer zoom to hundreds.
+fn validate_view_size(view: (u32, u32), stream: (u32, u32)) -> anyhow::Result<()> {
+    let (vw, vh) = view;
+    anyhow::ensure!(
+        vw > 0
+            && vh > 0
+            && vw <= MAX_DECODE.0
+            && vh <= MAX_DECODE.1
+            && u64::from(vw) * 2 >= u64::from(stream.0)
+            && u64::from(vh) * 2 >= u64::from(stream.1),
+        "invalid view {vw}x{vh} for a {}x{} stream",
+        stream.0,
+        stream.1
+    );
+    Ok(())
+}
+
+/// The largest zoom up to `zoom` that keeps a `size` frame within
+/// `MAX_ZOOMED_PIXELS` and `MAX_ZOOMED_SIDE`, and at least 1.
+fn clamp_zoom(zoom: u32, size: (u32, u32)) -> u32 {
+    let (w, h) = (u64::from(size.0.max(1)), u64::from(size.1.max(1)));
+    let side = u64::from(MAX_ZOOMED_SIDE);
+    let by_side = (side / w).min(side / h);
+    let by_pixels = (MAX_ZOOMED_PIXELS / (w * h)).isqrt();
+    u64::from(zoom).clamp(1, by_side.min(by_pixels).max(1)) as u32
+}
+
+/// Whether a cursor shape's payload is exactly its tightly packed BGRA
+/// pixels, within the size the UI accepts.
+fn cursor_payload_fits(width: u32, height: u32, argb_len: u32) -> bool {
+    (1..=MAX_CURSOR).contains(&width)
+        && (1..=MAX_CURSOR).contains(&height)
+        && u64::from(argb_len) == u64::from(width) * u64::from(height) * 4
+}
+
 #[cfg(test)]
 mod stream_tests {
     use super::*;
@@ -797,5 +1015,557 @@ mod stream_tests {
         assert!(validate_stream_size(4096, 1152).is_ok());
         assert!(validate_stream_size(4096, 2304).is_ok());
         assert!(validate_stream_size(4096, 4096).is_ok());
+    }
+
+    #[test]
+    fn reject_a_view_that_would_drive_an_unbounded_zoom() {
+        for (view, stream) in [
+            ((2, 2), (1920, 1080)),
+            ((0, 1080), (1920, 1080)),
+            ((1920, 0), (1920, 1080)),
+            ((4098, 2160), (3840, 2160)),
+            ((1920, 4098), (1920, 1080)),
+            ((958, 540), (1920, 1080)),
+            ((u32::MAX, u32::MAX), (2, 2)),
+        ] {
+            assert!(
+                validate_view_size(view, stream).is_err(),
+                "{view:?} {stream:?}"
+            );
+        }
+        // What servers send: the view equals the stream, or the stream is
+        // the ladder's half-size step of it, with rounding either way.
+        assert!(validate_view_size((1920, 1080), (1920, 1080)).is_ok());
+        assert!(validate_view_size((1920, 1080), (960, 540)).is_ok());
+        assert!(validate_view_size((1922, 1082), (960, 540)).is_ok());
+        assert!(validate_view_size((960, 540), (1920, 1080)).is_ok());
+        assert!(validate_view_size((2, 2), (2, 2)).is_ok());
+    }
+
+    #[test]
+    fn zoom_keeps_the_output_within_bounds() {
+        // 1920x1080 at zoom 4 is exactly 8K.
+        assert_eq!(clamp_zoom(540, (1920, 1080)), 4);
+        assert_eq!(clamp_zoom(2, (1920, 1080)), 2);
+        assert_eq!(clamp_zoom(3, (4096, 4096)), 1);
+        assert_eq!(clamp_zoom(0, (1920, 1080)), 1);
+        assert_eq!(clamp_zoom(u32::MAX, (2, 2)), 2880);
+        // A thin stream is held by the side bound.
+        assert_eq!(clamp_zoom(100, (4096, 2)), 2);
+        // A frame already past the bound is left at zoom 1.
+        assert_eq!(clamp_zoom(4, (u32::MAX, u32::MAX)), 1);
+    }
+
+    fn config(stream: (u32, u32), view: (u32, u32)) -> anyhow::Result<Config> {
+        Config::new(stream, ChromaMode::Dual420, 1000, view, 60)
+    }
+
+    #[test]
+    fn initial_and_later_configs_reject_a_bad_view() {
+        // Both StreamConfig paths can only get a Config through Config::new.
+        assert!(config((1920, 1080), (2, 2)).is_err());
+        assert!(config((1920, 1080), (0, 1080)).is_err());
+        assert!(config((1919, 1080), (1920, 1080)).is_err());
+        assert!(config((1920, 1080), (1920, 1080)).is_ok());
+    }
+
+    #[test]
+    fn a_new_stream_size_preserves_the_requested_zoom() {
+        let mut cfg = config((1920, 1080), (1920, 1080)).unwrap();
+        let mut zoom = Zoom::new();
+        assert!(zoom.want(4));
+        assert!(!zoom.want(4));
+        // Pace and scale changes keep the decoder and the zoom.
+        let mut next = cfg;
+        next.fps_cap = 15;
+        next.scale_milli = 1250;
+        assert!(!cfg.update(next, &mut zoom));
+        assert_eq!(zoom.wanted, 4);
+        // A chroma change rebuilds the decoder at zoom 1 but keeps the wish.
+        zoom.asked_gpu = 4;
+        next.chroma = ChromaMode::Single420;
+        assert!(cfg.update(next, &mut zoom));
+        assert_eq!((zoom.wanted, zoom.asked_gpu), (4, 1));
+        // A larger stream keeps the wish but applies its own safe clamp.
+        let big = config((4096, 4096), (4096, 4096)).unwrap();
+        assert!(cfg.update(big, &mut zoom));
+        assert_eq!((zoom.wanted, zoom.asked_gpu), (4, 1));
+        assert_eq!(clamp_zoom(zoom.wanted, big.stream), 1);
+        assert_eq!(cfg, big);
+    }
+
+    #[test]
+    fn cpu_frames_are_zoomed_within_the_budget() {
+        // The decoded and the idle-drained CPU frames both go through
+        // Zoom::cpu_frame.
+        let pool = gliff_sw::PixelPool::default();
+        let mut zoom = Zoom::new();
+        zoom.want(540);
+        let frame = |width: u32, height: u32| gliff_sw::BgraFrame {
+            width,
+            height,
+            pixels: vec![0; width as usize * height as usize * 4],
+        };
+        let small = zoom.cpu_frame(frame(64, 36), &pool);
+        assert_eq!((small.width, small.height), (64 * 120, 36 * 120));
+        // 4000x4000 at zoom 2 would be 256 MB; it stays unzoomed.
+        zoom.want(2);
+        let big = zoom.cpu_frame(frame(4000, 4000), &pool);
+        assert_eq!((big.width, big.height), (4000, 4000));
+    }
+
+    struct FakeOutput {
+        asked: Vec<u32>,
+        refuse: bool,
+    }
+
+    impl ZoomOutput for FakeOutput {
+        fn set_zoom(&mut self, zoom: u32) -> gliff_vk::Result<u32> {
+            self.asked.push(zoom);
+            if self.refuse {
+                Err(gliff_vk::Error::Unsupported("too large".into()))
+            } else {
+                Ok(zoom)
+            }
+        }
+    }
+
+    #[test]
+    fn a_refused_gpu_zoom_is_not_asked_for_again() {
+        let mut gpu = FakeOutput {
+            asked: Vec::new(),
+            refuse: true,
+        };
+        let mut zoom = Zoom::new();
+        assert!(zoom.sync_gpu(&mut gpu, (1920, 1080)).is_none());
+        zoom.want(2);
+        assert!(matches!(
+            zoom.sync_gpu(&mut gpu, (1920, 1080)),
+            Some(Err(_))
+        ));
+        // Every later frame at the same zoom leaves the decoder alone.
+        assert!(zoom.sync_gpu(&mut gpu, (1920, 1080)).is_none());
+        assert!(zoom.sync_gpu(&mut gpu, (1920, 1080)).is_none());
+        gpu.refuse = false;
+        zoom.want(540);
+        assert!(matches!(zoom.sync_gpu(&mut gpu, (1920, 1080)), Some(Ok(4))));
+        assert_eq!(gpu.asked, [2, 4]);
+    }
+
+    #[test]
+    fn cursor_payload_must_match_its_size() {
+        assert!(cursor_payload_fits(24, 24, 24 * 24 * 4));
+        assert!(cursor_payload_fits(1024, 1024, 1024 * 1024 * 4));
+        assert!(!cursor_payload_fits(24, 24, 24 * 24 * 4 + 1));
+        assert!(!cursor_payload_fits(24, 24, 64 << 20));
+        assert!(!cursor_payload_fits(0, 24, 0));
+        assert!(!cursor_payload_fits(1025, 1, 1025 * 4));
+        assert!(!cursor_payload_fits(u32::MAX, u32::MAX, 4));
+    }
+
+    fn shape(width: u32) -> CursorShape {
+        CursorShape {
+            width,
+            height: 1,
+            hot_x: 0,
+            hot_y: 0,
+            argb: vec![0; width as usize * 4],
+        }
+    }
+
+    #[test]
+    fn cursor_notices_coalesce_to_the_latest_shape() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let slot = LatestCursor::default();
+        for width in 1..=3 {
+            offer_cursor(&slot, shape(width), &tx);
+        }
+        let notices: Vec<Status> = rx.try_iter().collect();
+        assert_eq!(notices.len(), 1);
+        let Status::Cursor(latest) = &notices[0] else {
+            panic!("expected a cursor notice");
+        };
+        assert_eq!(latest.take().map(|s| s.width), Some(3));
+        assert!(latest.take().is_none());
+        // Once taken, the next shape sends a fresh notice.
+        offer_cursor(&slot, shape(4), &tx);
+        assert_eq!(rx.try_iter().count(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_malformed_cursor_is_skipped_and_the_next_message_read() {
+        let (a, b) = tokio::io::duplex(64 * 1024);
+        let mut wr = Framed::new(a);
+        let mut rd = Framed::new(b);
+        let cursor = |argb_len: u32| ServerMsg::CursorShape {
+            id: 1,
+            width: 24,
+            height: 24,
+            hot_x: 3,
+            hot_y: 3,
+            argb_len,
+        };
+        let bad = vec![1u8; 24 * 24 * 4 + 4];
+        let good = vec![2u8; 24 * 24 * 4];
+        wr.write_msg_with_payloads(&cursor(bad.len() as u32), &[&bad])
+            .await
+            .unwrap();
+        wr.write_msg(&ServerMsg::Ping { t: 7 }).await.unwrap();
+        wr.write_msg_with_payloads(&cursor(good.len() as u32), &[&good])
+            .await
+            .unwrap();
+
+        let ServerMsg::CursorShape { argb_len, .. } = rd.read_msg().await.unwrap() else {
+            panic!("expected a cursor shape");
+        };
+        let shape = read_cursor(&mut rd, 24, 24, 3, 3, argb_len).await.unwrap();
+        assert!(shape.argb.is_empty());
+        assert!(matches!(
+            rd.read_msg().await.unwrap(),
+            ServerMsg::Ping { t: 7 }
+        ));
+        let ServerMsg::CursorShape { argb_len, .. } = rd.read_msg().await.unwrap() else {
+            panic!("expected a cursor shape");
+        };
+        let shape = read_cursor(&mut rd, 24, 24, 3, 3, argb_len).await.unwrap();
+        assert_eq!(shape.argb, good);
+    }
+}
+
+#[cfg(test)]
+mod session_tests {
+    use super::*;
+    use gliff_proto::SessionInfo;
+    use std::future::Future;
+    use std::sync::mpsc::Receiver;
+    use std::time::Duration;
+    use tokio::io::{DuplexStream, ReadHalf, WriteHalf};
+    use tokio::sync::mpsc::UnboundedSender;
+
+    const WAIT: Duration = Duration::from_secs(5);
+
+    /// The server end of a real worker session on the CPU tier, and the
+    /// UI's channels to it.
+    struct FakeServer {
+        rd: Framed<ReadHalf<DuplexStream>>,
+        wr: Framed<WriteHalf<DuplexStream>>,
+        status: Receiver<Status>,
+        input: UnboundedSender<ToWorker>,
+        frames: Receiver<Picture>,
+        _keymap: tokio::sync::watch::Sender<String>,
+    }
+
+    impl FakeServer {
+        /// Answer the worker's Hello and send the first StreamConfig.
+        async fn handshake(&mut self, config: ServerMsg) {
+            let hello = self.rd.read_msg::<ClientMsg>().await.unwrap();
+            assert!(matches!(hello, ClientMsg::Hello { .. }), "{hello:?}");
+            let ack = ServerMsg::HelloAck {
+                version: PROTOCOL_VERSION,
+                session: SessionInfo {
+                    headless: false,
+                    output: "test".into(),
+                },
+                outputs: Vec::new(),
+                features: features(),
+            };
+            self.wr.write_msg(&ack).await.unwrap();
+            self.wr.write_msg(&config).await.unwrap();
+        }
+
+        /// The next client message `want` accepts, skipping others.
+        async fn expect(&mut self, want: impl Fn(&ClientMsg) -> bool) -> ClientMsg {
+            tokio::time::timeout(WAIT, async {
+                loop {
+                    let msg = self.rd.read_msg::<ClientMsg>().await.unwrap();
+                    if want(&msg) {
+                        return msg;
+                    }
+                }
+            })
+            .await
+            .expect("the expected client message")
+        }
+
+        /// Statuses so far, waiting until one `until` accepts.
+        async fn statuses_until(&self, until: impl Fn(&Status) -> bool) -> Vec<Status> {
+            let mut seen = Vec::new();
+            tokio::time::timeout(WAIT, async {
+                loop {
+                    while let Ok(s) = self.status.try_recv() {
+                        let done = until(&s);
+                        seen.push(s);
+                        if done {
+                            return;
+                        }
+                    }
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .expect("the expected status");
+            seen
+        }
+    }
+
+    /// Run the real `session` on the CPU tier against `server` and return
+    /// how the session ended. A session that ends on its own stops the
+    /// server early; otherwise dropping the server closes the UI's input,
+    /// which ends the session.
+    fn with_session<F, Fut>(server: F) -> anyhow::Result<()>
+    where
+        F: FnOnce(FakeServer) -> Fut,
+        Fut: Future<Output = ()>,
+    {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        tokio::task::LocalSet::new().block_on(&rt, async move {
+            let (client, end) = tokio::io::duplex(1 << 20);
+            let (crd, cwr) = tokio::io::split(client);
+            let (srd, swr) = tokio::io::split(end);
+            let (frames_tx, frames_rx) = std::sync::mpsc::sync_channel(2);
+            let (status_tx, status_rx) = std::sync::mpsc::channel();
+            let (input_tx, input_rx) = unbounded_channel();
+            let (keymap_tx, keymap_rx) = tokio::sync::watch::channel("keymap".to_string());
+            let mut worker = tokio::task::spawn_local(session(
+                crd,
+                cwr,
+                VideoMode::Cpu,
+                frames_tx,
+                status_tx,
+                input_rx,
+                keymap_rx,
+            ));
+            let server = server(FakeServer {
+                rd: Framed::new(srd),
+                wr: Framed::new(swr),
+                status: status_rx,
+                input: input_tx,
+                frames: frames_rx,
+                _keymap: keymap_tx,
+            });
+            let ended = tokio::time::timeout(WAIT, async {
+                tokio::select! {
+                    ended = &mut worker => Some(ended),
+                    _ = server => None,
+                }
+            })
+            .await
+            .expect("the session or the server finishes");
+            let ended = match ended {
+                Some(ended) => ended,
+                None => tokio::time::timeout(WAIT, worker)
+                    .await
+                    .expect("the session ends"),
+            };
+            ended.unwrap()
+        })
+    }
+
+    fn config(stream: (u32, u32), view: (u32, u32)) -> ServerMsg {
+        ServerMsg::StreamConfig {
+            codec: Codec::H264,
+            chroma: ChromaMode::Single420,
+            pipeline: Some(VideoPipeline::Cpu),
+            width: stream.0,
+            height: stream.1,
+            scale_milli: 1000,
+            extradata: Vec::new(),
+            aux_extradata: None,
+            view_width: view.0,
+            view_height: view.1,
+            fps_cap: 60,
+        }
+    }
+
+    fn connected(s: &Status) -> bool {
+        matches!(s, Status::Connected { .. })
+    }
+
+    #[test]
+    fn a_bad_first_view_ends_the_session() {
+        let ended = with_session(|mut server| async move {
+            server.handshake(config((1920, 1080), (2, 2))).await;
+            // Stay open until the session ends on its own.
+            std::future::pending::<()>().await;
+        });
+        let e = ended.expect_err("a 2x2 view is refused");
+        assert!(e.to_string().contains("invalid view 2x2"), "{e}");
+    }
+
+    #[test]
+    fn a_bad_later_view_ends_the_session() {
+        let ended = with_session(|mut server| async move {
+            server.handshake(config((1920, 1080), (1920, 1080))).await;
+            server.statuses_until(connected).await;
+            server
+                .wr
+                .write_msg(&config((1920, 1080), (2, 2)))
+                .await
+                .unwrap();
+            std::future::pending::<()>().await;
+        });
+        let e = ended.expect_err("a 2x2 view is refused");
+        assert!(e.to_string().contains("invalid view 2x2"), "{e}");
+    }
+
+    #[test]
+    fn a_decoded_cpu_frame_respects_the_zoom_budget() {
+        let (w, h) = (320, 240);
+        let mut encoder = gliff_sw::Encoder::new(
+            gliff_sw::EncoderSettings {
+                width: w,
+                height: h,
+                bitrate: 2_000_000,
+                framerate: 30,
+            },
+            false,
+        )
+        .unwrap();
+        let bgra: Vec<u8> = (0..w * h * 4).map(|i| (i % 251) as u8).collect();
+        let packet = encoder.encode_bgra(&bgra, true).unwrap();
+        with_session(|mut server| async move {
+            server.handshake(config((w, h), (w, h))).await;
+            server.statuses_until(connected).await;
+            // A window-sized zoom for a tiny view, far past the budget.
+            let _ = server.input.send(ToWorker::Zoom(1000));
+            server
+                .expect(|m| matches!(m, ClientMsg::RequestKeyframe))
+                .await;
+            let frame = ServerMsg::VideoFrame {
+                frame_id: 1,
+                pts_us: 0,
+                keyframe: true,
+                damage: Vec::new(),
+                data_len: packet.main.len() as u32,
+                aux_len: 0,
+            };
+            server
+                .wr
+                .write_msg_with_payloads(&frame, &[&packet.main])
+                .await
+                .unwrap();
+            server
+                .expect(|m| matches!(m, ClientMsg::FrameAck { frame_id: 1, .. }))
+                .await;
+            let picture = tokio::time::timeout(WAIT, async {
+                loop {
+                    if let Ok(p) = server.frames.try_recv() {
+                        return p;
+                    }
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .expect("a decoded picture");
+            let Frame::Bgra(f) = picture.frame else {
+                panic!("the CPU tier delivers BGRA");
+            };
+            // 320x240 fits 20 times within 7680x4320 worth of pixels.
+            assert_eq!((f.width, f.height), (w * 20, h * 20));
+            assert!(u64::from(f.width) * u64::from(f.height) <= MAX_ZOOMED_PIXELS);
+            assert_eq!(picture.stream, (w, h));
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn a_new_stream_size_does_not_request_an_extra_keyframe() {
+        with_session(|mut server| async move {
+            server.handshake(config((1920, 1080), (1920, 1080))).await;
+            server.statuses_until(connected).await;
+            // The CPU tier answers a zoom change with a keyframe request.
+            let _ = server.input.send(ToWorker::Zoom(2));
+            server
+                .expect(|m| matches!(m, ClientMsg::RequestKeyframe))
+                .await;
+            server
+                .wr
+                .write_msg(&config((960, 540), (960, 540)))
+                .await
+                .unwrap();
+            server.statuses_until(connected).await;
+            // The UI's unchanged zoom must not request a second keyframe.
+            let _ = server.input.send(ToWorker::Zoom(2));
+            assert!(tokio::time::timeout(
+                Duration::from_millis(200),
+                server.rd.read_msg::<ClientMsg>()
+            )
+            .await
+            .is_err());
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn cursor_shapes_are_checked_and_coalesced_in_the_session() {
+        let shape = |width: u32, argb_len: u32| ServerMsg::CursorShape {
+            id: width,
+            width,
+            height: 8,
+            hot_x: 0,
+            hot_y: 0,
+            argb_len,
+        };
+        with_session(|mut server| async move {
+            server.handshake(config((1920, 1080), (1920, 1080))).await;
+            server.statuses_until(connected).await;
+
+            // A payload longer than the shape is skipped, and the Ping after
+            // it is still answered.
+            let bad = vec![1u8; 8 * 8 * 4 + 4];
+            server
+                .wr
+                .write_msg_with_payloads(&shape(8, bad.len() as u32), &[&bad])
+                .await
+                .unwrap();
+            server
+                .wr
+                .write_msg(&ServerMsg::Ping { t: 1 })
+                .await
+                .unwrap();
+            server
+                .expect(|m| matches!(m, ClientMsg::Pong { t: 1 }))
+                .await;
+            let seen = server
+                .statuses_until(|s| matches!(s, Status::Cursor(_)))
+                .await;
+            let Some(Status::Cursor(latest)) = seen.last() else {
+                unreachable!()
+            };
+            assert!(latest.take().expect("a shape").argb.is_empty());
+
+            // Three shapes the UI has not taken yet make one notice.
+            for width in [8, 16, 24] {
+                let argb = vec![2u8; width as usize * 8 * 4];
+                server
+                    .wr
+                    .write_msg_with_payloads(&shape(width, argb.len() as u32), &[&argb])
+                    .await
+                    .unwrap();
+            }
+            server
+                .wr
+                .write_msg(&ServerMsg::Ping { t: 2 })
+                .await
+                .unwrap();
+            server
+                .expect(|m| matches!(m, ClientMsg::Pong { t: 2 }))
+                .await;
+            let notices: Vec<LatestCursor> = server
+                .status
+                .try_iter()
+                .filter_map(|s| match s {
+                    Status::Cursor(latest) => Some(latest),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(notices.len(), 1);
+            let latest = notices[0].take().expect("the latest shape");
+            assert_eq!((latest.width, latest.argb.len()), (24, 24 * 8 * 4));
+        })
+        .unwrap();
     }
 }
