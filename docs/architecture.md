@@ -265,14 +265,15 @@ Every crate with `unsafe` documents the safety requirements at each block.
   the tab it shows, so background sessions record nothing. The server
   answers with `AudioStart` and then one `AudioFrame` per 10 ms Opus packet
   (48 kHz stereo, restricted low-delay, 128 kbit/s). Packets share the TCP
-  stream with video: the Linux writer queues them ahead of a video frame
-  still waiting and keeps at most half a second of them, and the client
-  conceals a short gap in the sequence numbers.
+  stream with video: the Linux writer normally queues them ahead of a waiting
+  video frame, keeping audio order and at most half a second of packets. Pending
+  Pings/Pongs limit that priority so heartbeats still make progress; cursor and
+  clipboard updates do not. The client conceals short gaps in sequence numbers.
   The client plays through a buffer read by a cubic resampler (`gliff-audio`
   `Jitter`): the ratio converts 48 kHz to the device rate and leans by at
   most 0.5% toward the target fill, which absorbs clock drift without
   dropping samples. The target starts at 100 ms, grows by 20 ms on an
-  underrun and shrinks after 30 s of calm, between 40 and 250 ms; a burst
+  short packet gap and shrinks after 30 s of calm, between 40 and 250 ms; a burst
   more than 150 ms past it (after a stall) is cut back at once.
   With PipeWire, hosts record what applications play, except Gliff, so two
   machines that show each other do not echo. The server runs `pw-record`

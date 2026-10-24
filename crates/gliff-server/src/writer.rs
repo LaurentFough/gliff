@@ -56,7 +56,7 @@ impl Queue {
                     ServerMsg::CursorShape { .. } | ServerMsg::CursorPos { .. }
                 )
             }),
-            ServerMsg::CursorPos { .. } | ServerMsg::Pong { .. } => {
+            ServerMsg::CursorPos { .. } | ServerMsg::Pong { .. } | ServerMsg::Ping { .. } => {
                 self.packets.retain(|(queued, _)| {
                     std::mem::discriminant(queued) != std::mem::discriminant(&msg)
                 });
@@ -68,11 +68,11 @@ impl Queue {
             | ServerMsg::ClipboardData { .. }
             | ServerMsg::ClipboardAck { .. }
             | ServerMsg::ClipboardAbort { .. } => {}
-            // Sound goes ahead of a video frame still waiting, in its own
-            // order, so a frame queued behind a slow write does not delay
-            // it; past a bound the oldest packet goes (the client conceals
-            // a gap). A restart supersedes the old stream and what is left
-            // of it, so at most one start waits.
+            // Sound normally overtakes a waiting video frame, preserving
+            // audio order. Pending Pings/Pongs limit that priority so they
+            // cannot starve; cursor and clipboard updates are not barriers.
+            // Past a bound the oldest frame goes, and a restart replaces
+            // the old stream so at most one start waits.
             ServerMsg::AudioStart { .. } | ServerMsg::AudioFrame { .. } => {
                 let audio = |m: &ServerMsg| {
                     matches!(
@@ -92,13 +92,14 @@ impl Queue {
                         self.packets.remove(i);
                     }
                 }
-                // Preserve control progress (notably heartbeat Pings) and
-                // existing audio order before choosing a waiting video to
-                // overtake. Otherwise continuous audio can starve them.
+                // Preserve heartbeat progress and existing audio order
+                // before choosing a waiting video to overtake.
                 let after_control = self
                     .packets
                     .iter()
-                    .rposition(|(m, _)| !audio(m) && !matches!(m, ServerMsg::VideoFrame { .. }))
+                    .rposition(|(m, _)| {
+                        matches!(m, ServerMsg::Ping { .. } | ServerMsg::Pong { .. })
+                    })
                     .map_or(0, |index| index + 1);
                 let after_audio = self
                     .packets
@@ -342,6 +343,57 @@ mod tests {
             })
             .collect();
         assert!(frames.windows(2).all(|pair| pair[0] < pair[1]));
+    }
+
+    #[test]
+    fn cursor_updates_do_not_defeat_audio_priority_but_pings_get_progress() {
+        let mut queue = Queue::default();
+        let (msg, payloads) = video(1);
+        queue.push(msg, payloads);
+        queue.push(
+            ServerMsg::CursorPos {
+                x: 1.0,
+                y: 2.0,
+                shape_id: 0,
+                visible: true,
+            },
+            Vec::new(),
+        );
+        queue.push(
+            ServerMsg::AudioStart {
+                codec: gliff_proto::AudioCodec::Opus,
+                sample_rate: 48000,
+                channels: 2,
+            },
+            Vec::new(),
+        );
+        queue.push(
+            ServerMsg::AudioFrame {
+                seq: 0,
+                data_len: 1,
+            },
+            vec![vec![0]],
+        );
+        assert!(matches!(queue.packets[0].0, ServerMsg::AudioStart { .. }));
+        assert!(matches!(
+            queue.packets[1].0,
+            ServerMsg::AudioFrame { seq: 0, .. }
+        ));
+        queue.push(ServerMsg::Ping { t: 10 }, Vec::new());
+        for seq in 1..100 {
+            queue.push(ServerMsg::AudioFrame { seq, data_len: 1 }, vec![vec![0]]);
+        }
+        let ping = queue
+            .packets
+            .iter()
+            .position(|(msg, _)| matches!(msg, ServerMsg::Ping { .. }))
+            .unwrap();
+        let newest = queue
+            .packets
+            .iter()
+            .position(|(msg, _)| matches!(msg, ServerMsg::AudioFrame { seq: 99, .. }))
+            .unwrap();
+        assert!(ping < newest);
     }
 
     #[test]
