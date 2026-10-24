@@ -1471,6 +1471,69 @@ impl VideoEncoder {
     }
 }
 
+/// Blocking compositor IPC stays off the single-threaded streaming runtime.
+/// One worker per headless output also prevents overlapping slow polls.
+struct KeepAwake {
+    stop: std::sync::mpsc::Sender<()>,
+    cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    task: Option<std::thread::JoinHandle<()>>,
+}
+
+impl KeepAwake {
+    fn start(instance: hypr_ipc::Instance, name: String) -> std::io::Result<Self> {
+        Self::poll(Duration::from_secs(2), move |cancelled| {
+            match instance.monitors() {
+                Ok(mons) if mons.iter().any(|m| m.name == name && !m.dpms_status) => {
+                    if let Err(e) = instance.set_dpms_if(&name, true, || {
+                        !cancelled.load(std::sync::atomic::Ordering::Acquire)
+                    }) {
+                        tracing::warn!(error = %e, "could not switch the headless output on");
+                    }
+                }
+                Ok(_) => {}
+                Err(e) => tracing::debug!(error = %e, "cannot read the output's DPMS state"),
+            }
+        })
+    }
+
+    fn poll(
+        every: Duration,
+        mut check: impl FnMut(&std::sync::atomic::AtomicBool) + Send + 'static,
+    ) -> std::io::Result<Self> {
+        use std::sync::mpsc::{channel, RecvTimeoutError};
+        let (stop, rx) = channel();
+        let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let task_cancelled = cancelled.clone();
+        let task = std::thread::Builder::new()
+            .name("gliff-output-awake".into())
+            .spawn(move || loop {
+                if task_cancelled.load(std::sync::atomic::Ordering::Acquire) {
+                    break;
+                }
+                check(&task_cancelled);
+                if !matches!(rx.recv_timeout(every), Err(RecvTimeoutError::Timeout)) {
+                    break;
+                }
+            })?;
+        Ok(Self {
+            stop,
+            cancelled,
+            task: Some(task),
+        })
+    }
+}
+
+impl Drop for KeepAwake {
+    fn drop(&mut self) {
+        self.cancelled
+            .store(true, std::sync::atomic::Ordering::Release);
+        let _ = self.stop.send(());
+        if let Some(task) = self.task.take() {
+            let _ = task.join();
+        }
+    }
+}
+
 // Runs before the fields drop, so held keys are released before the
 // capture thread ends, as the threads and output in `ServedOutput` go after.
 impl Drop for Session {
@@ -1521,6 +1584,7 @@ struct SessionOutput {
     /// Output scale; the logical size the pointer works in is size / scale.
     scale: f32,
     headless: Option<hypr_ipc::Instance>,
+    awake: Option<KeepAwake>,
 }
 
 impl SessionOutput {
@@ -1540,6 +1604,9 @@ impl SessionOutput {
 
 impl Drop for SessionOutput {
     fn drop(&mut self) {
+        // Join the poller before removing its output, so every in-flight
+        // DPMS request finishes while we still own the monitor.
+        drop(self.awake.take());
         if let Some(instance) = &self.headless {
             let _ = instance.remove_output(&self.name);
         }
@@ -1618,6 +1685,7 @@ fn setup_output(
             } & !1,
             scale: m.scale,
             headless: None,
+            awake: None,
         });
     }
     let requested = format!("gliff-{}", std::process::id());
@@ -1637,6 +1705,7 @@ fn setup_output(
         height: 0,
         scale: 1.0,
         headless: Some(instance.clone()),
+        awake: None,
     };
     wait_for_output(&output.name, wait, || {
         instance
@@ -1673,6 +1742,8 @@ fn setup_output(
     output.width = w & !1;
     output.height = h & !1;
     output.scale = scale;
+    // An output added while the remote sleeps comes up switched off.
+    output.awake = Some(KeepAwake::start(instance.clone(), output.name.clone())?);
     Ok(output)
 }
 
@@ -1834,6 +1905,25 @@ fn stream_limit(encoder: (u32, u32), caps: &ClientCaps) -> Result<(u32, u32)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn slow_dpms_ipc_does_not_block_the_streaming_runtime() {
+        let (started, ready) = std::sync::mpsc::channel();
+        let (release, blocked) = std::sync::mpsc::channel();
+        let poll = KeepAwake::poll(Duration::from_secs(60), move |_| {
+            started.send(()).unwrap();
+            blocked.recv().unwrap();
+        })
+        .unwrap();
+        ready.recv_timeout(Duration::from_secs(2)).unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async { tokio::time::sleep(Duration::from_millis(10)).await });
+        release.send(()).unwrap();
+        drop(poll);
+    }
+
     #[test]
     fn only_the_requested_output_is_adopted() {
         let result = wait_for_output("gliff-42", Duration::ZERO, || {

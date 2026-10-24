@@ -153,6 +153,41 @@ impl Instance {
         self.request_json("monitors all")
     }
 
+    /// Run a dispatcher. A legacy (hyprlang) config takes `dispatch <name>
+    /// <args>`; a Lua config reads `dispatch` as `hl.dispatch(...)`, rejects
+    /// that form, and takes the `hl.dsp` call in `lua` instead.
+    fn dispatcher(&self, legacy: &str, lua: &str, allowed: impl Fn() -> bool) -> Result<()> {
+        if !allowed() {
+            return Ok(());
+        }
+        match self.dispatch(&format!("dispatch {legacy}")) {
+            Err(Error::Command { response, .. }) if response.contains("lua") => {
+                if allowed() {
+                    self.dispatch(&format!("dispatch {lua}"))
+                } else {
+                    Ok(())
+                }
+            }
+            other => other,
+        }
+    }
+
+    /// Switch one monitor's DPMS on or off, leaving the others alone.
+    pub fn set_dpms(&self, monitor: &str, on: bool) -> Result<()> {
+        self.set_dpms_if(monitor, on, || true)
+    }
+
+    /// Like `set_dpms`, but check cancellation before starting either IPC
+    /// request. Teardown need only wait for an already-running request.
+    pub fn set_dpms_if(&self, monitor: &str, on: bool, allowed: impl Fn() -> bool) -> Result<()> {
+        let action = if on { "on" } else { "off" };
+        self.dispatcher(
+            &format!("dpms {action} {monitor}"),
+            &format!("hl.dsp.dpms({{ action = \"{action}\", monitor = \"{monitor}\" }})"),
+            allowed,
+        )
+    }
+
     pub fn get_option(&self, name: &str) -> Result<OptionValue> {
         self.request_json(&format!("getoption {name}"))
     }
@@ -231,6 +266,13 @@ pub struct Monitor {
     pub focused: bool,
     #[serde(default)]
     pub disabled: bool,
+    /// False while DPMS has the monitor off; Hyprland does not render it.
+    #[serde(default = "yes")]
+    pub dpms_status: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 fn one() -> f32 {
@@ -288,6 +330,95 @@ mod tests {
         let explicit = Instance::discover_in(tmp.path(), Some("old_1_1")).unwrap();
         assert_eq!(explicit.signature, "old_1_1");
         assert!(Instance::discover_in(tmp.path(), Some("missing")).is_err());
+    }
+
+    /// Run `call` against a socket that answers each connection with the next
+    /// of `responses`, and return what it got back and the commands sent.
+    fn against_socket(
+        responses: &'static [&'static str],
+        call: impl FnOnce(&Instance) -> Result<()>,
+    ) -> (Result<()>, Vec<String>) {
+        let tmp = tempfile::tempdir().unwrap();
+        let inst = Instance {
+            signature: "test".into(),
+            dir: tmp.path().to_path_buf(),
+        };
+        let listener = std::os::unix::net::UnixListener::bind(inst.socket_path()).unwrap();
+        let mut responses = responses.iter().copied();
+        let server = std::thread::spawn(move || {
+            let mut commands = Vec::new();
+            loop {
+                let (mut conn, _) = listener.accept().unwrap();
+                let mut buf = [0; 512];
+                let n = conn.read(&mut buf).unwrap();
+                // An empty connection is the test hanging up.
+                if n == 0 {
+                    return commands;
+                }
+                commands.push(String::from_utf8_lossy(&buf[..n]).into_owned());
+                conn.write_all(responses.next().unwrap_or("unexpected").as_bytes())
+                    .unwrap();
+            }
+        });
+        let result = call(&inst);
+        drop(UnixStream::connect(inst.socket_path()).unwrap());
+        (result, server.join().unwrap())
+    }
+
+    #[test]
+    fn set_dpms_falls_back_to_lua_only_when_asked() {
+        let (result, commands) = against_socket(&["ok"], |i| i.set_dpms("gliff-7", false));
+        assert!(result.is_ok());
+        assert_eq!(commands, ["dispatch dpms off gliff-7"]);
+
+        // What a Lua config answers the legacy form with.
+        const LUA: &str = "error: [string \"return hl.dispatch(dpms on gliff-7)...\"]:1: ')' expected near 'on'\n\n \u{2192} Note: dispatch in lua is a shorthand for hl.dispatch(...), your syntax might need to be updated.";
+        let (result, commands) = against_socket(&[LUA, "ok"], |i| i.set_dpms("gliff-7", true));
+        assert!(result.is_ok());
+        assert_eq!(
+            commands,
+            [
+                "dispatch dpms on gliff-7",
+                r#"dispatch hl.dsp.dpms({ action = "on", monitor = "gliff-7" })"#,
+            ]
+        );
+
+        let (result, commands) =
+            against_socket(&["monitor not found"], |i| i.set_dpms("gliff-7", true));
+        assert!(
+            matches!(result, Err(Error::Command { response, .. }) if response == "monitor not found")
+        );
+        assert_eq!(commands, ["dispatch dpms on gliff-7"]);
+    }
+
+    #[test]
+    fn cancelled_keep_awake_does_not_start_or_retry_ipc() {
+        let (result, commands) = against_socket(&[], |i| i.set_dpms_if("gliff-7", true, || false));
+        assert!(result.is_ok());
+        assert!(commands.is_empty());
+
+        let calls = std::cell::Cell::new(0);
+        let (result, commands) = against_socket(&["lua syntax error"], |i| {
+            i.set_dpms_if("gliff-7", true, || {
+                calls.set(calls.get() + 1);
+                calls.get() == 1
+            })
+        });
+        assert!(result.is_ok());
+        assert_eq!(commands, ["dispatch dpms on gliff-7"]);
+    }
+
+    #[test]
+    fn parses_dpms_status() {
+        let m: Monitor =
+            serde_json::from_str(r#"{"id": 0, "name": "DP-2", "width": 3440, "height": 1440}"#)
+                .unwrap();
+        assert!(m.dpms_status, "a monitor without the field counts as on");
+        let m: Monitor = serde_json::from_str(
+            r#"{"id": 1, "name": "gliff-1", "width": 1280, "height": 712, "dpmsStatus": false}"#,
+        )
+        .unwrap();
+        assert!(!m.dpms_status);
     }
 
     #[test]
