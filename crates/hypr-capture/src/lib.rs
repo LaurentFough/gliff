@@ -118,6 +118,17 @@ pub struct CaptureConfig {
     pub shm_fallback: bool,
     /// Also run a cursor session and report shape/position.
     pub cursor: bool,
+    /// Refuse to allocate a ring for an output past this size; the capture
+    /// then ends with an error.
+    pub max_size: Option<SizeLimit>,
+}
+
+/// The largest output a capture ring is allocated for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SizeLimit {
+    /// Neither side may be longer.
+    pub side: u32,
+    pub pixels: u64,
 }
 
 pub const DEFAULT_RENDER_NODE: &str = "/dev/dri/renderD128";
@@ -147,6 +158,7 @@ impl CaptureConfig {
             prefer_linear: true,
             shm_fallback: true,
             cursor: true,
+            max_size: None,
         }
     }
 }
