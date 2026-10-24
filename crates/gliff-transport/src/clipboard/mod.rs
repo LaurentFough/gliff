@@ -315,6 +315,15 @@ impl Transfers {
         }
     }
 
+    /// Abort every transfer we are serving and tell the peer, for when the
+    /// offer they came from is withdrawn.
+    pub fn abort_serving(&self) {
+        let ids: Vec<u32> = self.inner.borrow().outgoing.keys().copied().collect();
+        for id in ids {
+            self.abort_outgoing(id);
+        }
+    }
+
     /// Ask the peer for `item` and write it into `sink`. Resolves with the
     /// byte count once the final chunk is in the sink and the sink finished.
     /// `cap` bounds the size; anything over it aborts the transfer.
@@ -397,7 +406,7 @@ impl Transfers {
             }
         })
         .abort_handle();
-        self.inner.borrow_mut().outgoing.insert(
+        let displaced = self.inner.borrow_mut().outgoing.insert(
             id,
             Outgoing {
                 window,
@@ -405,6 +414,12 @@ impl Transfers {
                 task,
             },
         );
+        // A peer that repeats a request id would otherwise leave the first
+        // serve running with no handle left to abort it.
+        if let Some(o) = displaced {
+            tracing::warn!(id, "clipboard request id reused while serving");
+            o.task.abort();
+        }
     }
 
     /// Decline the peer's request `id`.
@@ -962,6 +977,26 @@ mod tests {
             tokio::time::sleep(files::SPOOL_GRACE).await;
             tokio::task::yield_now().await;
             assert!(!dir.exists());
+        });
+    }
+
+    #[test]
+    fn abort_serving_stops_a_serve_displaced_by_a_reused_id() {
+        run(async {
+            let (out, _rx) = outbound_channel();
+            let t = Transfers::new(out, Side::Client);
+            // Sources that never end, so both serves stay pending.
+            let (first_tx, first_rx) = mpsc::channel::<io::Result<Bytes>>(2);
+            let (second_tx, second_rx) = mpsc::channel::<io::Result<Bytes>>(2);
+            t.serve(2, first_rx);
+            t.serve(2, second_rx);
+            tokio::task::yield_now().await;
+            t.abort_serving();
+            for (which, tx) in [("first", first_tx), ("second", second_tx)] {
+                tokio::time::timeout(Duration::from_secs(1), tx.closed())
+                    .await
+                    .unwrap_or_else(|_| panic!("{which} serve kept reading its source"));
+            }
         });
     }
 

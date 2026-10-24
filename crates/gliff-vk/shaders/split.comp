@@ -6,7 +6,9 @@
 // The source is sampled at normalized coordinates with a linear sampler:
 // when the output is the source's size this is an exact texel fetch, and
 // when the output is smaller (a mirrored screen larger than the client's
-// window) it is a box-filtered downscale.
+// window) it is a box-filtered downscale. An odd-sized source is cropped
+// to even dimensions first, as the CPU path crops it, so its last column
+// or row is dropped rather than resampled into the whole picture.
 #include "common.glsl"
 layout(local_size_x = 16, local_size_y = 16) in;
 layout(set = 0, binding = 0) uniform sampler2D src;
@@ -24,6 +26,8 @@ vec3 px(int x, int y) {
         case 2: uv = 1.0 - uv; break;
         case 3: uv = vec2(1.0 - uv.y, uv.x); break;
     }
+    ivec2 size = textureSize(src, 0);
+    uv *= vec2(size & ~1) / vec2(size);
     return texture(src, uv).rgb * 255.0;
 }
 
