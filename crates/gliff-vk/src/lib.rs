@@ -16,6 +16,9 @@ pub enum Error {
     NoDevice(&'static str),
     #[error("unsupported: {0}")]
     Unsupported(String),
+    /// A decoded picture's size differs from the announced stream size.
+    #[error("stream size: {0}")]
+    StreamSize(String),
     #[error("va-api: {0}")]
     Va(#[from] gliff_va::Error),
     #[error("io: {0}")]

@@ -494,7 +494,7 @@ fn packed_header(
 
 /// The SPS and PPS this encoder emits: High profile, CABAC, one reference,
 /// POC type 0, cropped to the display size.
-fn parameter_sets(s: &EncoderSettings) -> (Sps, Pps) {
+pub(crate) fn parameter_sets(s: &EncoderSettings) -> (Sps, Pps) {
     let (cw, ch) = (s.coded_width(), s.coded_height());
     let crop =
         (cw != s.width || ch != s.height).then(|| [0, (cw - s.width) / 2, 0, (ch - s.height) / 2]);

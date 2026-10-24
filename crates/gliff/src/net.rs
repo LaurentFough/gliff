@@ -235,7 +235,9 @@ fn new_decoder(
             }
         }
     }
-    Ok(VideoDecoder::Cpu(Box::new(gliff_sw::Decoder::new(dual)?)))
+    Ok(VideoDecoder::Cpu(Box::new(gliff_sw::Decoder::new(
+        dual, width, height,
+    )?)))
 }
 
 impl VideoDecoder {
@@ -543,7 +545,11 @@ where
                                 }
                             }),
                             Err(e) => {
-                                tracing::warn!(error = %e, "idle drain failed");
+                                // As for a decode error: the picture is
+                                // gone, and so is its geometry entry.
+                                tracing::warn!(error = %e, "idle drain failed; requesting keyframe");
+                                in_decoder.clear();
+                                let _ = out_tx.send((ClientMsg::RequestKeyframe, Bytes::new()));
                                 None
                             }
                         },
