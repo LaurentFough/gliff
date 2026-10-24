@@ -145,6 +145,8 @@ struct Session {
     generation: Cell<u64>,
     /// Consecutive failed connection attempts, reset on a successful connect.
     retries: Cell<u32>,
+    /// Retained across slow reconnect attempts until a connection succeeds.
+    last_error: RefCell<Option<String>>,
     /// Automatic reconnects have given up; selecting the tab tries again.
     gave_up: Cell<bool>,
     /// Recorded in the config on the first successful connect.
@@ -193,6 +195,7 @@ impl Session {
             input_tx: RefCell::new(None),
             generation: Cell::new(0),
             retries: Cell::new(0),
+            last_error: RefCell::new(None),
             gave_up: Cell::new(false),
             remembered: Cell::new(false),
             connected: Cell::new(false),
@@ -1119,7 +1122,11 @@ fn start_session(ui: Rc<App>, s: Rc<Session>) {
     s.reset_resize();
     let generation = s.generation.get() + 1;
     s.generation.set(generation);
-    set_status(&ui, &s, "Connecting…");
+    set_status(
+        &ui,
+        &s,
+        &connecting_status(s.last_error.borrow().as_deref()),
+    );
 
     let endpoint = s.endpoint.clone();
     let video = gliff_sw::VideoMode::resolve(ui.cli.video.as_deref());
@@ -1160,20 +1167,50 @@ fn remember_machine(ui: &Rc<App>, s: &Session) {
 }
 
 /// Schedule a reconnect after a short delay, unless we have exhausted retries.
-fn schedule_reconnect(ui: Rc<App>, s: Rc<Session>, generation: u64) {
+/// The status keeps the error that ended the connection, if any, so it stays
+/// on screen while the reconnects run.
+fn schedule_reconnect(ui: Rc<App>, s: Rc<Session>, generation: u64, error: Option<&str>) {
     let n = s.retries.get() + 1;
     s.retries.set(n);
+    if let Some(error) = error {
+        *s.last_error.borrow_mut() = Some(error.to_owned());
+    }
+    set_status(
+        &ui,
+        &s,
+        &reconnect_status(s.last_error.borrow().as_deref(), n),
+    );
     if n > MAX_RETRIES {
-        set_status(&ui, &s, "Disconnected — click the tab to reconnect");
         s.gave_up.set(true);
         return;
     }
-    set_status(&ui, &s, &format!("Reconnecting… (attempt {n})"));
     glib::timeout_add_local_once(Duration::from_millis(1500), move || {
         if s.generation.get() == generation {
             start_session(ui, s);
         }
     });
+}
+
+/// Keep the latest failure visible while a new connection attempt runs.
+fn connecting_status(error: Option<&str>) -> String {
+    match error {
+        Some(e) => format!("Error: {e}\nConnecting…"),
+        None => "Connecting…".into(),
+    }
+}
+
+/// The status for reconnect `attempt`, under the error that ended the
+/// connection, if any.
+fn reconnect_status(error: Option<&str>, attempt: u32) -> String {
+    let next = if attempt > MAX_RETRIES {
+        "Disconnected — click the tab to reconnect".to_string()
+    } else {
+        format!("Reconnecting… (attempt {attempt})")
+    };
+    match error {
+        Some(e) => format!("Error: {e}\n{next}"),
+        None => next,
+    }
 }
 
 /// Pull decoded frames on the GTK main loop, latest-wins. The shown session
@@ -1283,6 +1320,7 @@ fn poll_status(ui: Rc<App>, s: Rc<Session>, rx: Receiver<Status>, generation: u6
                     s.fps_cap.set(fps_cap);
                     s.headless.set(headless);
                     s.resize_requested.set((0, 0));
+                    s.last_error.borrow_mut().take();
                     s.retries.set(0);
                     s.gave_up.set(false);
                     if !s.connected.replace(true) {
@@ -1380,12 +1418,12 @@ fn poll_status(ui: Rc<App>, s: Rc<Session>, rx: Receiver<Status>, generation: u6
                 }
                 Status::Error(e) => {
                     tracing::error!(machine = %s.name, error = %e, "connection failed");
-                    set_status(&ui, &s, &format!("Error: {e}"));
                     show_disconnected(&ui, &s);
-                    schedule_reconnect(ui.clone(), s.clone(), generation);
+                    schedule_reconnect(ui.clone(), s.clone(), generation, Some(&e));
                     return glib::ControlFlow::Break;
                 }
                 Status::Incompatible(message) => {
+                    *s.last_error.borrow_mut() = Some(message.clone());
                     tracing::error!(machine = %s.name, error = %message, "incompatible server");
                     set_status(&ui, &s, &message);
                     show_disconnected(&ui, &s);
@@ -1394,7 +1432,7 @@ fn poll_status(ui: Rc<App>, s: Rc<Session>, rx: Receiver<Status>, generation: u6
                 }
                 Status::Closed => {
                     show_disconnected(&ui, &s);
-                    schedule_reconnect(ui.clone(), s.clone(), generation);
+                    schedule_reconnect(ui.clone(), s.clone(), generation, None);
                     return glib::ControlFlow::Break;
                 }
             }
@@ -2437,6 +2475,25 @@ mod tests {
         s.reset_resize();
         assert_ne!(s.resize_scale.get(), 1.25);
         assert_eq!(s.resize_requested.get(), (0, 0));
+    }
+
+    #[test]
+    fn reconnect_status_keeps_the_error() {
+        let e = "Connection refused (os error 111)";
+        assert_eq!(
+            connecting_status(Some(e)),
+            "Error: Connection refused (os error 111)\nConnecting…"
+        );
+        assert_eq!(connecting_status(None), "Connecting…");
+        assert_eq!(
+            reconnect_status(Some(e), 1),
+            "Error: Connection refused (os error 111)\nReconnecting… (attempt 1)"
+        );
+        assert_eq!(
+            reconnect_status(Some(e), MAX_RETRIES + 1),
+            "Error: Connection refused (os error 111)\nDisconnected — click the tab to reconnect"
+        );
+        assert_eq!(reconnect_status(None, 2), "Reconnecting… (attempt 2)");
     }
 
     #[test]
