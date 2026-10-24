@@ -1615,13 +1615,17 @@ impl ReleaseHotkey {
         &self,
         keyval: gdk::Key,
         state: gdk::ModifierType,
+        unshifted: Option<gdk::Key>,
         last_tap: &RefCell<Option<Instant>>,
     ) -> bool {
         match self {
             Self::None => false,
-            Self::Chord { mods, keyval: k } => keyval == *k && (state & CHORD_MODS) == *mods,
+            Self::Chord { mods, keyval: k } => {
+                (same_key(keyval, *k) || unshifted.is_some_and(|base| same_key(base, *k)))
+                    && (state & CHORD_MODS) == *mods
+            }
             Self::DoubleTap { keyval: k, within } => {
-                if keyval != *k {
+                if !same_key(keyval, *k) && !unshifted.is_some_and(|base| same_key(base, *k)) {
                     return false;
                 }
                 let now = Instant::now();
@@ -1674,6 +1678,21 @@ impl ReleaseHotkey {
             }
         }
     }
+}
+
+/// True if a pressed keyval is the hotkey's key. GTK reports the keyval with
+/// Shift and Caps Lock applied, so Ctrl+Shift+q arrives as `Q` and Shift+Tab
+/// as `ISO_Left_Tab`; normalize those direct keyvals. The event handler also
+/// translates the hardware key without Shift/Lock for punctuation keys.
+fn same_key(pressed: gdk::Key, key: gdk::Key) -> bool {
+    let unshifted = |k: gdk::Key| {
+        if k == gdk::Key::ISO_Left_Tab {
+            gdk::Key::Tab
+        } else {
+            k.to_lower()
+        }
+    };
+    unshifted(pressed) == unshifted(key)
 }
 
 /// Resolve a key name to a `gdk::Key`, accepting lower-case and a few aliases.
@@ -1775,8 +1794,21 @@ fn install_input_handlers(
         let window = window.clone();
         let hotkey = hotkey.clone();
         let last_tap = last_tap.clone();
-        key.connect_key_pressed(move |_, keyval, keycode, state| {
-            if hotkey.matches(keyval, state, &last_tap) {
+        key.connect_key_pressed(move |controller, keyval, keycode, state| {
+            let group = controller
+                .current_event()
+                .and_then(|event| {
+                    event
+                        .downcast_ref::<gdk::KeyEvent>()
+                        .map(|key| key.layout())
+                })
+                .unwrap_or(0) as i32;
+            let base_state =
+                state & !(gdk::ModifierType::SHIFT_MASK | gdk::ModifierType::LOCK_MASK);
+            let unshifted = gtk::prelude::WidgetExt::display(&window)
+                .translate_key(keycode, base_state, group)
+                .map(|(base, _, _, _)| base);
+            if hotkey.matches(keyval, state, unshifted, &last_tap) {
                 release_pressed_keys(&ui);
                 release_capture(&ui, &window);
                 return glib::Propagation::Stop;
@@ -2563,15 +2595,52 @@ mod tests {
     fn chord_matches_only_with_exact_mods() {
         let hk = ReleaseHotkey::parse("shift+escape").unwrap();
         let lt = RefCell::new(None);
-        assert!(hk.matches(gdk::Key::Escape, gdk::ModifierType::SHIFT_MASK, &lt));
+        assert!(hk.matches(gdk::Key::Escape, gdk::ModifierType::SHIFT_MASK, None, &lt));
         // Bare Escape, no Shift: not a match (so it reaches the remote).
-        assert!(!hk.matches(gdk::Key::Escape, gdk::ModifierType::empty(), &lt));
+        assert!(!hk.matches(gdk::Key::Escape, gdk::ModifierType::empty(), None, &lt));
         // Extra lock bits are ignored.
         assert!(hk.matches(
             gdk::Key::Escape,
             gdk::ModifierType::SHIFT_MASK | gdk::ModifierType::LOCK_MASK,
+            None,
             &lt
         ));
+    }
+
+    #[test]
+    fn chord_matches_the_shifted_keyval() {
+        let lt = RefCell::new(None);
+        let ctrl = gdk::ModifierType::CONTROL_MASK;
+        let alt = gdk::ModifierType::ALT_MASK;
+        let shift = gdk::ModifierType::SHIFT_MASK;
+        // GTK reports Ctrl+Shift+q as Q, and Shift+Tab as ISO_Left_Tab.
+        let hk = ReleaseHotkey::parse("ctrl+shift+q").unwrap();
+        assert!(hk.matches(gdk::Key::Q, ctrl | shift, None, &lt));
+        let hk = ReleaseHotkey::parse("shift+tab").unwrap();
+        assert!(hk.matches(gdk::Key::ISO_Left_Tab, shift, None, &lt));
+        // Caps Lock turns q into Q as well.
+        let hk = ReleaseHotkey::parse("ctrl+alt+q").unwrap();
+        let lock = gdk::ModifierType::LOCK_MASK;
+        assert!(hk.matches(gdk::Key::Q, ctrl | alt | lock, None, &lt));
+        assert!(!hk.matches(gdk::Key::W, ctrl | alt, None, &lt));
+    }
+
+    #[test]
+    fn shifted_punctuation_matches_its_unshifted_hardware_key() {
+        let lt = RefCell::new(None);
+        let mods = gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::SHIFT_MASK;
+        for (spec, shifted, base) in [
+            ("ctrl+shift+1", gdk::Key::exclam, gdk::Key::_1),
+            (
+                "ctrl+shift+bracketleft",
+                gdk::Key::braceleft,
+                gdk::Key::bracketleft,
+            ),
+        ] {
+            let hotkey = ReleaseHotkey::parse(spec).unwrap();
+            assert!(hotkey.matches(shifted, mods, Some(base), &lt));
+            assert!(!hotkey.matches(shifted, mods, None, &lt));
+        }
     }
 
     #[test]
@@ -2579,9 +2648,9 @@ mod tests {
         let hk = ReleaseHotkey::parse("double-escape").unwrap();
         let lt = RefCell::new(None);
         let none = gdk::ModifierType::empty();
-        assert!(!hk.matches(gdk::Key::Escape, none, &lt)); // first tap forwarded
-        assert!(hk.matches(gdk::Key::Escape, none, &lt)); // quick second releases
-        assert!(!hk.matches(gdk::Key::Escape, none, &lt)); // counter reset
+        assert!(!hk.matches(gdk::Key::Escape, none, None, &lt)); // first tap forwarded
+        assert!(hk.matches(gdk::Key::Escape, none, None, &lt)); // quick second releases
+        assert!(!hk.matches(gdk::Key::Escape, none, None, &lt)); // counter reset
     }
 }
 
