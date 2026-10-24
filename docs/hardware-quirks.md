@@ -104,7 +104,7 @@ that probe order, when a new generation fails:
 - **Coded buffer status.** `VA_CODED_BUF_STATUS_*` bits are logged; a
   `BAD_BITSTREAM` status fails the encode and the server falls back to CPU.
 
-## Intel Haswell (ANV + i965)
+## Intel Haswell (hasvk + i965)
 
 Found on an Iris 5100 (Haswell GT3) with Mesa 26.2.4 and `libva-intel-driver`
 (i965) 2.4.5; the iHD driver does not cover Haswell. `gliff-probe gpu`,
@@ -127,6 +127,11 @@ incomplete".
   the output. The messages still appear now and then in short sessions (CBR
   4, VBR with QP 22 1 to 15, with QP 18 0), so the change is for picture
   quality, not for silence.
+- **Dynamic bitrate changes still need measurement on Haswell.** The driver
+  resets its rate control when its bitrate or buffer changes. Keep the chosen
+  initial QP in those updates: changing it to zero also triggers a reset in
+  i965, rather than omitting the setting. Transient overshoot after congestion
+  cuts has not been measured on this hardware.
 - **"Unrepairable underflow!" at very low bitrates.** The synthetic
   `gliff-probe roundtrip --bitrate 500000` stripes make the driver log it in
   both modes, since it cannot reach the target even at the highest QP. It is
