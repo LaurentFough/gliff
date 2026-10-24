@@ -104,6 +104,39 @@ that probe order, when a new generation fails:
 - **Coded buffer status.** `VA_CODED_BUF_STATUS_*` bits are logged; a
   `BAD_BITSTREAM` status fails the encode and the server falls back to CPU.
 
+## Intel Haswell (hasvk + i965)
+
+Found on an Iris 5100 (Haswell GT3) with Mesa 26.2.4 and `libva-intel-driver`
+(i965) 2.4.5; the iHD driver does not cover Haswell. `gliff-probe gpu`,
+`surfaces` and `roundtrip` pass, and Mesa warns "Haswell Vulkan support is
+incomplete".
+
+- **Entrypoint.** `VAEntrypointEncSlice`, rate control CQP | CBR | VBR,
+  packed headers 0x1f, maximum 4096x4096.
+- **CBR logs "Unrepairable overflow!" on near-static content.** The i965
+  rate control cannot pad the stream with `disable_bit_stuffing` set, so on
+  an idle desktop its HRD buffer fills and it prints the line to stderr
+  repeatedly. The encoder therefore uses VBR on Haswell with i965 (`pick_rate_control`),
+  which needs no padding.
+- **VBR needs an initial QP.** Left at the driver's default, VBR was silent
+  (0 messages over an extended session at 1920x1080) but visibly softer
+  than CBR. `initial_qp = 18` looked slightly sharper than 22, which was
+  itself sharper than CBR, in a side-by-side on a live session; it costs about
+  10% more bits than 22 on the synthetic stream (974 KB against 866 KB at
+  20 Mbps, 811 KB against 741 KB at 4 Mbps). `min_qp` made no difference to
+  the output. The messages still appear now and then in short sessions (CBR
+  4, VBR with QP 22 1 to 15, with QP 18 0), so the change is for picture
+  quality, not for silence.
+- **Dynamic bitrate changes still need measurement on Haswell.** The driver
+  resets its rate control when its bitrate or buffer changes. Keep the chosen
+  initial QP in those updates: changing it to zero also triggers a reset in
+  i965, rather than omitting the setting. Transient overshoot after congestion
+  cuts has not been measured on this hardware.
+- **"Unrepairable underflow!" at very low bitrates.** The synthetic
+  `gliff-probe roundtrip --bitrate 500000` stripes make the driver log it in
+  both modes, since it cannot reach the target even at the highest QP. It is
+  noise; the stream still decodes.
+
 ## NVIDIA (proprietary driver, Vulkan Video)
 
 Found on a GeForce RTX 5070 Ti, driver 610.57.04, Hyprland on DP-1 at
@@ -134,7 +167,7 @@ Found on a GeForce RTX 5070 Ti, driver 610.57.04, Hyprland on DP-1 at
   stops at the first decode). Only the server side was tested here.
 
 ## Not yet tested anywhere
-- Intel generations before Panther Lake.
+- Intel generations between Haswell and Panther Lake.
 - Baseline-profile streams (the CPU tier's output) through the VA-API High
   decode config: radeonsi accepts them, and so does iHD on Panther Lake
   (the e2e cpu-server -> gpu-client case); other drivers are unverified.
