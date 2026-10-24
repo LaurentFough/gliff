@@ -141,3 +141,11 @@ pass. That merge starts package publishing. No manual version bump in
 Verify that the tagged CI run and GitHub release succeeded, then check the
 package update PR and publishing run in `omacom/omarchy-pkgs`. A green
 source release alone does not mean the package has finished publishing.
+
+Run `scripts/audio-e2e.sh` for audio capture and recovery. It needs PipeWire's
+CLI tools, WirePlumber and `dbus-run-session`. It starts a private PipeWire server
+with only WirePlumber's policy profile, feeds it a generated tone, checks raw
+sample decoding and relinking after an application restart, kills the graph
+monitor to check recovery, then tests the PulseAudio monitor fallback with mocked
+recorder commands. It does not enumerate or record hardware devices, and removes
+its temporary server and state on exit.

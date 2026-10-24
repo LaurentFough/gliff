@@ -29,7 +29,8 @@ both ends, and falls back to the CPU on machines where it cannot.
 
 - Hyprland on both machines, with a session running on the remote one.
 - For sound from the remote: PipeWire (`pw-record`, `pw-dump`, `pw-link`),
-  or PulseAudio's `parec`.
+  or PulseAudio's `parec`. Playback uses the client's ALSA default device;
+  install `pipewire-alsa` or `pulseaudio-alsa` to route it through your sound server.
 - ssh access from your machine to the remote one.
 - For GPU video: an AMD or Intel GPU with its Vulkan and VA-API drivers
   (on Arch, `vulkan-radeon` and `mesa` for AMD, or `vulkan-intel` and

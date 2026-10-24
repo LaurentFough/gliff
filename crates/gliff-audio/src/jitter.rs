@@ -55,6 +55,11 @@ pub struct Jitter {
     underruns: u64,
     calm: u64,
     fade: usize,
+    /// Source-time rendered without a packet after an underrun. A long
+    /// gap means the source went quiet, rather than network congestion.
+    starved: Option<f64>,
+    fade_out: usize,
+    last: [f32; CHANNELS],
 }
 
 impl Jitter {
@@ -72,6 +77,9 @@ impl Jitter {
             underruns: 0,
             calm: 0,
             fade: 0,
+            starved: None,
+            fade_out: 0,
+            last: [0.0; CHANNELS],
         }
     }
 
@@ -94,6 +102,16 @@ impl Jitter {
 
     /// Add interleaved stereo samples at the stream rate.
     pub fn push(&mut self, pcm: &[f32]) {
+        if pcm.len() < CHANNELS {
+            return;
+        }
+        if let Some(gap) = self.starved.take() {
+            if gap < MAX_TARGET as f64 {
+                self.underruns += 1;
+                self.target = (self.target + TARGET_STEP).min(MAX_TARGET);
+                tracing::debug!(target_ms = self.target_ms(), "audio network underrun");
+            }
+        }
         self.buf
             .extend(pcm.chunks_exact(CHANNELS).map(|f| [f[0], f[1]]));
         if !self.playing {
@@ -103,6 +121,7 @@ impl Jitter {
                 self.playing = true;
                 self.pos = 1.0;
                 self.fade = FADE;
+                self.fade_out = 0;
                 self.smoothed = self.fill();
             }
         } else if self.fill() > (self.target + MAX_EXCESS) as f64 {
@@ -129,6 +148,9 @@ impl Jitter {
                 [] => {}
             }
         }
+        if let Some(gap) = &mut self.starved {
+            *gap += (out.len() / channels) as f64 * self.base_ratio;
+        }
         if self.playing {
             // Lean the ratio toward the target fill.
             self.smoothed += (self.fill() - self.smoothed) * 0.05;
@@ -145,17 +167,16 @@ impl Jitter {
 
     fn next(&mut self) -> [f32; CHANNELS] {
         if !self.playing {
-            return [0.0; CHANNELS];
+            return self.silence();
         }
         let i = self.pos as usize;
         if i + 2 >= self.buf.len() {
             // Out of samples: go silent and rebuffer to a higher target.
             self.playing = false;
-            self.underruns += 1;
             self.calm = 0;
-            self.target = (self.target + TARGET_STEP).min(MAX_TARGET);
-            tracing::debug!(target_ms = self.target_ms(), "audio underrun");
-            return [0.0; CHANNELS];
+            self.starved = Some(0.0);
+            self.fade_out = FADE;
+            return self.silence();
         }
         let t = (self.pos - i as f64) as f32;
         let (a, b, c, d) = (
@@ -178,7 +199,17 @@ impl Jitter {
             self.buf.pop_front();
             self.pos -= 1.0;
         }
+        self.last = out;
         out
+    }
+
+    fn silence(&mut self) -> [f32; CHANNELS] {
+        if self.fade_out == 0 {
+            return [0.0; CHANNELS];
+        }
+        self.fade_out -= 1;
+        let gain = self.fade_out as f32 / FADE as f32;
+        self.last.map(|sample| sample * gain)
     }
 }
 
@@ -271,10 +302,13 @@ mod tests {
         let mut out = vec![0.0; 4800 * 2];
         j.render(&mut out, 2);
         j.render(&mut out, 2);
+        // Classify the starvation when packets resume: this short gap is
+        // a late packet, so it raises the target.
+        j.push(&vec![0.1; (j.target + 10) * 2]);
         assert_eq!(j.underruns(), 1);
         assert!(j.target_ms() > start);
         // A one-second burst while playing.
-        j.push(&vec![0.1; (j.target + 10) * 2]);
+        j.push(&vec![0.1; TARGET_STEP * 2]);
         j.render(&mut out[..64], 2);
         j.push(&vec![0.1; 48000 * 2]);
         assert!(
@@ -294,5 +328,37 @@ mod tests {
         let mut six = vec![9.0; 600];
         j.render(&mut six, 6);
         assert_eq!(&six[594..], &[0.5, 0.1, 0.0, 0.0, 0.0, 0.0]);
+    }
+}
+
+#[cfg(test)]
+mod pause_tests {
+    use super::*;
+
+    #[test]
+    fn quiet_sources_do_not_ratchet_the_network_latency_up() {
+        let mut j = Jitter::new(SAMPLE_RATE);
+        let initial = j.target_ms();
+        let mut block = vec![0.0; 480 * CHANNELS];
+        for _ in 0..15 {
+            j.push(&vec![0.25; (START_TARGET + 10) * CHANNELS]);
+            for _ in 0..220 {
+                j.render(&mut block, CHANNELS);
+            }
+        }
+        j.push(&[0.25; 480 * CHANNELS]);
+        assert_eq!(j.target_ms(), initial);
+        assert_eq!(j.underruns(), 0);
+    }
+
+    #[test]
+    fn source_starvation_fades_to_silence_instead_of_clicking() {
+        let mut j = Jitter::new(SAMPLE_RATE);
+        j.push(&vec![0.5; (START_TARGET + 10) * CHANNELS]);
+        let mut out = vec![0.0; (START_TARGET + FADE + 100) * CHANNELS];
+        j.render(&mut out, CHANNELS);
+        let left: Vec<_> = out.chunks_exact(CHANNELS).map(|f| f[0]).collect();
+        assert!(left.windows(2).all(|pair| (pair[1] - pair[0]).abs() < 0.02));
+        assert_eq!(*left.last().unwrap(), 0.0);
     }
 }

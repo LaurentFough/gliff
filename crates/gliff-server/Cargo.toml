@@ -27,3 +27,6 @@ hypr-input.workspace = true
 hypr-ipc.workspace = true
 hypr-wl.workspace = true
 dbus = "0.9"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }

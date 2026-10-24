@@ -264,12 +264,17 @@ where
         cursor_shape_id: 0,
     };
 
+    let audio_supported = session
+        .caps
+        .features
+        .iter()
+        .any(|feature| feature == gliff_proto::FEATURE_AUDIO);
     let mut sound = crate::audio::Sound::default();
     loop {
         let flow = tokio::select! {
             msg = msg_rx.recv() => match msg {
                 Some(Inbound::Msg(ClientMsg::Audio { enabled })) => {
-                    sound.set(enabled, &session.writer);
+                    sound.set(enabled && audio_supported, &session.writer);
                     ControlFlow::Continue(())
                 }
                 Some(Inbound::Msg(msg)) => session.on_client_msg(msg).await?,

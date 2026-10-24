@@ -26,7 +26,9 @@ depends=(
   'wayland'
 )
 makedepends=('cargo' 'pkgconf' 'nasm' 'cmake')
-optdepends=('vulkan-radeon: Vulkan compute on AMD'
+optdepends=('pipewire-alsa: audio playback through PipeWire'
+            'pulseaudio-alsa: audio playback through PulseAudio'
+            'vulkan-radeon: Vulkan compute on AMD'
             'vulkan-intel: Vulkan compute on Intel'
             'intel-media-driver: VA-API H.264 codec on Intel'
             'vulkan-tools: vulkaninfo for debugging'
