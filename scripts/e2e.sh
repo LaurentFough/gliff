@@ -151,8 +151,12 @@ echo "   sensitive clipboard selection PASS"
 echo "== 6. text clipboard both directions =="
 command -v wl-copy >/dev/null && command -v wl-paste >/dev/null || fail "wl-clipboard not installed"
 # The probe offers its item after a few frames and requests the compositor's
-# item on its own. Wait for both before pasting and killing anything.
-wait_type() { for i in $(seq 1 60); do wl-paste -l 2>/dev/null | grep -qx "$1" && return 0; sleep 0.25; done; return 1; }
+# item on its own. Wait for both before pasting and killing anything. The
+# copy each step starts with already offers the client's mime types, so wait
+# for the client's content itself, not for a type.
+wait_for() { for i in $(seq 1 60); do "$@" && return 0; sleep 0.25; done; return 1; }
+pasted_is() { [ "$(wl-paste -n 2>/dev/null)" = "$1" ]; }
+paste_matches() { wl-paste --type "$1" 2>/dev/null | cmp -s - "$2"; }
 wait_recv() { for i in $(seq 1 60); do grep -q "$1" "$2" && return 0; sleep 0.25; done; return 1; }
 wl-copy "e2e-clip-in" 2>/dev/null
 "$SERVER" --listen 127.0.0.1:9042 --headless --instance "$NEST_SIG" >/tmp/gliff-e2e-server.log 2>&1 &
@@ -161,7 +165,7 @@ damage & cdp=$!; PIDS+=("$cdp")
 clipf=$(mktemp)
 GLIFF_SEND_CLIP="e2e-clip-out" timeout 20 $PROBE --video "$CLIENT_VIDEO" serve-test --connect 127.0.0.1:9042 --frames 200 >"$clipf" 2>&1 &
 clipc=$!; PIDS+=("$clipc")
-wait_type "text/plain;charset=utf-8" || fail "server never offered the client's text"
+wait_for pasted_is "e2e-clip-out" || fail "server never offered the client's text (got: $(wl-paste -n 2>/dev/null))"
 wait_recv "CLIP-RECV:" "$clipf" || fail "client never received the compositor's text"
 pasted=$(wl-paste -n 2>/dev/null)
 kill "$clipc" "$cdp" "$csp" 2>/dev/null
@@ -235,24 +239,42 @@ fi
 hyprctl output remove "$rotated" >/dev/null 2>&1
 echo "   rotated output CPU/GPU pipelines PASS"
 
+echo "== 7c. odd-sized output capture and encoding =="
+# The stream is the output cropped to even dimensions; the GPU split must
+# drop the extra column and row rather than resample the whole picture.
+hyprctl output create headless e2eodd >/dev/null 2>&1
+sleep 1
+odd=$(hyprctl monitors -j | python3 -c "import sys,json; print(next(m['name'] for m in json.load(sys.stdin) if 'e2eodd' in m['name']))")
+hyprctl eval "hl.monitor({ output = \"$odd\", mode = \"1281x801@60\", position = \"auto\", scale = 1 })" >/dev/null
+sleep 1
+$PROBE --video cpu --capture shm --instance "$NEST_SIG" pipeline --output "$odd" >/tmp/gliff-e2e-odd-cpu.log 2>&1 || fail "odd-sized CPU pipeline"
+if [ "$HAS_GPU" = 1 ]; then
+    $PROBE --instance "$NEST_SIG" pipeline --output "$odd" >/tmp/gliff-e2e-odd-gpu.log 2>&1 || fail "odd-sized GPU pipeline"
+fi
+hyprctl output remove "$odd" >/dev/null 2>&1
+echo "   odd-sized output CPU/GPU pipelines PASS"
+
 echo "== 8. binary clipboard both directions (1 MiB, chunked) =="
+# Different bytes each way, so a paste of our own copy cannot pass for the
+# client's item.
 blob=$(mktemp); head -c 1048576 /dev/urandom >"$blob"
+cblob=$(mktemp); head -c 1048576 /dev/urandom >"$cblob"
 recvf=$(mktemp); outf=$(mktemp)
 wl-copy --type application/octet-stream <"$blob" 2>/dev/null
 "$SERVER" --listen 127.0.0.1:9047 --headless --instance "$NEST_SIG" >/tmp/gliff-e2e-server.log 2>&1 &
 bsp=$!; PIDS+=("$bsp"); sleep 2
 damage & bdp=$!; PIDS+=("$bdp")
 clipf=$(mktemp)
-GLIFF_SEND_CLIP_FILE="$blob" GLIFF_RECV_CLIP_FILE="$recvf" timeout 20 $PROBE --video "$CLIENT_VIDEO" serve-test --connect 127.0.0.1:9047 --frames 200 >"$clipf" 2>&1 &
+GLIFF_SEND_CLIP_FILE="$cblob" GLIFF_RECV_CLIP_FILE="$recvf" timeout 20 $PROBE --video "$CLIENT_VIDEO" serve-test --connect 127.0.0.1:9047 --frames 200 >"$clipf" 2>&1 &
 bclipc=$!; PIDS+=("$bclipc")
-wait_type "application/octet-stream" || fail "server never offered the client's binary item"
+wait_for paste_matches application/octet-stream "$cblob" || fail "server never offered the client's binary item"
 wait_recv "CLIP-RECV-FILE:" "$clipf" || fail "client never received the compositor's binary item"
 wl-paste --type application/octet-stream >"$outf" 2>/dev/null
 kill "$bclipc" "$bdp" "$bsp" 2>/dev/null
 grep -q "CLIP-RECV-FILE: 1048576 bytes" "$clipf" || fail "compositor->client binary clipboard (got: $(grep CLIP-RECV "$clipf"))"
 cmp -s "$blob" "$recvf" || fail "compositor->client binary clipboard differs"
-cmp -s "$blob" "$outf" || fail "client->compositor binary clipboard differs ($(stat -c %s "$outf") bytes)"
-rm -f "$clipf" "$blob" "$recvf" "$outf"
+cmp -s "$cblob" "$outf" || fail "client->compositor binary clipboard differs ($(stat -c %s "$outf") bytes)"
+rm -f "$clipf" "$blob" "$cblob" "$recvf" "$outf"
 echo "   binary clipboard both directions PASS"
 
 echo "== 9. copied files both directions (spooled) =="
@@ -266,7 +288,9 @@ damage & fdp=$!; PIDS+=("$fdp")
 clipf=$(mktemp)
 GLIFF_SEND_CLIP_FILES="$srcd/photos:$srcd/solo.txt" GLIFF_RECV_CLIP_DIR="$recvd" timeout 20 $PROBE --video "$CLIENT_VIDEO" serve-test --connect 127.0.0.1:9048 --frames 200 >"$clipf" 2>&1 &
 fclipc=$!; PIDS+=("$fclipc")
-wait_type "text/uri-list" || fail "server never offered the client's files"
+# The client's files arrive as a URI list into the spool, not our sources.
+spooled_uris() { local u; u=$(wl-paste --type text/uri-list 2>/dev/null); [ -n "$u" ] && ! grep -qF "file://$srcd/" <<<"$u"; }
+wait_for spooled_uris || fail "server never offered the client's files"
 wait_recv "CLIP-RECV-FILES:" "$clipf" || fail "client never received the compositor's files"
 pasted_uris=$(wl-paste --type text/uri-list 2>/dev/null | tr -d '\r')
 kill "$fclipc" "$fdp" "$fsp" 2>/dev/null

@@ -34,6 +34,9 @@ pub enum Error {
     Bitstream(&'static str),
     #[error("unsupported: {0}")]
     Unsupported(String),
+    /// The bitstream's picture size differs from the announced stream size.
+    #[error("stream size: {0}")]
+    StreamSize(String),
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
 }
