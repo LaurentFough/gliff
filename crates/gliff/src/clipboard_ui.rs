@@ -33,6 +33,10 @@ use crate::clipboard::ToWorker;
 const URI_LIST_MAX: usize = 1024 * 1024;
 
 fn clipboard() -> Option<gdk::Clipboard> {
+    // Unit tests drive the offer routing without a display.
+    if !gtk::is_initialized_main_thread() {
+        return None;
+    }
     gdk::Display::default().map(|d| d.clipboard())
 }
 
@@ -44,28 +48,98 @@ fn holds_remote_offer(cb: &gdk::Clipboard) -> bool {
     cb.content().is_some_and(|p| p.is::<RemoteProvider>())
 }
 
+type Senders = Rc<dyn Fn() -> Vec<UnboundedSender<ToWorker>>>;
+
 /// Report every change of the local clipboard to the workers. Each change
-/// first revokes the previous local offer in every session. A change to our
-/// own proxy provider stops there, and any other change is then offered.
-/// Every running session gets the offer, so any of them can paste it after a
-/// switch; nothing is sent until one does.
-pub fn watch_local(senders: impl Fn() -> Vec<UnboundedSender<ToWorker>> + 'static) {
-    let Some(cb) = clipboard() else {
-        return;
-    };
-    let senders = Rc::new(senders);
-    // Bumped per change so a slow file listing for a stale one is dropped.
-    let selection_gen = Rc::new(Cell::new(0u64));
-    cb.connect_changed(move |cb| {
+/// first revokes the previous local offer in every session `running` names.
+/// A change to our own proxy provider stops there, and any other change is
+/// then offered to the sessions `shown` names. The returned handle offers
+/// the current selection again, for a session that has just been shown.
+pub fn watch_local(
+    running: impl Fn() -> Vec<UnboundedSender<ToWorker>> + 'static,
+    shown: impl Fn() -> Vec<UnboundedSender<ToWorker>> + 'static,
+) -> Option<LocalSelection> {
+    let cb = clipboard()?;
+    let watch = LocalSelection::new(running, shown);
+    {
+        let watch = watch.clone();
+        cb.connect_changed(move |cb| watch.offer(cb));
+    }
+    Some(watch)
+}
+
+/// Offers the local selection to the sessions `shown` names. They are asked
+/// when an offer is sent, not when the clipboard changes, so a slow file
+/// listing goes to whichever session is shown by then.
+#[derive(Clone)]
+pub struct LocalSelection {
+    running: Senders,
+    shown: Senders,
+    /// Bumped per offer so a slow file listing for a stale one is dropped,
+    /// and a read for an offer the clipboard has since moved past is refused.
+    selection_gen: Rc<Cell<u64>>,
+}
+
+impl LocalSelection {
+    pub fn new(
+        running: impl Fn() -> Vec<UnboundedSender<ToWorker>> + 'static,
+        shown: impl Fn() -> Vec<UnboundedSender<ToWorker>> + 'static,
+    ) -> Self {
+        Self {
+            running: Rc::new(running),
+            shown: Rc::new(shown),
+            selection_gen: Rc::new(Cell::new(0)),
+        }
+    }
+
+    /// The generation of the latest offer. An offer is current only while
+    /// this still matches the one it was sent with.
+    pub fn generation(&self) -> u64 {
+        self.selection_gen.get()
+    }
+
+    /// Offer the current local selection again. The clipboard reports only
+    /// changes, so a session shown after the last copy would otherwise have
+    /// nothing to paste. Nothing is revoked here: the session shown before
+    /// was revoked by the switch, and the clipboard has not changed.
+    pub fn reoffer(&self) {
+        let gen = self.begin();
+        if let Some(cb) = clipboard() {
+            if !holds_remote_offer(&cb) {
+                self.read_formats(&cb, gen);
+            }
+        }
+    }
+
+    /// The local clipboard changed: revoke the current offer in every
+    /// running session and start a new offer. Returns its generation, or
+    /// None when nothing is to be offered because the server's offer holds
+    /// the clipboard or no session runs.
+    pub fn changed(&self, holds_remote: bool) -> Option<u64> {
+        let gen = self.begin();
+        revoke_for_change(&(self.running)(), holds_remote).then_some(gen)
+    }
+
+    fn offer(&self, cb: &gdk::Clipboard) {
         // Only our own proxy for the server's offer must not echo back;
         // a copy from another gliff widget is a real local change.
-        let gen = selection_gen.get() + 1;
-        selection_gen.set(gen);
-        let txs = senders();
-        if !revoke_for_change(&txs, holds_remote_offer(cb)) {
+        if let Some(gen) = self.changed(holds_remote_offer(cb)) {
+            self.read_formats(cb, gen);
+        }
+    }
+
+    /// Start a new offer, superseding any still being prepared.
+    pub fn begin(&self) -> u64 {
+        let gen = self.selection_gen.get() + 1;
+        self.selection_gen.set(gen);
+        gen
+    }
+
+    fn read_formats(&self, cb: &gdk::Clipboard, gen: u64) {
+        if (self.shown)().is_empty() {
             return;
         }
-        let selection_gen = selection_gen.clone();
+        let watch = self.clone();
         let mimes: Vec<String> = cb
             .formats()
             .mime_types()
@@ -80,21 +154,29 @@ pub fn watch_local(senders: impl Fn() -> Vec<UnboundedSender<ToWorker>> + 'stati
             } else {
                 LocalFiles::default()
             };
-            if selection_gen.get() != gen {
-                return;
-            }
-            for tx in txs {
-                let _ = tx.send(ToWorker::LocalOffer {
-                    mime_types: if sensitive {
-                        Vec::new()
-                    } else {
-                        forwardable_mimes(&mimes)
-                    },
-                    files: files.clone(),
-                });
-            }
+            let mime_types = if sensitive {
+                Vec::new()
+            } else {
+                forwardable_mimes(&mimes)
+            };
+            watch.finish(gen, mime_types, files);
         });
-    });
+    }
+
+    /// Send offer `gen` once its files are listed, unless a newer offer has
+    /// started since.
+    pub fn finish(&self, gen: u64, mime_types: Vec<String>, files: LocalFiles) {
+        if self.selection_gen.get() != gen {
+            return;
+        }
+        for tx in (self.shown)() {
+            let _ = tx.send(ToWorker::LocalOffer {
+                mime_types: mime_types.clone(),
+                files: files.clone(),
+                generation: gen,
+            });
+        }
+    }
 }
 
 /// Withdraw the current local offer from every session, and say whether the
@@ -156,9 +238,20 @@ async fn local_files(cb: &gdk::Clipboard, mimes: &[String]) -> LocalFiles {
 /// Stream the local clipboard's `mime_type` into `reply` for the server;
 /// dropping `reply` marks the end. An error is sent as such. The server's
 /// own offer is refused: reading it would fetch the item back from the
-/// server, which would ask us for it again.
-pub fn read_local(mime_type: String, reply: Sender<std::io::Result<Bytes>>) {
+/// server, which would ask us for it again. `allowed` is asked when the
+/// read starts: a request queued before a tab switch or a new copy must not
+/// read what the clipboard holds now.
+pub fn read_local(
+    mime_type: String,
+    reply: Sender<std::io::Result<Bytes>>,
+    allowed: impl FnOnce() -> bool + 'static,
+) {
     glib::MainContext::default().spawn_local(async move {
+        if !allowed() {
+            let error = std::io::Error::other("clipboard offer was withdrawn");
+            let _ = reply.send(Err(error)).await;
+            return;
+        }
         let Some(cb) = clipboard() else {
             return;
         };
@@ -464,9 +557,14 @@ mod tests {
         let _owner = context.acquire().unwrap();
         let cb = clipboard().unwrap();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        // Every session is running, and the first one is shown.
         let sessions = Rc::new(RefCell::new(vec![tx]));
-        let current = sessions.clone();
-        watch_local(move || current.borrow().clone());
+        let running = sessions.clone();
+        let shown = sessions.clone();
+        watch_local(
+            move || running.borrow().clone(),
+            move || shown.borrow().first().cloned().into_iter().collect(),
+        );
         let provider = gdk::ContentProvider::new_union(&[
             gdk::ContentProvider::for_bytes(
                 "text/plain",
@@ -499,7 +597,9 @@ mod tests {
         };
         assert!(revoked, "the previous offer was not revoked first");
         match offer {
-            ToWorker::LocalOffer { mime_types, files } => {
+            ToWorker::LocalOffer {
+                mime_types, files, ..
+            } => {
                 assert!(mime_types.is_empty());
                 assert!(files.entries.is_empty());
             }
@@ -507,7 +607,7 @@ mod tests {
         }
         // A request racing the cleared offer must not read the live secret.
         let (reply, mut read) = tokio::sync::mpsc::channel(2);
-        read_local("text/plain".into(), reply);
+        read_local("text/plain".into(), reply, || true);
         let result = loop {
             context.iteration(false);
             if let Ok(result) = read.try_recv() {
@@ -552,7 +652,14 @@ mod tests {
             );
             std::thread::sleep(Duration::from_millis(5));
         }
-        while b_rx.try_recv().is_ok() {}
+        // Only the shown session a is offered the copy. Session b is only
+        // revoked.
+        while let Ok(msg) = b_rx.try_recv() {
+            assert!(
+                !matches!(msg, ToWorker::LocalOffer { .. }),
+                "session b got a local offer while hidden"
+            );
+        }
         let offered = a_msgs.len();
 
         set_remote_offer(&a_tx, 7, vec!["text/plain".into()], Vec::new());

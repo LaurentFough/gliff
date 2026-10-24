@@ -45,9 +45,14 @@ pub enum ToWorker {
     /// offer and stop serving it. A `LocalOffer` may follow.
     RevokeLocal,
     /// The local clipboard changed to these forwardable mime types and files.
+    /// An empty offer withdraws the previous one: it takes a fresh serial,
+    /// so requests against the old one are refused.
     LocalOffer {
         mime_types: Vec<String>,
         files: LocalFiles,
+        /// The UI's offer generation, handed back with each read so the UI
+        /// can refuse one for an offer it has since moved past.
+        generation: u64,
     },
     /// An application pastes `mime_type` from the server's offer with
     /// `serial`: stream it into `sink`, then report the outcome.
@@ -83,6 +88,7 @@ pub struct Bridge {
     last_serial: Cell<u32>,
     local_mimes: RefCell<Vec<String>>,
     local_files: RefCell<LocalFiles>,
+    local_generation: Cell<u64>,
     remote: RefCell<RemoteOffer>,
 }
 
@@ -99,6 +105,7 @@ impl Bridge {
             last_serial: Cell::new(0),
             local_mimes: RefCell::default(),
             local_files: RefCell::default(),
+            local_generation: Cell::new(0),
             remote: RefCell::default(),
         }
     }
@@ -149,7 +156,11 @@ impl Bridge {
                 let (reply, rx) = mpsc::channel::<io::Result<Bytes>>(2);
                 if self
                     .status
-                    .send(Status::ClipboardRead { mime_type, reply })
+                    .send(Status::ClipboardRead {
+                        mime_type,
+                        generation: self.local_generation.get(),
+                        reply,
+                    })
                     .is_err()
                 {
                     self.transfers.refuse(id);
@@ -196,10 +207,15 @@ impl Bridge {
                 *self.local_files.borrow_mut() = LocalFiles::default();
                 self.transfers.abort_serving();
             }
-            ToWorker::LocalOffer { mime_types, files } => {
+            ToWorker::LocalOffer {
+                mime_types,
+                files,
+                generation,
+            } => {
                 let serial = self.last_serial.get().wrapping_add(1);
                 self.last_serial.set(serial);
                 self.local_serial.set(Some(serial));
+                self.local_generation.set(generation);
                 *self.local_mimes.borrow_mut() = mime_types.clone();
                 let entries = files.entries.clone();
                 *self.local_files.borrow_mut() = files;
@@ -347,6 +363,7 @@ mod tests {
                 bridge.on_ui(ToWorker::LocalOffer {
                     mime_types: vec![offered.into()],
                     files: LocalFiles::default(),
+                    generation: 0,
                 });
                 let offer = rx.recv().await.unwrap();
                 assert!(
@@ -385,6 +402,50 @@ mod tests {
     }
 
     #[test]
+    fn an_empty_offer_revokes_the_previous_one() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        tokio::task::LocalSet::new().block_on(&rt, async {
+            let (out, mut rx) = outbound_channel();
+            let (status_tx, status_rx) = std::sync::mpsc::channel();
+            let bridge = Bridge::new(Transfers::new(out, Side::Client), status_tx);
+            bridge.on_ui(ToWorker::LocalOffer {
+                mime_types: vec!["text/plain".into()],
+                files: LocalFiles::default(),
+                generation: 0,
+            });
+            let offered = rx.recv().await.unwrap();
+            assert!(matches!(offered.0, ClipboardMsg::Offer { serial: 1, .. }));
+            bridge.on_ui(ToWorker::LocalOffer {
+                mime_types: Vec::new(),
+                files: LocalFiles::default(),
+                generation: 0,
+            });
+            let revoked = rx.recv().await.unwrap();
+            assert!(matches!(
+                revoked.0,
+                ClipboardMsg::Offer { serial: 2, ref mime_types, ref files }
+                    if mime_types.is_empty() && files.is_empty()
+            ));
+            for (id, serial) in [(2, 1), (4, 2)] {
+                bridge.on_peer_msg(
+                    ClipboardMsg::Request {
+                        id,
+                        serial,
+                        item: ClipboardItem::Mime("text/plain".into()),
+                    },
+                    Bytes::new(),
+                );
+                let refused = rx.recv().await.unwrap();
+                assert!(matches!(refused.0, ClipboardMsg::Abort { id: got } if got == id));
+            }
+            assert!(status_rx.try_recv().is_err());
+        });
+    }
+
+    #[test]
     fn a_request_against_a_replaced_offer_is_refused() {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -397,6 +458,7 @@ mod tests {
             bridge.on_ui(ToWorker::LocalOffer {
                 mime_types: vec!["text/plain".into()],
                 files: LocalFiles::default(),
+                generation: 7,
             });
             let offered = rx.recv().await.unwrap();
             assert!(matches!(offered.0, ClipboardMsg::Offer { serial: 1, .. }));
@@ -419,9 +481,11 @@ mod tests {
                 },
                 Bytes::new(),
             );
+            // The read carries the UI's generation for the offer, so the UI
+            // can refuse it if the offer has been withdrawn since.
             assert!(matches!(
                 status_rx.try_recv().unwrap(),
-                Status::ClipboardRead { .. }
+                Status::ClipboardRead { generation: 7, .. }
             ));
         });
     }
@@ -443,6 +507,7 @@ mod tests {
         bridge.on_ui(ToWorker::LocalOffer {
             mime_types: vec!["text/uri-list".into()],
             files: one_file(),
+            generation: 0,
         });
     }
 
@@ -542,6 +607,7 @@ mod tests {
             bridge.on_ui(ToWorker::LocalOffer {
                 mime_types: vec!["text/plain".into()],
                 files: LocalFiles::default(),
+                generation: 0,
             });
             let offered = rx.recv().await.unwrap();
             assert!(matches!(offered.0, ClipboardMsg::Offer { serial: 1, .. }));
