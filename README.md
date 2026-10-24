@@ -94,14 +94,23 @@ off it to get your own back. Press `Shift+Esc` to get your shortcuts back
 without moving the pointer. `--release-hotkey` changes that key (`ctrl+alt+q`,
 `double-escape`, or `none`).
 
-**Clipboard.** Copy on one machine and paste on the other. Nothing is sent
-until you paste. A paste that takes more than a second shows its progress
-with a cancel button. Pasted files are kept in `~/.cache/gliff/clipboard`.
+**Clipboard.** Copy on one machine and paste on the other. A copy announces
+only its types, and the contents are sent when the other side asks for them,
+normally when you paste. A paste that takes more than a second shows its
+progress with a cancel button. Pasted files are kept in `~/.cache/gliff/clipboard`.
 
-Clipboard sharing trusts every connected host: a host can request the
+What you copy locally is offered only to the machine in the tab you are
+looking at. Switching tabs withdraws it from the old machine and offers your
+current clipboard to the new one.
+
+Clipboard sharing trusts the host you are looking at: it can request the
 advertised clipboard contents without a local paste. Use `gliff --no-clipboard`
 to disable sharing in both directions when connecting to an untrusted host.
 Local selections marked `x-kde-passwordManagerHint` are not shared.
+
+Changing the clipboard cancels unfinished pastes from this machine to the
+remote host. Wait for a file paste to finish before copying something else. Switching
+tabs also cancels unfinished pastes to the tab you leave.
 
 **Slow links.** gliff measures the link and lowers the frame rate, then the
 colour detail, then the resolution, and raises them again when there is

@@ -1,6 +1,6 @@
 //! One client session: output setup, the capture/encode/send loop, and input.
 
-use std::ops::ControlFlow;
+use std::ops::{ControlFlow, Deref, DerefMut};
 use std::os::fd::AsFd;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -15,7 +15,7 @@ use gliff_proto::clipboard::CHUNK;
 use gliff_proto::{
     features, version_mismatch, ChromaMode, ClientCaps, ClientMsg, ClipboardMsg, Codec, Greeting,
     OutputInfo as ProtoOutput, Rect, ServerMsg, SessionInfo, VideoPipeline, ERROR_NO_CHROMA,
-    ERROR_NO_CODEC, ERROR_VERSION, PROTOCOL_VERSION,
+    ERROR_NO_CODEC, ERROR_SETUP, ERROR_VERSION, PROTOCOL_VERSION,
 };
 use gliff_sw::VideoMode;
 use gliff_transport::clipboard::progress::Jobs;
@@ -25,7 +25,7 @@ use gliff_vk::{DmabufPlane, EncodedFrame, Encoder, EncoderSettings, Gpu};
 
 use crate::rate::{cpu_rebuild_due, Ladder, LinkEstimator, RateController};
 use crate::writer::Writer;
-use hypr_capture::{CaptureConfig, CaptureEvent, CaptureMode, CapturedFrame, Capturer};
+use hypr_capture::{CaptureConfig, CaptureEvent, CaptureMode, CapturedFrame, Capturer, SizeLimit};
 use hypr_input::{Axis as InAxis, Clipboard, ClipboardEvent, Input, InputCmd, InputConfig};
 use hypr_wl::Target;
 
@@ -100,8 +100,12 @@ where
         anyhow::bail!("client advertises no chroma mode this server speaks");
     }
 
-    let instance = cfg.target.instance().context("find Hyprland instance")?;
-    let output = setup_output(&instance, &cfg, &caps)?;
+    let instance = report_setup(
+        &mut writer,
+        cfg.target.instance().context("find Hyprland instance"),
+    )
+    .await?;
+    let output = report_setup(&mut writer, setup_output(&instance, &cfg, &caps)).await?;
     tracing::info!(output = %output.name, output.width, output.height, headless = output.is_headless(), "session output ready");
 
     let video = VideoTier::open(cfg.video, cfg.capture, &cfg.render_node);
@@ -126,6 +130,14 @@ where
     let start_fps = ladder.level().fps_cap.min(MAX_FPS);
     let fps_cmd = start_fps;
     let on_gpu = matches!(video, VideoTier::Gpu(_));
+    let started = match VideoStart::open(video, &cfg, &caps, &output, fps_cmd) {
+        Ok(start) => Ok(start),
+        Err(e) if on_gpu => {
+            tracing::warn!(error = %format!("{e:#}"), "cannot start the GPU video pipeline; falling back to the CPU pipeline");
+            VideoStart::open(VideoTier::Cpu, &cfg, &caps, &output, fps_cmd)
+        }
+        Err(e) => Err(e),
+    };
     let VideoStart {
         video,
         chroma,
@@ -134,14 +146,7 @@ where
         ctl,
         settings,
         encoder,
-    } = match VideoStart::open(video, &cfg, &caps, &output, fps_cmd) {
-        Ok(start) => start,
-        Err(e) if on_gpu => {
-            tracing::warn!(error = %format!("{e:#}"), "cannot start the GPU video pipeline; falling back to the CPU pipeline");
-            VideoStart::open(VideoTier::Cpu, &cfg, &caps, &output, fps_cmd)?
-        }
-        Err(e) => return Err(e),
-    };
+    } = report_setup(&mut writer, started).await?;
     // Pipelined behind HelloAck, never waited on: the Pong seeds the
     // round-trip estimate, usually before the first frame ack arrives.
     writer.write_msg(&ServerMsg::Ping { t: now_ms() }).await?;
@@ -161,16 +166,21 @@ where
     // The GPU tier imports the captured dmabuf, so it cannot take the wl_shm
     // ring the CPU tier falls back to when no linear dmabuf is offered.
     let allow_shm = !matches!(video, VideoTier::Gpu(_));
-    let capturer = start_capture(
-        &cfg.target,
-        &output.name,
-        &cfg.render_node,
-        cfg.capture,
-        allow_shm,
-        cap_tx,
-    )?;
+    let capturer = report_setup(
+        &mut writer,
+        start_capture(
+            &cfg.target,
+            &output.name,
+            &cfg.render_node,
+            cfg.capture,
+            allow_shm,
+            output.is_headless(),
+            cap_tx,
+        ),
+    )
+    .await?;
 
-    let input = start_input(&cfg.target, &output.name, &keymap)?;
+    let input = report_setup(&mut writer, start_input(&cfg.target, &output.name, &keymap)).await?;
     input.send(output.logical_extent()).ok();
     if output.is_headless() {
         // Focus follows the pointer, so put it on the new screen right away:
@@ -218,7 +228,11 @@ where
         writer,
         video,
         instance,
-        output,
+        output: ServedOutput {
+            output,
+            capturer: Some(capturer),
+            input: Some(input),
+        },
         stream,
         encoder_max,
         gpu_encoded: false,
@@ -231,8 +245,6 @@ where
         chroma,
         settings,
         encoder,
-        input,
-        capturer,
         pending: None,
         capture_asked: true,
         blocked_noted: false,
@@ -298,7 +310,7 @@ where
             {
                 tracing::info!("no first frame yet; recapturing with full damage");
                 session.recaptured = true;
-                session.capturer.recapture().ok();
+                session.capturer().recapture().ok();
                 ControlFlow::Continue(())
             }
             // The refinement timer: fires when the screen is still and the
@@ -323,19 +335,8 @@ where
         session.pump_encoder()?;
     }
 
-    session.inject(InputCmd::ReleaseAll);
-    let Session {
-        capturer,
-        input,
-        output,
-        ..
-    } = session;
-    // Hyprland 0.56 aborts if a cursor capture session is still alive when
-    // its monitor is removed, so end the capture and input threads before
-    // dropping the output.
-    drop(capturer);
-    drop(input);
-    drop(output);
+    // Dropping the session ends it in order; see `impl Drop for Session`.
+    drop(session);
     Ok(())
 }
 
@@ -361,6 +362,22 @@ where
             anyhow::bail!("{message}: client protocol {version}, server {PROTOCOL_VERSION}");
         }
     }
+}
+
+/// Pass a setup step's result through, first telling the client why the
+/// session cannot start when the step failed; otherwise all the client sees
+/// is the connection closing.
+async fn report_setup<T, W>(writer: &mut Framed<W>, step: Result<T>) -> Result<T>
+where
+    W: AsyncWrite + Unpin,
+{
+    if let Err(e) = &step {
+        // The session ends either way, so a failed write changes nothing.
+        let _ = writer
+            .write_msg(&ServerMsg::error(ERROR_SETUP, format!("{e:#}")))
+            .await;
+    }
+    step
 }
 
 /// What the reader task hands the session.
@@ -416,7 +433,7 @@ struct Session {
     writer: Writer,
     video: VideoTier,
     instance: hypr_ipc::Instance,
-    output: SessionOutput,
+    output: ServedOutput<SessionOutput, Capturer, Input>,
     /// Encoded size. Equals the output size, except for a mirrored screen
     /// larger than the client's window, or any output larger than the
     /// encoder's maximum, which are scaled down to fit.
@@ -438,8 +455,6 @@ struct Session {
     chroma: ChromaMode,
     settings: EncoderSettings,
     encoder: VideoEncoder,
-    input: Input,
-    capturer: Capturer,
     /// The newest captured frame not yet encoded.
     pending: Option<CapturedFrame>,
     capture_asked: bool,
@@ -615,13 +630,22 @@ impl Session {
 
     /// Forward an input event; a dead input thread ends the session elsewhere.
     fn inject(&self, cmd: InputCmd) {
-        let _ = self.input.send(cmd);
+        if let Some(input) = &self.output.input {
+            let _ = input.send(cmd);
+        }
     }
 
-    /// Resize a headless output to the client's window, within the size it
-    /// declared in Hello, and restart the encoder at the new size.
+    fn capturer(&self) -> &Capturer {
+        self.output
+            .capturer
+            .as_ref()
+            .expect("the capturer lives until the session drops")
+    }
+
     /// Resize a headless output to the client's window at the client's
-    /// scale, so the remote UI renders at the client's DPI.
+    /// scale, so the remote UI renders at the client's DPI, within the size
+    /// it declared in Hello and the server's cap, and restart the encoder
+    /// at the new size.
     async fn resize(&mut self, width: u32, height: u32, scale: f32) -> Result<()> {
         let width = width.min(self.caps.max_width) & !1;
         let height = height.min(self.caps.max_height) & !1;
@@ -637,7 +661,7 @@ impl Session {
         if !self.output.is_headless() {
             return self.fit_mirror(width, height);
         }
-        let (width, height) = hypr_ipc::clean_mode(width, height, scale);
+        let (width, height) = headless_target(width, height, scale);
         let same_size = (width, height) == (self.output.width, self.output.height);
         let same_scale = (scale - self.output.scale).abs() < 0.01;
         if same_size && same_scale {
@@ -871,7 +895,7 @@ impl Session {
         // frame replaces `pending` (latest wins), so the frame that finally
         // goes out on a slow link is current, not as old as the stall.
         if !self.capture_asked {
-            self.capturer.request_frame().ok();
+            self.capturer().request_frame().ok();
             self.capture_asked = true;
         }
         Ok(())
@@ -1139,7 +1163,7 @@ impl Session {
                 self.refines = MAX_REFINES;
                 self.want_keyframe = true;
                 self.encode_us = 0.0;
-                self.capturer.use_shm()?;
+                self.capturer().use_shm()?;
                 self.capture_asked = true;
                 return Ok(None);
             }
@@ -1447,6 +1471,46 @@ impl VideoEncoder {
     }
 }
 
+// Runs before the fields drop, so held keys are released before the
+// capture thread ends, as the threads and output in `ServedOutput` go after.
+impl Drop for Session {
+    fn drop(&mut self) {
+        self.inject(InputCmd::ReleaseAll);
+    }
+}
+
+/// The output with the capture and input threads that use it. Dropping it
+/// ends both threads before the output, on every exit from `run`, a `?`
+/// return or an unwinding panic included.
+struct ServedOutput<O, C, I> {
+    output: O,
+    /// `Some` until the drop.
+    capturer: Option<C>,
+    input: Option<I>,
+}
+
+impl<O, C, I> Drop for ServedOutput<O, C, I> {
+    fn drop(&mut self) {
+        // Hyprland 0.56 aborts if a cursor capture session is still alive
+        // when its monitor is removed. `output` drops after this body.
+        drop(self.capturer.take());
+        drop(self.input.take());
+    }
+}
+
+impl<O, C, I> Deref for ServedOutput<O, C, I> {
+    type Target = O;
+    fn deref(&self) -> &O {
+        &self.output
+    }
+}
+
+impl<O, C, I> DerefMut for ServedOutput<O, C, I> {
+    fn deref_mut(&mut self) -> &mut O {
+        &mut self.output
+    }
+}
+
 /// The output being served. A created headless output is removed on drop, on
 /// every exit path including a failure later in setup.
 struct SessionOutput {
@@ -1611,14 +1675,14 @@ fn main_monitor(mons: &[hypr_ipc::Monitor]) -> Option<&hypr_ipc::Monitor> {
         .or_else(|| enabled().min_by_key(|m| (m.x, m.y)))
 }
 
-fn start_capture(
+fn capture_config(
     target: &Target,
     output: &str,
     render_node: &std::path::Path,
     capture: CaptureMode,
     allow_shm: bool,
-    tx: UnboundedSender<Incoming>,
-) -> Result<Capturer> {
+    headless: bool,
+) -> CaptureConfig {
     let mut cc = CaptureConfig::new(output.to_string());
     cc.target = target.clone();
     cc.render_node = render_node.to_path_buf();
@@ -1628,6 +1692,25 @@ fn start_capture(
     // One extra ring slot: the session pins the last sent frame for
     // still-picture refinement.
     cc.buffers = 4;
+    // The capture thread follows the output's size on its own, so it
+    // enforces the headless cap too, in case something other than this
+    // session resizes the output.
+    if headless {
+        cc.max_size = Some(HEADLESS_LIMIT);
+    }
+    cc
+}
+
+fn start_capture(
+    target: &Target,
+    output: &str,
+    render_node: &std::path::Path,
+    capture: CaptureMode,
+    allow_shm: bool,
+    headless: bool,
+    tx: UnboundedSender<Incoming>,
+) -> Result<Capturer> {
+    let cc = capture_config(target, output, render_node, capture, allow_shm, headless);
     let sink = Box::new(move |ev: CaptureEvent| {
         let msg = match ev {
             CaptureEvent::Frame(frame) => Incoming::Frame(frame),
@@ -1666,6 +1749,39 @@ fn start_input(target: &Target, output: &str, keymap: &str) -> Result<Input> {
     Ok(Input::start(ic, Box::new(|_| {}))?)
 }
 
+/// The largest headless output a client may ask for, whatever its Hello
+/// declared. The gliff client asks for at most 3840x2160, which is also the
+/// OpenH264 maximum. A larger output is scaled down to the encoder's maximum
+/// for the stream anyway, while each capture ring buffer grows with it.
+/// 4096 a side is the coded size the VA path assumes when the driver
+/// reports no maximum.
+const HEADLESS_LIMIT: SizeLimit = SizeLimit {
+    side: 4096,
+    pixels: 3840 * 2160,
+};
+
+/// Fit a requested headless size within the server's limits, keeping the
+/// aspect ratio and the sides even. A window too narrow to scale stays at
+/// the smallest size resize accepts.
+fn headless_cap(width: u32, height: u32) -> (u32, u32) {
+    let SizeLimit { side, pixels } = HEADLESS_LIMIT;
+    let (w, h) = (f64::from(width), f64::from(height));
+    let fit = (f64::from(side) / w)
+        .min(f64::from(side) / h)
+        .min((pixels as f64 / (w * h)).sqrt())
+        .min(1.0);
+    let w = ((w * fit) as u32).clamp(320, side);
+    let h = ((h * fit) as u32).clamp(240, side);
+    (w & !1, h & !1)
+}
+
+/// The headless mode to ask Hyprland for: the client's window within the
+/// server's cap, rounded so the scale divides it.
+fn headless_target(width: u32, height: u32, scale: f32) -> (u32, u32) {
+    let (width, height) = headless_cap(width, height);
+    hypr_ipc::clean_mode(width, height, scale)
+}
+
 fn stream_limit(encoder: (u32, u32), caps: &ClientCaps) -> Result<(u32, u32)> {
     let limit = (
         encoder.0.min(caps.max_width),
@@ -1697,5 +1813,88 @@ mod tests {
             ..caps
         };
         assert!(stream_limit((4096, 4096), &bad).is_err());
+    }
+
+    #[test]
+    fn headless_resize_is_capped_by_the_server() {
+        // Within the limits: unchanged, apart from even sides.
+        assert_eq!(headless_cap(1920, 1080), (1920, 1080));
+        assert_eq!(headless_cap(3840, 2160), (3840, 2160));
+        assert_eq!(headless_cap(2160, 3840), (2160, 3840));
+        assert_eq!(headless_cap(1921, 1081), (1920, 1080));
+        // A long side alone is cut to the side limit, the other side with it.
+        assert_eq!(headless_cap(8192, 1000), (4096, 500));
+        assert_eq!(headless_cap(1000, 8192), (500, 4096));
+        assert_eq!(headless_cap(u32::MAX, 1000), (4096, 240));
+        assert_eq!(headless_cap(1000, u32::MAX), (320, 4096));
+        // Too many pixels: scaled down, keeping the aspect ratio.
+        assert_eq!(headless_cap(16384, 16384), (2880, 2880));
+        assert_eq!(headless_cap(u32::MAX, u32::MAX), (2880, 2880));
+        assert_eq!(headless_cap(4096, 2304), (3840, 2160));
+        for (w, h) in [(4096, 4096), (4096, 3000), (3001, 4095), (u32::MAX, 2161)] {
+            let (cw, ch) = headless_cap(w, h);
+            assert!(cw <= HEADLESS_LIMIT.side && ch <= HEADLESS_LIMIT.side);
+            assert!(u64::from(cw) * u64::from(ch) <= HEADLESS_LIMIT.pixels);
+            assert!(cw.is_multiple_of(2) && ch.is_multiple_of(2));
+            assert!(cw >= 320 && ch >= 240);
+        }
+    }
+
+    #[test]
+    fn served_output_ends_threads_before_the_output() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        type Log = Rc<RefCell<Vec<&'static str>>>;
+        struct Probe(&'static str, Log);
+        impl Drop for Probe {
+            fn drop(&mut self) {
+                self.1.borrow_mut().push(self.0);
+            }
+        }
+        let served = |log: &Log| ServedOutput {
+            output: Probe("output", log.clone()),
+            capturer: Some(Probe("capturer", log.clone())),
+            input: Some(Probe("input", log.clone())),
+        };
+        let want = ["capturer", "input", "output"];
+
+        let log = Log::default();
+        drop(served(&log));
+        assert_eq!(*log.borrow(), want);
+
+        let log = Log::default();
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _served = served(&log);
+            panic!("session failed");
+        }));
+        assert!(unwound.is_err());
+        assert_eq!(*log.borrow(), want);
+    }
+
+    #[test]
+    fn headless_capture_carries_the_size_limit() {
+        let config = |headless| {
+            capture_config(
+                &Target::default(),
+                "HEADLESS-2",
+                std::path::Path::new("/dev/dri/renderD128"),
+                CaptureMode::Auto,
+                true,
+                headless,
+            )
+        };
+        assert_eq!(config(true).max_size, Some(HEADLESS_LIMIT));
+        // A mirrored monitor is the size it is.
+        assert_eq!(config(false).max_size, None);
+    }
+
+    #[test]
+    fn headless_target_applies_the_cap_before_rounding() {
+        assert_eq!(headless_target(1920, 1080, 1.0), (1920, 1080));
+        assert_eq!(headless_target(1366, 768, 1.25), (1360, 760));
+        assert_eq!(headless_target(16384, 16384, 1.0), (2880, 2880));
+        assert_eq!(headless_target(u32::MAX, u32::MAX, 1.5), (2880, 2880));
+        assert_eq!(headless_target(8192, 4608, 1.25), (3840, 2160));
     }
 }
