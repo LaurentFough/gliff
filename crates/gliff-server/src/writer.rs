@@ -92,11 +92,27 @@ impl Queue {
                         self.packets.remove(i);
                     }
                 }
+                // Preserve control progress (notably heartbeat Pings) and
+                // existing audio order before choosing a waiting video to
+                // overtake. Otherwise continuous audio can starve them.
+                let after_control = self
+                    .packets
+                    .iter()
+                    .rposition(|(m, _)| !audio(m) && !matches!(m, ServerMsg::VideoFrame { .. }))
+                    .map_or(0, |index| index + 1);
+                let after_audio = self
+                    .packets
+                    .iter()
+                    .rposition(|(m, _)| audio(m))
+                    .map_or(0, |index| index + 1);
+                let first = after_control.max(after_audio);
                 let at = self
                     .packets
                     .iter()
-                    .position(|(m, _)| matches!(m, ServerMsg::VideoFrame { .. }))
-                    .unwrap_or(self.packets.len());
+                    .enumerate()
+                    .skip(first)
+                    .find(|(_, (m, _))| matches!(m, ServerMsg::VideoFrame { .. }))
+                    .map_or(self.packets.len(), |(index, _)| index);
                 self.packets.insert(at, (msg, payloads));
                 return;
             }
@@ -289,6 +305,43 @@ mod tests {
             queue.packets[0].0,
             ServerMsg::ClipboardData { id: 0, .. }
         ));
+    }
+
+    #[test]
+    fn continuous_audio_cannot_starve_control_messages_or_reorder_starts() {
+        let mut queue = Queue::default();
+        let (msg, payloads) = video(1);
+        queue.push(msg, payloads);
+        queue.push(
+            ServerMsg::Pong {
+                t: 1,
+                server_now_ms: 2,
+            },
+            Vec::new(),
+        );
+        queue.push(
+            ServerMsg::AudioStart {
+                codec: gliff_proto::AudioCodec::Opus,
+                sample_rate: 48000,
+                channels: 2,
+            },
+            Vec::new(),
+        );
+        for seq in 0..100 {
+            queue.push(ServerMsg::AudioFrame { seq, data_len: 1 }, vec![vec![0]]);
+        }
+        assert!(matches!(queue.packets[0].0, ServerMsg::VideoFrame { .. }));
+        assert!(matches!(queue.packets[1].0, ServerMsg::Pong { .. }));
+        assert!(matches!(queue.packets[2].0, ServerMsg::AudioStart { .. }));
+        let frames: Vec<_> = queue
+            .packets
+            .iter()
+            .filter_map(|(msg, _)| match msg {
+                ServerMsg::AudioFrame { seq, .. } => Some(*seq),
+                _ => None,
+            })
+            .collect();
+        assert!(frames.windows(2).all(|pair| pair[0] < pair[1]));
     }
 
     #[test]

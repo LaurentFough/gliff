@@ -60,6 +60,7 @@ pub struct Jitter {
     starved: Option<f64>,
     fade_out: usize,
     last: [f32; CHANNELS],
+    fade_from: [f32; CHANNELS],
 }
 
 impl Jitter {
@@ -80,6 +81,7 @@ impl Jitter {
             starved: None,
             fade_out: 0,
             last: [0.0; CHANNELS],
+            fade_from: [0.0; CHANNELS],
         }
     }
 
@@ -98,6 +100,23 @@ impl Jitter {
 
     pub fn underruns(&self) -> u64 {
         self.underruns
+    }
+
+    /// Begin a new stream with no old queued samples. Fade the last output
+    /// sample to silence so a restart is not an abrupt discontinuity.
+    pub fn restart(&mut self) {
+        self.buf.clear();
+        self.pos = 1.0;
+        self.playing = false;
+        self.target = START_TARGET;
+        self.ratio = self.base_ratio;
+        self.smoothed = 0.0;
+        self.underruns = 0;
+        self.calm = 0;
+        self.fade = 0;
+        self.starved = None;
+        self.fade_from = self.last;
+        self.fade_out = FADE;
     }
 
     /// Add interleaved stereo samples at the stream rate.
@@ -175,6 +194,7 @@ impl Jitter {
             self.playing = false;
             self.calm = 0;
             self.starved = Some(0.0);
+            self.fade_from = self.last;
             self.fade_out = FADE;
             return self.silence();
         }
@@ -205,11 +225,13 @@ impl Jitter {
 
     fn silence(&mut self) -> [f32; CHANNELS] {
         if self.fade_out == 0 {
-            return [0.0; CHANNELS];
+            self.last = [0.0; CHANNELS];
+            return self.last;
         }
         self.fade_out -= 1;
         let gain = self.fade_out as f32 / FADE as f32;
-        self.last.map(|sample| sample * gain)
+        self.last = self.fade_from.map(|sample| sample * gain);
+        self.last
     }
 }
 
@@ -360,5 +382,32 @@ mod pause_tests {
         let left: Vec<_> = out.chunks_exact(CHANNELS).map(|f| f[0]).collect();
         assert!(left.windows(2).all(|pair| (pair[1] - pair[0]).abs() < 0.02));
         assert_eq!(*left.last().unwrap(), 0.0);
+    }
+}
+
+#[cfg(test)]
+mod restart_tests {
+    use super::*;
+
+    #[test]
+    fn repeated_restarts_clear_old_audio_without_a_discontinuity() {
+        let mut jitter = Jitter::new(SAMPLE_RATE);
+        jitter.push(&vec![0.5; (START_TARGET + 1000) * CHANNELS]);
+        let mut initial = vec![0.0; 256 * CHANNELS];
+        jitter.render(&mut initial, CHANNELS);
+        let previous = *initial.last().unwrap();
+        assert!(previous > 0.4);
+        jitter.restart();
+        assert_eq!(jitter.buffered_ms(), 0.0);
+        let mut first = vec![0.0; 32 * CHANNELS];
+        jitter.render(&mut first, CHANNELS);
+        assert!((first[0] - previous).abs() < 0.02);
+        let previous = *first.last().unwrap();
+        jitter.restart();
+        let mut second = vec![0.0; (FADE + 10) * CHANNELS];
+        jitter.render(&mut second, CHANNELS);
+        assert!((second[0] - previous).abs() < 0.02);
+        assert_eq!(*second.last().unwrap(), 0.0);
+        assert_eq!(jitter.underruns(), 0);
     }
 }

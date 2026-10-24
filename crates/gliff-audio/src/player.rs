@@ -15,7 +15,6 @@ pub struct Player {
     /// the owner opens a new player on the new default.
     failed: Arc<AtomicBool>,
     _stream: cpal::Stream,
-    rate: u32,
 }
 
 impl Player {
@@ -101,13 +100,12 @@ impl Player {
             jitter,
             failed,
             _stream: stream,
-            rate,
         })
     }
 
     fn reset(&self) {
         if let Ok(mut jitter) = self.jitter.lock() {
-            *jitter = Jitter::new(self.rate);
+            jitter.restart();
         }
     }
 
@@ -138,7 +136,8 @@ impl Player {
 pub struct Sink {
     decoder: Option<crate::Decoder>,
     player: Option<Player>,
-    opening: Option<std::sync::mpsc::Receiver<Result<Player>>>,
+    opening: Option<Opening<Player>>,
+    open_lock: Arc<Mutex<()>>,
     /// When the device last failed to open, so a missing one is not retried
     /// on every packet.
     failed_at: Option<std::time::Instant>,
@@ -230,7 +229,7 @@ impl Sink {
         if self.player.is_some() || self.failed_at.is_some_and(|t| t.elapsed() < REOPEN_AFTER) {
             return;
         }
-        match open_in_background(Player::open) {
+        match open_in_background(Player::open, self.open_lock.clone()) {
             Ok(opening) => self.opening = Some(opening),
             Err(e) => {
                 tracing::warn!(error = %e, "cannot start the audio output worker");
@@ -248,16 +247,51 @@ fn note_output_error(failed: &AtomicBool, error: &cpal::Error) {
     }
 }
 
+struct Opening<T> {
+    receiver: std::sync::mpsc::Receiver<Result<T>>,
+    cancelled: Arc<AtomicBool>,
+}
+
+impl<T> Opening<T> {
+    fn try_recv(&self) -> std::result::Result<Result<T>, std::sync::mpsc::TryRecvError> {
+        self.receiver.try_recv()
+    }
+}
+
+impl<T> Drop for Opening<T> {
+    fn drop(&mut self) {
+        self.cancelled.store(true, Ordering::Release);
+    }
+}
+
 fn open_in_background<T: Send + 'static>(
     open: impl FnOnce() -> Result<T> + Send + 'static,
-) -> Result<std::sync::mpsc::Receiver<Result<T>>> {
-    let (tx, rx) = std::sync::mpsc::channel();
+    gate: Arc<Mutex<()>>,
+) -> Result<Opening<T>> {
+    let (tx, receiver) = std::sync::mpsc::channel();
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let worker_cancelled = cancelled.clone();
     std::thread::Builder::new()
         .name("gliff-audio-output".into())
         .spawn(move || {
-            let _ = tx.send(open());
+            // An uncancellable native open may still be running after mute.
+            // Serialize its completion and cleanup before the next open, and
+            // skip obsolete requests that were cancelled while queued here.
+            let _guard = gate
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if worker_cancelled.load(Ordering::Acquire) {
+                return;
+            }
+            let result = open();
+            // On cancellation, send fails and drops any Player while the gate
+            // is still held, so an exclusive ALSA device is closed first.
+            let _ = tx.send(result);
         })?;
-    Ok(rx)
+    Ok(Opening {
+        receiver,
+        cancelled,
+    })
 }
 
 #[cfg(test)]
@@ -279,10 +313,13 @@ mod tests {
     #[test]
     fn a_slow_device_open_does_not_block_the_caller() {
         let (release, wait) = std::sync::mpsc::channel();
-        let result = open_in_background(move || {
-            wait.recv().unwrap();
-            Ok(42)
-        })
+        let result = open_in_background(
+            move || {
+                wait.recv().unwrap();
+                Ok(42)
+            },
+            Arc::new(Mutex::new(())),
+        )
         .unwrap();
         assert!(matches!(
             result.try_recv(),
@@ -291,6 +328,60 @@ mod tests {
         release.send(()).unwrap();
         assert_eq!(
             result
+                .receiver
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .unwrap()
+                .unwrap(),
+            42
+        );
+    }
+}
+
+#[cfg(test)]
+mod open_cancellation_tests {
+    use super::*;
+
+    #[test]
+    fn cancelled_opens_release_exclusive_devices_before_the_next_attempt() {
+        struct Device(Arc<AtomicBool>);
+        impl Drop for Device {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::Release);
+            }
+        }
+        let gate = Arc::new(Mutex::new(()));
+        let closed = Arc::new(AtomicBool::new(false));
+        let (started, ready) = std::sync::mpsc::channel();
+        let (release, wait) = std::sync::mpsc::channel();
+        let first_closed = closed.clone();
+        let first = open_in_background(
+            move || {
+                started.send(()).unwrap();
+                wait.recv().unwrap();
+                Ok(Device(first_closed))
+            },
+            gate.clone(),
+        )
+        .unwrap();
+        ready
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        drop(first);
+        let second = open_in_background(
+            move || {
+                assert!(
+                    closed.load(Ordering::Acquire),
+                    "previous exclusive device is still open"
+                );
+                Ok(42)
+            },
+            gate,
+        )
+        .unwrap();
+        release.send(()).unwrap();
+        assert_eq!(
+            second
+                .receiver
                 .recv_timeout(std::time::Duration::from_secs(2))
                 .unwrap()
                 .unwrap(),

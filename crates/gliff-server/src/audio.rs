@@ -516,6 +516,17 @@ impl Sound {
         self.retry_delay = (delay * 2).min(std::time::Duration::from_secs(30));
     }
 
+    fn capture_stopped(&mut self, started: std::time::Instant, pulse: bool) {
+        let healthy = started.elapsed() >= std::time::Duration::from_secs(2);
+        if healthy {
+            // A quiet but long-lived recorder is healthy even when it has
+            // emitted no packets since the previous recovery.
+            self.retry_delay = std::time::Duration::from_secs(1);
+        }
+        self.prefer_pulse = !pulse && !healthy;
+        self.schedule_retry();
+    }
+
     pub fn is_on(&self) -> bool {
         self.wanted
     }
@@ -538,9 +549,7 @@ impl Sound {
                 // without a running PipeWire daemon (or without --raw).
                 // Try the explicit monitor fallback; healthy streams that
                 // later fail instead retry their original PipeWire path.
-                self.prefer_pulse =
-                    !capture.pulse && capture.started.elapsed() < std::time::Duration::from_secs(2);
-                self.schedule_retry();
+                self.capture_stopped(capture.started, capture.pulse);
             } else if self.wanted {
                 self.start(writer);
             }
@@ -926,5 +935,29 @@ mod pulse_fallback_test {
             assert!((0.005..0.05).contains(&(energy / samples as f64)));
             sound.set(false, &writer);
         });
+    }
+}
+
+#[cfg(test)]
+mod healthy_capture_test {
+    use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn a_healthy_quiet_capture_resets_previous_failure_backoff() {
+        let mut sound = Sound {
+            wanted: true,
+            retry_delay: std::time::Duration::from_secs(30),
+            ..Default::default()
+        };
+        let before = tokio::time::Instant::now();
+        sound.capture_stopped(
+            std::time::Instant::now() - std::time::Duration::from_secs(3),
+            false,
+        );
+        assert_eq!(
+            sound.retry_at,
+            Some(before + std::time::Duration::from_secs(1))
+        );
+        assert!(!sound.prefer_pulse);
     }
 }
