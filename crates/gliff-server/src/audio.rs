@@ -120,6 +120,9 @@ fn recorder() -> Result<(Child, Option<Linker>)> {
     };
     let mut pw = command("pw-record");
     pw.args([
+        // Without it, pw-record writes an AU file to stdout: a header, and
+        // big-endian samples on PipeWire 1.6.10, not raw little-endian ones.
+        "--raw",
         "--rate",
         &rate,
         "--channels",
