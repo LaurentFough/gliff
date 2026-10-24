@@ -1604,8 +1604,8 @@ impl SessionOutput {
 
 impl Drop for SessionOutput {
     fn drop(&mut self) {
-        // Join the poller before removing its output, so a late DPMS request
-        // cannot target a removed monitor (or fall back to waking all monitors).
+        // Join the poller before removing its output, so every in-flight
+        // DPMS request finishes while we still own the monitor.
         drop(self.awake.take());
         if let Some(instance) = &self.headless {
             let _ = instance.remove_output(&self.name);
