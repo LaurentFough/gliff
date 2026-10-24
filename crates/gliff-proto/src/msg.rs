@@ -46,6 +46,10 @@ pub fn features() -> Vec<String> {
 pub const ERROR_VERSION: u16 = 1;
 pub const ERROR_NO_CHROMA: u16 = 2;
 pub const ERROR_NO_CODEC: u16 = 3;
+/// The server could not start the session: no Hyprland instance, no such
+/// output, or the video, capture or input pipeline failed to start. It is
+/// outside the incompatible range, so a client may reconnect.
+pub const ERROR_SETUP: u16 = 256;
 
 pub fn is_incompatible(code: u16) -> bool {
     (1..256).contains(&code)

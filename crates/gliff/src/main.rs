@@ -110,10 +110,16 @@ struct App {
     /// The address bar: Enter connects to the machine typed.
     entry: gtk::Entry,
     transfers: Rc<clipboard_ui::TransferBars>,
+    /// The last number given to a worker. Paste bars are keyed by it, so
+    /// jobs of different connections never share a row.
+    connections: Cell<u64>,
     /// Every running connection, in the order they were opened.
     sessions: RefCell<Vec<Rc<Session>>>,
     /// The session the window shows and sends input to.
     active: RefCell<Option<Rc<Session>>>,
+    /// Offers the local clipboard to the shown session; set once the
+    /// clipboard is watched.
+    local_clipboard: RefCell<Option<clipboard_ui::LocalSelection>>,
     /// Size of the video widget in device pixels, rounded down to even.
     view_size: Cell<(u32, u32)>,
     view_scale: Cell<f64>,
@@ -140,8 +146,12 @@ struct Session {
     /// Bumped by every `start_session` and by `stop_session`, so pollers and
     /// delayed reconnects of an earlier worker can tell they are stale.
     generation: Cell<u64>,
+    /// The current worker's number from `App::connections`.
+    conn: Cell<u64>,
     /// Consecutive failed connection attempts, reset on a successful connect.
     retries: Cell<u32>,
+    /// Retained across slow reconnect attempts until a connection succeeds.
+    last_error: RefCell<Option<String>>,
     /// Automatic reconnects have given up; selecting the tab tries again.
     gave_up: Cell<bool>,
     /// Recorded in the config on the first successful connect.
@@ -189,7 +199,9 @@ impl Session {
             endpoint,
             input_tx: RefCell::new(None),
             generation: Cell::new(0),
+            conn: Cell::new(0),
             retries: Cell::new(0),
+            last_error: RefCell::new(None),
             gave_up: Cell::new(false),
             remembered: Cell::new(false),
             connected: Cell::new(false),
@@ -399,8 +411,10 @@ fn build_ui(app: &adw::Application, cli: &Cli) {
         add_revealer,
         entry: entry.clone(),
         transfers,
+        connections: Cell::new(0),
         sessions: RefCell::new(Vec::new()),
         active: RefCell::new(None),
+        local_clipboard: RefCell::new(None),
         view_size: Cell::new((0, 0)),
         view_scale: Cell::new(1.0),
         pressed_keys: RefCell::new(BTreeSet::new()),
@@ -459,20 +473,32 @@ fn build_ui(app: &adw::Application, cli: &Cli) {
         );
     }
 
-    // Offer every local clipboard change to the servers; our own proxy for
-    // a server's selection does not count as a change.
+    // Offer every local clipboard change to the shown server; our own proxy
+    // for a server's selection does not count as a change.
     {
-        let ui = ui.clone();
-        clipboard_ui::watch_local(move || {
-            if ui.cli.no_clipboard {
-                return Vec::new();
-            }
-            ui.sessions
-                .borrow()
-                .iter()
-                .filter_map(|s| s.input_tx.borrow().clone())
-                .collect()
-        });
+        let running = Rc::downgrade(&ui);
+        let shown = Rc::downgrade(&ui);
+        let watch = clipboard_ui::watch_local(
+            move || {
+                running
+                    .upgrade()
+                    .map(|ui| running_inputs(&ui.sessions.borrow(), ui.cli.no_clipboard))
+                    .unwrap_or_default()
+            },
+            move || {
+                shown
+                    .upgrade()
+                    .map(|ui| {
+                        local_offer_targets(
+                            &ui.sessions.borrow(),
+                            active(&ui).as_ref(),
+                            ui.cli.no_clipboard,
+                        )
+                    })
+                    .unwrap_or_default()
+            },
+        );
+        *ui.local_clipboard.borrow_mut() = watch;
     }
 
     window.present();
@@ -617,6 +643,116 @@ fn is_active(ui: &App, s: &Rc<Session>) -> bool {
         .borrow()
         .as_ref()
         .is_some_and(|a| Rc::ptr_eq(a, s))
+}
+
+/// Every running session's input. A local clipboard change revokes the
+/// offer in all of them. Only the shown session can hold one, since a switch
+/// withdraws it, but revoking every session keeps that from resting on the
+/// switch alone.
+fn running_inputs(sessions: &[Rc<Session>], no_clipboard: bool) -> Vec<OutSender> {
+    if no_clipboard {
+        return Vec::new();
+    }
+    sessions
+        .iter()
+        .filter_map(|s| s.input_tx.borrow().clone())
+        .collect()
+}
+
+/// Who the local clipboard is offered to: only the shown session, so a host
+/// in a background tab cannot read what is copied while it is hidden.
+fn local_offer_targets(
+    sessions: &[Rc<Session>],
+    active: Option<&Rc<Session>>,
+    no_clipboard: bool,
+) -> Vec<OutSender> {
+    if no_clipboard {
+        return Vec::new();
+    }
+    sessions
+        .iter()
+        .filter(|s| active.is_some_and(|a| Rc::ptr_eq(a, s)))
+        .filter_map(|s| s.input_tx.borrow().clone())
+        .collect()
+}
+
+/// Withdraw the local clipboard from a session that is no longer shown. The
+/// revocation refuses the host's further requests and aborts what it is
+/// being served. The empty offer after it tells the host to drop the
+/// selection it advertised for us, so its applications stop seeing one.
+fn revoke_local_offer(previous: Option<&Rc<Session>>, no_clipboard: bool) {
+    if no_clipboard {
+        return;
+    }
+    if let Some(tx) = previous.and_then(|s| s.input_tx.borrow().clone()) {
+        let _ = tx.send(clipboard::ToWorker::RevokeLocal);
+        // Nothing can be read from an empty offer, so its generation is moot.
+        let _ = tx.send(clipboard::ToWorker::LocalOffer {
+            mime_types: Vec::new(),
+            files: Default::default(),
+            generation: 0,
+        });
+    }
+}
+
+/// Move the local clipboard to the session just shown: withdraw it from the
+/// one shown before, then offer the current selection again, which reaches
+/// only the shown session. The withdrawal is queued at once, and the new offer
+/// only after the selection has been read.
+fn move_local_offer(
+    previous: Option<&Rc<Session>>,
+    no_clipboard: bool,
+    watch: Option<&clipboard_ui::LocalSelection>,
+) {
+    if no_clipboard {
+        return;
+    }
+    revoke_local_offer(previous, no_clipboard);
+    if let Some(watch) = watch {
+        watch.reoffer();
+    }
+}
+
+/// Whether a server's request may read the local clipboard now. Its worker
+/// may have accepted the request before a tab switch or a new copy, so the
+/// session must still be shown and its offer still the latest.
+fn may_read_local(
+    active: Option<&Rc<Session>>,
+    s: &Rc<Session>,
+    no_clipboard: bool,
+    generation: u64,
+    watch: Option<&clipboard_ui::LocalSelection>,
+) -> bool {
+    !no_clipboard
+        && active.is_some_and(|a| Rc::ptr_eq(a, s))
+        && watch.is_some_and(|w| w.generation() == generation)
+}
+
+/// Serve a server's read of the local clipboard. `shown` gives the shown
+/// session and the clipboard watcher when the read starts, which may be
+/// after a tab switch or a new copy.
+fn serve_local_read(
+    s: &Rc<Session>,
+    no_clipboard: bool,
+    mime_type: String,
+    generation: u64,
+    reply: tokio::sync::mpsc::Sender<std::io::Result<bytes::Bytes>>,
+    shown: impl Fn() -> (Option<Rc<Session>>, Option<clipboard_ui::LocalSelection>) + 'static,
+) {
+    if no_clipboard {
+        return;
+    }
+    let s = s.clone();
+    clipboard_ui::read_local(mime_type, reply, move || {
+        let (active, watch) = shown();
+        may_read_local(
+            active.as_ref(),
+            &s,
+            no_clipboard,
+            generation,
+            watch.as_ref(),
+        )
+    });
 }
 
 fn find_session(ui: &App, name: &str) -> Option<Rc<Session>> {
@@ -827,7 +963,12 @@ fn open_session(ui: &Rc<App>, endpoint: Endpoint) {
 fn show_session(ui: &Rc<App>, s: &Rc<Session>) {
     if !is_active(ui, s) {
         release_pressed_keys(ui);
-        *ui.active.borrow_mut() = Some(s.clone());
+        let previous = ui.active.replace(Some(s.clone()));
+        move_local_offer(
+            previous.as_ref(),
+            ui.cli.no_clipboard,
+            ui.local_clipboard.borrow().as_ref(),
+        );
         if matches!(s.endpoint, Endpoint::Ssh(_)) {
             let mut config = Config::load(&ui.config_path);
             config.shown = Some(s.name.clone());
@@ -852,7 +993,8 @@ fn show_session(ui: &Rc<App>, s: &Rc<Session>) {
 /// Show no session: a black screen, as on a fresh window.
 fn show_nothing(ui: &Rc<App>) {
     release_pressed_keys(ui);
-    ui.active.borrow_mut().take();
+    let previous = ui.active.take();
+    revoke_local_offer(previous.as_ref(), ui.cli.no_clipboard);
     ui.window.set_title(Some("Gliff"));
     show_status(ui, "Not connected");
     ui.stats.set_text("");
@@ -875,6 +1017,7 @@ fn stop_session(ui: &Rc<App>, name: &str) {
     // dropping the sender closes the worker's input, which ends it.
     s.generation.set(s.generation.get() + 1);
     s.input_tx.borrow_mut().take();
+    ui.transfers.clear_connection(s.conn.get());
     s.last_frame.borrow_mut().take();
     // A machine stopped by hand stays stopped when the window reopens.
     if matches!(s.endpoint, Endpoint::Ssh(_)) {
@@ -968,6 +1111,7 @@ fn show_disconnected(ui: &Rc<App>, s: &Rc<Session>) {
     s.stream_view.set((0, 0));
     s.server_view.set((0, 0));
     s.cursor.borrow_mut().take();
+    ui.transfers.clear_connection(s.conn.get());
     set_stats(ui, s, "");
     if is_active(ui, s) {
         ui.frame.clear();
@@ -987,7 +1131,15 @@ fn start_session(ui: Rc<App>, s: Rc<Session>) {
     s.reset_resize();
     let generation = s.generation.get() + 1;
     s.generation.set(generation);
-    set_status(&ui, &s, "Connecting…");
+    ui.transfers.clear_connection(s.conn.get());
+    let conn = ui.connections.get() + 1;
+    ui.connections.set(conn);
+    s.conn.set(conn);
+    set_status(
+        &ui,
+        &s,
+        &connecting_status(s.last_error.borrow().as_deref()),
+    );
 
     let endpoint = s.endpoint.clone();
     let video = gliff_sw::VideoMode::resolve(ui.cli.video.as_deref());
@@ -1028,20 +1180,50 @@ fn remember_machine(ui: &Rc<App>, s: &Session) {
 }
 
 /// Schedule a reconnect after a short delay, unless we have exhausted retries.
-fn schedule_reconnect(ui: Rc<App>, s: Rc<Session>, generation: u64) {
+/// The status keeps the error that ended the connection, if any, so it stays
+/// on screen while the reconnects run.
+fn schedule_reconnect(ui: Rc<App>, s: Rc<Session>, generation: u64, error: Option<&str>) {
     let n = s.retries.get() + 1;
     s.retries.set(n);
+    if let Some(error) = error {
+        *s.last_error.borrow_mut() = Some(error.to_owned());
+    }
+    set_status(
+        &ui,
+        &s,
+        &reconnect_status(s.last_error.borrow().as_deref(), n),
+    );
     if n > MAX_RETRIES {
-        set_status(&ui, &s, "Disconnected — click the tab to reconnect");
         s.gave_up.set(true);
         return;
     }
-    set_status(&ui, &s, &format!("Reconnecting… (attempt {n})"));
     glib::timeout_add_local_once(Duration::from_millis(1500), move || {
         if s.generation.get() == generation {
             start_session(ui, s);
         }
     });
+}
+
+/// Keep the latest failure visible while a new connection attempt runs.
+fn connecting_status(error: Option<&str>) -> String {
+    match error {
+        Some(e) => format!("Error: {e}\nConnecting…"),
+        None => "Connecting…".into(),
+    }
+}
+
+/// The status for reconnect `attempt`, under the error that ended the
+/// connection, if any.
+fn reconnect_status(error: Option<&str>, attempt: u32) -> String {
+    let next = if attempt > MAX_RETRIES {
+        "Disconnected — click the tab to reconnect".to_string()
+    } else {
+        format!("Reconnecting… (attempt {attempt})")
+    };
+    match error {
+        Some(e) => format!("Error: {e}\n{next}"),
+        None => next,
+    }
 }
 
 /// Pull decoded frames on the GTK main loop, latest-wins. The shown session
@@ -1151,6 +1333,7 @@ fn poll_status(ui: Rc<App>, s: Rc<Session>, rx: Receiver<Status>, generation: u6
                     s.fps_cap.set(fps_cap);
                     s.headless.set(headless);
                     s.resize_requested.set((0, 0));
+                    s.last_error.borrow_mut().take();
                     s.retries.set(0);
                     s.gave_up.set(false);
                     if !s.connected.replace(true) {
@@ -1196,23 +1379,21 @@ fn poll_status(ui: Rc<App>, s: Rc<Session>, rx: Receiver<Status>, generation: u6
                         ),
                     );
                 }
-                Status::Cursor {
-                    width,
-                    height,
-                    hot_x,
-                    hot_y,
-                    argb,
-                } => set_remote_cursor(
-                    &ui,
-                    &s,
-                    CursorImage {
-                        width,
-                        height,
-                        hot_x,
-                        hot_y,
-                        argb: &argb,
-                    },
-                ),
+                Status::Cursor(latest) => {
+                    if let Some(shape) = latest.take() {
+                        set_remote_cursor(
+                            &ui,
+                            &s,
+                            CursorImage {
+                                width: shape.width,
+                                height: shape.height,
+                                hot_x: shape.hot_x,
+                                hot_y: shape.hot_y,
+                                argb: &shape.argb,
+                            },
+                        )
+                    }
+                }
                 // Only the shown machine may take over the local clipboard.
                 Status::ClipboardOffer {
                     serial,
@@ -1225,14 +1406,29 @@ fn poll_status(ui: Rc<App>, s: Rc<Session>, rx: Receiver<Status>, generation: u6
                         }
                     }
                 }
-                Status::ClipboardRead { mime_type, reply } => {
-                    if !ui.cli.no_clipboard {
-                        clipboard_ui::read_local(mime_type, reply)
-                    }
+                Status::ClipboardRead {
+                    mime_type,
+                    generation,
+                    reply,
+                } => {
+                    let shown_by = ui.clone();
+                    serve_local_read(
+                        &s,
+                        ui.cli.no_clipboard,
+                        mime_type,
+                        generation,
+                        reply,
+                        move || (active(&shown_by), shown_by.local_clipboard.borrow().clone()),
+                    );
                 }
                 Status::ClipboardTransfer { id, progress } => {
+                    let conn = s.conn.get();
                     let cancel_via = s.clone();
-                    ui.transfers.update(id, &progress, move |id| {
+                    ui.transfers.update(conn, id, &progress, move |id| {
+                        // After a reconnect the id belongs to another job.
+                        if cancel_via.conn.get() != conn {
+                            return;
+                        }
                         if let Some(tx) = cancel_via.input_tx.borrow().clone() {
                             let _ = tx.send(clipboard::ToWorker::CancelTransfer(id));
                         }
@@ -1240,12 +1436,12 @@ fn poll_status(ui: Rc<App>, s: Rc<Session>, rx: Receiver<Status>, generation: u6
                 }
                 Status::Error(e) => {
                     tracing::error!(machine = %s.name, error = %e, "connection failed");
-                    set_status(&ui, &s, &format!("Error: {e}"));
                     show_disconnected(&ui, &s);
-                    schedule_reconnect(ui.clone(), s.clone(), generation);
+                    schedule_reconnect(ui.clone(), s.clone(), generation, Some(&e));
                     return glib::ControlFlow::Break;
                 }
                 Status::Incompatible(message) => {
+                    *s.last_error.borrow_mut() = Some(message.clone());
                     tracing::error!(machine = %s.name, error = %message, "incompatible server");
                     set_status(&ui, &s, &message);
                     show_disconnected(&ui, &s);
@@ -1254,7 +1450,7 @@ fn poll_status(ui: Rc<App>, s: Rc<Session>, rx: Receiver<Status>, generation: u6
                 }
                 Status::Closed => {
                     show_disconnected(&ui, &s);
-                    schedule_reconnect(ui.clone(), s.clone(), generation);
+                    schedule_reconnect(ui.clone(), s.clone(), generation, None);
                     return glib::ControlFlow::Break;
                 }
             }
@@ -1301,8 +1497,18 @@ fn remote_cursor(image: CursorImage) -> Option<gdk::Cursor> {
         hot_y,
         argb,
     } = image;
-    let needed = width as u64 * height as u64 * 4;
-    if width == 0 || height == 0 || width > 1024 || height > 1024 || (argb.len() as u64) < needed {
+    if width == 0 || height == 0 || width > 1024 || height > 1024 {
+        return None;
+    }
+    // GTK refuses a hotspot outside the image and returns no cursor, which
+    // the bindings would wrap as a valid one.
+    if !(0..width as i32).contains(&hot_x) || !(0..height as i32).contains(&hot_y) {
+        return None;
+    }
+    let needed = (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|n| n.checked_mul(4))?;
+    if argb.len() < needed {
         return None;
     }
     if !has_visible_shape(argb) {
@@ -1427,13 +1633,17 @@ impl ReleaseHotkey {
         &self,
         keyval: gdk::Key,
         state: gdk::ModifierType,
+        unshifted: Option<gdk::Key>,
         last_tap: &RefCell<Option<Instant>>,
     ) -> bool {
         match self {
             Self::None => false,
-            Self::Chord { mods, keyval: k } => keyval == *k && (state & CHORD_MODS) == *mods,
+            Self::Chord { mods, keyval: k } => {
+                (same_key(keyval, *k) || unshifted.is_some_and(|base| same_key(base, *k)))
+                    && (state & CHORD_MODS) == *mods
+            }
             Self::DoubleTap { keyval: k, within } => {
-                if keyval != *k {
+                if !same_key(keyval, *k) && !unshifted.is_some_and(|base| same_key(base, *k)) {
                     return false;
                 }
                 let now = Instant::now();
@@ -1486,6 +1696,21 @@ impl ReleaseHotkey {
             }
         }
     }
+}
+
+/// True if a pressed keyval is the hotkey's key. GTK reports the keyval with
+/// Shift and Caps Lock applied, so Ctrl+Shift+q arrives as `Q` and Shift+Tab
+/// as `ISO_Left_Tab`; normalize those direct keyvals. The event handler also
+/// translates the hardware key without Shift/Lock for punctuation keys.
+fn same_key(pressed: gdk::Key, key: gdk::Key) -> bool {
+    let unshifted = |k: gdk::Key| {
+        if k == gdk::Key::ISO_Left_Tab {
+            gdk::Key::Tab
+        } else {
+            k.to_lower()
+        }
+    };
+    unshifted(pressed) == unshifted(key)
 }
 
 /// Resolve a key name to a `gdk::Key`, accepting lower-case and a few aliases.
@@ -1558,6 +1783,15 @@ fn track_key(ui: &App, code: u32, pressed: bool) -> bool {
     }
 }
 
+// GTK surface deltas are already logical pixels, not wheel detents.
+fn scroll_delta(delta: f64, surface: bool) -> (f64, Option<i32>) {
+    if surface {
+        (delta, None)
+    } else {
+        (delta * 15.0, Some(delta.signum() as i32))
+    }
+}
+
 fn install_input_handlers(
     ui: &Rc<App>,
     video: &gtk::Widget,
@@ -1578,8 +1812,21 @@ fn install_input_handlers(
         let window = window.clone();
         let hotkey = hotkey.clone();
         let last_tap = last_tap.clone();
-        key.connect_key_pressed(move |_, keyval, keycode, state| {
-            if hotkey.matches(keyval, state, &last_tap) {
+        key.connect_key_pressed(move |controller, keyval, keycode, state| {
+            let group = controller
+                .current_event()
+                .and_then(|event| {
+                    event
+                        .downcast_ref::<gdk::KeyEvent>()
+                        .map(|key| key.layout())
+                })
+                .unwrap_or(0) as i32;
+            let base_state =
+                state & !(gdk::ModifierType::SHIFT_MASK | gdk::ModifierType::LOCK_MASK);
+            let unshifted = gtk::prelude::WidgetExt::display(&window)
+                .translate_key(keycode, base_state, group)
+                .map(|(base, _, _, _)| base);
+            if hotkey.matches(keyval, state, unshifted, &last_tap) {
                 release_pressed_keys(&ui);
                 release_capture(&ui, &window);
                 return glib::Propagation::Stop;
@@ -1653,50 +1900,60 @@ fn install_input_handlers(
     }
     video.add_controller(motion);
 
-    // Buttons.
-    let click = gtk::GestureClick::new();
-    click.set_button(0); // any button
+    // Buttons, each press and release as it comes. A click gesture follows
+    // one button at a time and cancels it when a second button is pressed,
+    // or, for back, forward and other buttons past the fifth, when the
+    // pointer moves; the release then never reaches the remote, which keeps
+    // the button down.
+    let buttons = gtk::EventControllerLegacy::new();
     {
         let ui = ui.clone();
         let video = video.clone();
-        click.connect_pressed(move |g, _, _, _| {
-            ui.released.set(false);
-            video.grab_focus();
-            send(
-                &ui,
-                ClientMsg::PointerButton {
-                    button: evdev_button(g.current_button()),
-                    pressed: true,
-                },
+        buttons.connect_event(move |_, event| {
+            let kind = event.event_type();
+            let button = match kind {
+                gdk::EventType::ButtonPress | gdk::EventType::ButtonRelease => event
+                    .downcast_ref::<gdk::ButtonEvent>()
+                    .map(|e| evdev_button(e.button())),
+                // The first finger on a touch screen is the left button.
+                gdk::EventType::TouchBegin
+                | gdk::EventType::TouchEnd
+                | gdk::EventType::TouchCancel => event
+                    .downcast_ref::<gdk::TouchEvent>()
+                    .filter(|e| e.is_emulating_pointer())
+                    .map(|_| evdev_button(1)),
+                _ => None,
+            };
+            let Some(button) = button else {
+                return glib::Propagation::Proceed;
+            };
+            let pressed = matches!(
+                kind,
+                gdk::EventType::ButtonPress | gdk::EventType::TouchBegin
             );
+            if pressed {
+                ui.released.set(false);
+                video.grab_focus();
+            }
+            send(&ui, ClientMsg::PointerButton { button, pressed });
+            glib::Propagation::Proceed
         });
     }
-    {
-        let ui = ui.clone();
-        click.connect_released(move |g, _, _, _| {
-            send(
-                &ui,
-                ClientMsg::PointerButton {
-                    button: evdev_button(g.current_button()),
-                    pressed: false,
-                },
-            );
-        });
-    }
-    video.add_controller(click);
+    video.add_controller(buttons);
 
     // Scroll.
     let scroll = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::BOTH_AXES);
     {
         let ui = ui.clone();
-        scroll.connect_scroll(move |_, dx, dy| {
+        scroll.connect_scroll(move |controller, dx, dy| {
+            let surface = controller.unit() == gdk::ScrollUnit::Surface;
             if dy != 0.0 {
                 send(
                     &ui,
                     ClientMsg::PointerAxis {
                         axis: Axis::Vertical,
-                        value: dy * 15.0,
-                        discrete: Some(dy.signum() as i32),
+                        value: scroll_delta(dy, surface).0,
+                        discrete: scroll_delta(dy, surface).1,
                         stop: false,
                     },
                 );
@@ -1706,13 +1963,29 @@ fn install_input_handlers(
                     &ui,
                     ClientMsg::PointerAxis {
                         axis: Axis::Horizontal,
-                        value: dx * 15.0,
-                        discrete: Some(dx.signum() as i32),
+                        value: scroll_delta(dx, surface).0,
+                        discrete: scroll_delta(dx, surface).1,
                         stop: false,
                     },
                 );
             }
             glib::Propagation::Stop
+        });
+    }
+    {
+        let ui = ui.clone();
+        scroll.connect_scroll_end(move |_| {
+            for axis in [Axis::Vertical, Axis::Horizontal] {
+                send(
+                    &ui,
+                    ClientMsg::PointerAxis {
+                        axis,
+                        value: 0.0,
+                        discrete: None,
+                        stop: true,
+                    },
+                );
+            }
         });
     }
     video.add_controller(scroll);
@@ -1944,14 +2217,15 @@ fn request_resize(ui: &App) {
     );
 }
 
-/// GTK button number to evdev `BTN_*`.
+/// GTK button number to evdev `BTN_*`. GDK numbers left, middle and right
+/// 1-3 and every further button `BTN_*` - `BTN_LEFT` + 5, after the old
+/// scroll buttons 4-7: 8 is `BTN_SIDE` (back), 9 is `BTN_EXTRA` (forward).
 fn evdev_button(n: u32) -> u32 {
     match n {
         1 => 0x110, // BTN_LEFT
         2 => 0x112, // BTN_MIDDLE
         3 => 0x111, // BTN_RIGHT
-        8 => 0x116, // BTN_SIDE (back)
-        9 => 0x115, // BTN_EXTRA (forward)
+        8.. => 0x110 + n - 5,
         _ => 0x110,
     }
 }
@@ -1967,6 +2241,291 @@ mod tests {
     use super::*;
     use std::cell::RefCell;
 
+    type Input = tokio::sync::mpsc::UnboundedReceiver<clipboard::ToWorker>;
+
+    fn session_with_input() -> (Rc<Session>, Input) {
+        let s = Rc::new(Session::new(Endpoint::Tcp("127.0.0.1:9070".into())));
+        let (tx, rx) = unbounded_channel();
+        *s.input_tx.borrow_mut() = Some(tx);
+        (s, rx)
+    }
+
+    /// What a session's worker was sent about the local clipboard.
+    #[derive(Debug, PartialEq)]
+    enum Queued {
+        Revoke,
+        /// An offer's mime types and generation.
+        Offer(Vec<String>, u64),
+    }
+
+    fn queued(rx: &mut Input) -> Vec<Queued> {
+        let mut all = Vec::new();
+        while let Ok(msg) = rx.try_recv() {
+            all.push(match msg {
+                clipboard::ToWorker::RevokeLocal => Queued::Revoke,
+                clipboard::ToWorker::LocalOffer {
+                    mime_types,
+                    files,
+                    generation,
+                } => {
+                    assert!(files.entries.is_empty());
+                    Queued::Offer(mime_types, generation)
+                }
+                _ => panic!("expected a clipboard message"),
+            });
+        }
+        all
+    }
+
+    fn text(generation: u64) -> Queued {
+        Queued::Offer(vec!["text/plain".into()], generation)
+    }
+
+    /// What a switch sends the session shown before it.
+    fn withdrawn() -> Vec<Queued> {
+        vec![Queued::Revoke, Queued::Offer(Vec::new(), 0)]
+    }
+
+    /// A tab bar: the sessions, the shown one, and the offer routing the
+    /// clipboard watcher in `build_ui` uses.
+    struct Tabs {
+        shown: Rc<RefCell<Option<Rc<Session>>>>,
+        watch: clipboard_ui::LocalSelection,
+        no_clipboard: bool,
+    }
+
+    impl Tabs {
+        fn new(sessions: Vec<Rc<Session>>, no_clipboard: bool) -> Self {
+            let sessions = Rc::new(sessions);
+            let shown = Rc::new(RefCell::new(None::<Rc<Session>>));
+            let watch = {
+                let running = sessions.clone();
+                let sessions = sessions.clone();
+                let shown = shown.clone();
+                clipboard_ui::LocalSelection::new(
+                    move || running_inputs(&running, no_clipboard),
+                    move || local_offer_targets(&sessions, shown.borrow().as_ref(), no_clipboard),
+                )
+            };
+            Self {
+                shown,
+                watch,
+                no_clipboard,
+            }
+        }
+
+        /// What `show_session` does on a switch.
+        fn show(&self, s: &Rc<Session>) {
+            let previous = self.shown.replace(Some(s.clone()));
+            move_local_offer(previous.as_ref(), self.no_clipboard, Some(&self.watch));
+        }
+
+        /// A local copy whose listing has started.
+        fn start_copy(&self) -> u64 {
+            self.watch.changed(false).expect("a local copy is offered")
+        }
+
+        /// A new local copy whose listing completes at once. Without
+        /// clipboard sharing no session is revoked and nothing is listed.
+        fn copy(&self, mime: &str) -> u64 {
+            let Some(gen) = self.watch.changed(false) else {
+                return self.watch.generation();
+            };
+            self.watch
+                .finish(gen, vec![mime.into()], Default::default());
+            gen
+        }
+
+        /// Queue a server's read for `s` the way the status handler does.
+        fn queue_read(
+            &self,
+            s: &Rc<Session>,
+            generation: u64,
+        ) -> tokio::sync::mpsc::Receiver<std::io::Result<bytes::Bytes>> {
+            let (reply, rx) = tokio::sync::mpsc::channel(2);
+            let shown = self.shown.clone();
+            let watch = self.watch.clone();
+            serve_local_read(
+                s,
+                self.no_clipboard,
+                "text/plain".into(),
+                generation,
+                reply,
+                move || (shown.borrow().clone(), Some(watch.clone())),
+            );
+            rx
+        }
+
+        fn may_read(&self, s: &Rc<Session>, generation: u64) -> bool {
+            may_read_local(
+                self.shown.borrow().as_ref(),
+                s,
+                self.no_clipboard,
+                generation,
+                Some(&self.watch),
+            )
+        }
+    }
+
+    #[test]
+    fn only_the_shown_session_is_offered_the_local_clipboard() {
+        let (a, mut a_rx) = session_with_input();
+        let (b, mut b_rx) = session_with_input();
+        let tabs = Tabs::new(vec![a.clone(), b.clone()], false);
+        tabs.copy("text/plain");
+        assert_eq!(queued(&mut a_rx), [Queued::Revoke]);
+        assert_eq!(queued(&mut b_rx), [Queued::Revoke]);
+
+        tabs.shown.replace(Some(b.clone()));
+        let gen = tabs.copy("text/plain");
+        assert_eq!(queued(&mut a_rx), [Queued::Revoke]);
+        assert_eq!(queued(&mut b_rx), [Queued::Revoke, text(gen)]);
+
+        let tabs = Tabs::new(vec![a.clone(), b.clone()], true);
+        tabs.shown.replace(Some(b.clone()));
+        tabs.copy("text/plain");
+        assert_eq!(queued(&mut a_rx), []);
+        assert_eq!(queued(&mut b_rx), []);
+    }
+
+    #[test]
+    fn the_servers_offer_taking_the_clipboard_revokes_every_session() {
+        let (a, mut a_rx) = session_with_input();
+        let (b, mut b_rx) = session_with_input();
+        let tabs = Tabs::new(vec![a.clone(), b.clone()], false);
+        tabs.show(&b);
+        tabs.copy("text/plain");
+        queued(&mut a_rx);
+        queued(&mut b_rx);
+        assert_eq!(tabs.watch.changed(true), None);
+        assert_eq!(queued(&mut a_rx), [Queued::Revoke]);
+        assert_eq!(queued(&mut b_rx), [Queued::Revoke]);
+    }
+
+    #[test]
+    fn switching_tabs_moves_the_local_offer() {
+        let (a, mut a_rx) = session_with_input();
+        let (b, mut b_rx) = session_with_input();
+        let tabs = Tabs::new(vec![a.clone(), b.clone()], false);
+        tabs.show(&a);
+        let first = tabs.copy("text/plain");
+        assert_eq!(queued(&mut a_rx), [Queued::Revoke, text(first)]);
+        assert_eq!(queued(&mut b_rx), [Queued::Revoke]);
+
+        // A copy of files is still being listed when the tab switches.
+        let listing = tabs.start_copy();
+        tabs.show(&b);
+        tabs.watch
+            .finish(listing, vec!["text/uri-list".into()], Default::default());
+        let reoffer = tabs.watch.generation();
+        tabs.watch
+            .finish(reoffer, vec!["text/plain".into()], Default::default());
+
+        let mut a_expected = vec![Queued::Revoke];
+        a_expected.extend(withdrawn());
+        assert_eq!(queued(&mut a_rx), a_expected);
+        assert_eq!(queued(&mut b_rx), [Queued::Revoke, text(reoffer)]);
+
+        // Showing no session withdraws the offer too.
+        revoke_local_offer(tabs.shown.take().as_ref(), false);
+        assert_eq!(queued(&mut b_rx), withdrawn());
+    }
+
+    /// Documents the order a switch queues: the withdrawal, then the new
+    /// offer. It does not guard it: the new offer is always sent from a
+    /// task after the clipboard is read, whatever order the calls are in.
+    #[test]
+    fn the_withdrawal_is_queued_before_the_new_offer() {
+        // Both tabs share one input, so the order of the two is visible.
+        let (a, mut rx) = session_with_input();
+        let b = Rc::new(Session::new(Endpoint::Tcp("127.0.0.1:9071".into())));
+        *b.input_tx.borrow_mut() = a.input_tx.borrow().clone();
+        let tabs = Tabs::new(vec![a.clone(), b.clone()], false);
+        tabs.show(&a);
+        tabs.show(&b);
+        let reoffer = tabs.watch.generation();
+        tabs.watch
+            .finish(reoffer, vec!["text/plain".into()], Default::default());
+        let mut expected = withdrawn();
+        expected.push(text(reoffer));
+        assert_eq!(queued(&mut rx), expected);
+    }
+
+    /// Run the queued reads until `rx` answers: true for a refusal, false
+    /// when the read went past the check (it then finds no clipboard without
+    /// a display and ends with no bytes).
+    fn run_read(
+        context: &glib::MainContext,
+        rx: &mut tokio::sync::mpsc::Receiver<std::io::Result<bytes::Bytes>>,
+    ) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            context.iteration(false);
+            match rx.try_recv() {
+                Ok(Err(_)) => {
+                    assert!(rx.try_recv().is_err(), "bytes after a refusal");
+                    return true;
+                }
+                Ok(Ok(_)) => panic!("clipboard bytes were sent"),
+                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => return false,
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {}
+            }
+            assert!(Instant::now() < deadline, "read did not finish");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    #[test]
+    fn the_status_handler_refuses_a_read_outdated_before_it_starts() {
+        let context = glib::MainContext::default();
+        let _owner = context.acquire().unwrap();
+        let (a, _a_rx) = session_with_input();
+        let (b, _b_rx) = session_with_input();
+        let tabs = Tabs::new(vec![a.clone(), b.clone()], false);
+        tabs.show(&a);
+        let offered = tabs.copy("text/plain");
+
+        // a's read is queued, then the tab switches before it runs.
+        let mut read = tabs.queue_read(&a, offered);
+        tabs.show(&b);
+        assert!(run_read(&context, &mut read));
+
+        // b's read is queued, then a new copy replaces the selection.
+        let current = tabs.watch.generation();
+        let mut read = tabs.queue_read(&b, current);
+        tabs.copy("image/png");
+        assert!(run_read(&context, &mut read));
+
+        // A read for the shown session's current offer is let through.
+        let mut read = tabs.queue_read(&b, tabs.watch.generation());
+        assert!(!run_read(&context, &mut read));
+    }
+
+    #[test]
+    fn a_read_queued_before_a_switch_or_a_copy_is_refused() {
+        let (a, _a_rx) = session_with_input();
+        let (b, _b_rx) = session_with_input();
+        let tabs = Tabs::new(vec![a.clone(), b.clone()], false);
+        tabs.show(&a);
+        let offered = tabs.copy("text/plain");
+        assert!(tabs.may_read(&a, offered));
+        assert!(!tabs.may_read(&b, offered));
+
+        // A request a's worker accepted before the switch reaches the UI after it.
+        tabs.show(&b);
+        assert!(!tabs.may_read(&a, offered));
+
+        // b's own request against its offer, then one that a new copy outdated.
+        let current = tabs.watch.generation();
+        assert!(tabs.may_read(&b, current));
+        tabs.copy("image/png");
+        assert!(!tabs.may_read(&b, current));
+
+        let tabs = Tabs::new(vec![a.clone()], true);
+        tabs.shown.replace(Some(a.clone()));
+        assert!(!tabs.may_read(&a, tabs.watch.generation()));
+    }
+
     #[test]
     fn reconnect_invalidates_the_previous_scale_request() {
         let s = Session::new(Endpoint::Tcp("127.0.0.1:9070".into()));
@@ -1979,6 +2538,25 @@ mod tests {
     }
 
     #[test]
+    fn reconnect_status_keeps_the_error() {
+        let e = "Connection refused (os error 111)";
+        assert_eq!(
+            connecting_status(Some(e)),
+            "Error: Connection refused (os error 111)\nConnecting…"
+        );
+        assert_eq!(connecting_status(None), "Connecting…");
+        assert_eq!(
+            reconnect_status(Some(e), 1),
+            "Error: Connection refused (os error 111)\nReconnecting… (attempt 1)"
+        );
+        assert_eq!(
+            reconnect_status(Some(e), MAX_RETRIES + 1),
+            "Error: Connection refused (os error 111)\nDisconnected — click the tab to reconnect"
+        );
+        assert_eq!(reconnect_status(None, 2), "Reconnecting… (attempt 2)");
+    }
+
+    #[test]
     fn visible_shape_needs_alpha_and_contrast() {
         let transparent = [0u8; 16];
         let black = [0, 0, 0, 255].repeat(4);
@@ -1987,6 +2565,24 @@ mod tests {
         assert!(!has_visible_shape(&transparent));
         assert!(!has_visible_shape(&black));
         assert!(has_visible_shape(&arrow));
+    }
+
+    #[test]
+    fn remote_cursor_rejects_a_hotspot_outside_the_image() {
+        // A visible 2x2 shape, so only the hotspot decides. These return
+        // before any GTK call, which is why no display is needed here.
+        let mut argb = [0u8; 16];
+        argb[3] = 255;
+        for (hot_x, hot_y) in [(2, 0), (0, 2), (-1, 0), (0, -1), (i32::MAX, i32::MIN)] {
+            let image = CursorImage {
+                width: 2,
+                height: 2,
+                hot_x,
+                hot_y,
+                argb: &argb,
+            };
+            assert!(remote_cursor(image).is_none(), "{hot_x},{hot_y}");
+        }
     }
 
     #[test]
@@ -2027,15 +2623,52 @@ mod tests {
     fn chord_matches_only_with_exact_mods() {
         let hk = ReleaseHotkey::parse("shift+escape").unwrap();
         let lt = RefCell::new(None);
-        assert!(hk.matches(gdk::Key::Escape, gdk::ModifierType::SHIFT_MASK, &lt));
+        assert!(hk.matches(gdk::Key::Escape, gdk::ModifierType::SHIFT_MASK, None, &lt));
         // Bare Escape, no Shift: not a match (so it reaches the remote).
-        assert!(!hk.matches(gdk::Key::Escape, gdk::ModifierType::empty(), &lt));
+        assert!(!hk.matches(gdk::Key::Escape, gdk::ModifierType::empty(), None, &lt));
         // Extra lock bits are ignored.
         assert!(hk.matches(
             gdk::Key::Escape,
             gdk::ModifierType::SHIFT_MASK | gdk::ModifierType::LOCK_MASK,
+            None,
             &lt
         ));
+    }
+
+    #[test]
+    fn chord_matches_the_shifted_keyval() {
+        let lt = RefCell::new(None);
+        let ctrl = gdk::ModifierType::CONTROL_MASK;
+        let alt = gdk::ModifierType::ALT_MASK;
+        let shift = gdk::ModifierType::SHIFT_MASK;
+        // GTK reports Ctrl+Shift+q as Q, and Shift+Tab as ISO_Left_Tab.
+        let hk = ReleaseHotkey::parse("ctrl+shift+q").unwrap();
+        assert!(hk.matches(gdk::Key::Q, ctrl | shift, None, &lt));
+        let hk = ReleaseHotkey::parse("shift+tab").unwrap();
+        assert!(hk.matches(gdk::Key::ISO_Left_Tab, shift, None, &lt));
+        // Caps Lock turns q into Q as well.
+        let hk = ReleaseHotkey::parse("ctrl+alt+q").unwrap();
+        let lock = gdk::ModifierType::LOCK_MASK;
+        assert!(hk.matches(gdk::Key::Q, ctrl | alt | lock, None, &lt));
+        assert!(!hk.matches(gdk::Key::W, ctrl | alt, None, &lt));
+    }
+
+    #[test]
+    fn shifted_punctuation_matches_its_unshifted_hardware_key() {
+        let lt = RefCell::new(None);
+        let mods = gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::SHIFT_MASK;
+        for (spec, shifted, base) in [
+            ("ctrl+shift+1", gdk::Key::exclam, gdk::Key::_1),
+            (
+                "ctrl+shift+bracketleft",
+                gdk::Key::braceleft,
+                gdk::Key::bracketleft,
+            ),
+        ] {
+            let hotkey = ReleaseHotkey::parse(spec).unwrap();
+            assert!(hotkey.matches(shifted, mods, Some(base), &lt));
+            assert!(!hotkey.matches(shifted, mods, None, &lt));
+        }
     }
 
     #[test]
@@ -2043,8 +2676,42 @@ mod tests {
         let hk = ReleaseHotkey::parse("double-escape").unwrap();
         let lt = RefCell::new(None);
         let none = gdk::ModifierType::empty();
-        assert!(!hk.matches(gdk::Key::Escape, none, &lt)); // first tap forwarded
-        assert!(hk.matches(gdk::Key::Escape, none, &lt)); // quick second releases
-        assert!(!hk.matches(gdk::Key::Escape, none, &lt)); // counter reset
+        assert!(!hk.matches(gdk::Key::Escape, none, None, &lt)); // first tap forwarded
+        assert!(hk.matches(gdk::Key::Escape, none, None, &lt)); // quick second releases
+        assert!(!hk.matches(gdk::Key::Escape, none, None, &lt)); // counter reset
+    }
+}
+
+#[cfg(test)]
+mod trackpad_tests {
+    use super::scroll_delta;
+
+    #[test]
+    fn small_finger_events_preserve_distance_without_wheel_clicks() {
+        let events = [0.1, 0.2, 0.3, -0.1];
+        let total: f64 = events
+            .iter()
+            .map(|d| {
+                let (value, discrete) = scroll_delta(*d, true);
+                assert_eq!(discrete, None);
+                value
+            })
+            .sum();
+        assert!((total - 0.5).abs() < 1e-10);
+    }
+
+    #[test]
+    fn real_wheel_keeps_detents_and_direction() {
+        assert_eq!(scroll_delta(1.0, false), (15.0, Some(1)));
+        assert_eq!(scroll_delta(-1.0, false), (-15.0, Some(-1)));
+    }
+
+    #[test]
+    fn gtk_buttons_map_back_to_their_evdev_codes() {
+        // GDK on Wayland numbers a button past the first three as its evdev
+        // code - BTN_LEFT + 5, so the remote app sees the same number.
+        let codes: Vec<u32> = (1..=11).map(super::evdev_button).collect();
+        assert_eq!(&codes[..3], [0x110, 0x112, 0x111]);
+        assert_eq!(&codes[7..], [0x113, 0x114, 0x115, 0x116]);
     }
 }
