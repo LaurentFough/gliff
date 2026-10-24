@@ -272,7 +272,7 @@ Every crate with `unsafe` documents the safety requirements at each block.
   The client plays through a buffer read by a cubic resampler (`gliff-audio`
   `Jitter`): the ratio converts 48 kHz to the device rate and leans by at
   most 0.5% toward the target fill, which absorbs clock drift without
-  dropping samples. The target starts at 100 ms, grows by 20 ms on an
+  dropping samples. The target starts at 100 ms, grows by 20 ms after a
   short packet gap and shrinks after 30 s of calm, between 40 and 250 ms; a burst
   more than 150 ms past it (after a stall) is cut back at once.
   With PipeWire, hosts record what applications play, except Gliff, so two
