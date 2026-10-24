@@ -110,6 +110,9 @@ struct App {
     /// The address bar: Enter connects to the machine typed.
     entry: gtk::Entry,
     transfers: Rc<clipboard_ui::TransferBars>,
+    /// The last number given to a worker. Paste bars are keyed by it, so
+    /// jobs of different connections never share a row.
+    connections: Cell<u64>,
     /// Every running connection, in the order they were opened.
     sessions: RefCell<Vec<Rc<Session>>>,
     /// The session the window shows and sends input to.
@@ -143,6 +146,8 @@ struct Session {
     /// Bumped by every `start_session` and by `stop_session`, so pollers and
     /// delayed reconnects of an earlier worker can tell they are stale.
     generation: Cell<u64>,
+    /// The current worker's number from `App::connections`.
+    conn: Cell<u64>,
     /// Consecutive failed connection attempts, reset on a successful connect.
     retries: Cell<u32>,
     /// Retained across slow reconnect attempts until a connection succeeds.
@@ -194,6 +199,7 @@ impl Session {
             endpoint,
             input_tx: RefCell::new(None),
             generation: Cell::new(0),
+            conn: Cell::new(0),
             retries: Cell::new(0),
             last_error: RefCell::new(None),
             gave_up: Cell::new(false),
@@ -405,6 +411,7 @@ fn build_ui(app: &adw::Application, cli: &Cli) {
         add_revealer,
         entry: entry.clone(),
         transfers,
+        connections: Cell::new(0),
         sessions: RefCell::new(Vec::new()),
         active: RefCell::new(None),
         local_clipboard: RefCell::new(None),
@@ -1010,6 +1017,7 @@ fn stop_session(ui: &Rc<App>, name: &str) {
     // dropping the sender closes the worker's input, which ends it.
     s.generation.set(s.generation.get() + 1);
     s.input_tx.borrow_mut().take();
+    ui.transfers.clear_connection(s.conn.get());
     s.last_frame.borrow_mut().take();
     // A machine stopped by hand stays stopped when the window reopens.
     if matches!(s.endpoint, Endpoint::Ssh(_)) {
@@ -1103,6 +1111,7 @@ fn show_disconnected(ui: &Rc<App>, s: &Rc<Session>) {
     s.stream_view.set((0, 0));
     s.server_view.set((0, 0));
     s.cursor.borrow_mut().take();
+    ui.transfers.clear_connection(s.conn.get());
     set_stats(ui, s, "");
     if is_active(ui, s) {
         ui.frame.clear();
@@ -1122,6 +1131,10 @@ fn start_session(ui: Rc<App>, s: Rc<Session>) {
     s.reset_resize();
     let generation = s.generation.get() + 1;
     s.generation.set(generation);
+    ui.transfers.clear_connection(s.conn.get());
+    let conn = ui.connections.get() + 1;
+    ui.connections.set(conn);
+    s.conn.set(conn);
     set_status(
         &ui,
         &s,
@@ -1409,8 +1422,13 @@ fn poll_status(ui: Rc<App>, s: Rc<Session>, rx: Receiver<Status>, generation: u6
                     );
                 }
                 Status::ClipboardTransfer { id, progress } => {
+                    let conn = s.conn.get();
                     let cancel_via = s.clone();
-                    ui.transfers.update(id, &progress, move |id| {
+                    ui.transfers.update(conn, id, &progress, move |id| {
+                        // After a reconnect the id belongs to another job.
+                        if cancel_via.conn.get() != conn {
+                            return;
+                        }
                         if let Some(tx) = cancel_via.input_tx.borrow().clone() {
                             let _ = tx.send(clipboard::ToWorker::CancelTransfer(id));
                         }

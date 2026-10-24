@@ -4,7 +4,7 @@
 //! whose bytes are fetched only when an application pastes.
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -430,13 +430,75 @@ mod imp {
 /// removed, so the box is only visible while something is in flight.
 pub struct TransferBars {
     list: gtk::Box,
-    rows: RefCell<HashMap<u32, Row>>,
+    rows: RefCell<Bars<Row>>,
 }
 
 struct Row {
     root: gtk::Box,
     text: gtk::Label,
     bar: gtk::ProgressBar,
+}
+
+/// A row is keyed by the connection that ran its job and the job's id, as
+/// every connection numbers its jobs from 1.
+type BarKey = (u64, u32);
+
+/// The rows of [`TransferBars`] by key, apart from the widgets so the
+/// bookkeeping can be tested without a display.
+struct Bars<R> {
+    rows: HashMap<BarKey, R>,
+    /// Rows the user closed whose job has not reported an end yet, so a
+    /// report already on its way does not bring the row back.
+    dismissed: HashSet<BarKey>,
+}
+
+impl<R> Default for Bars<R> {
+    fn default() -> Self {
+        Self {
+            rows: HashMap::new(),
+            dismissed: HashSet::new(),
+        }
+    }
+}
+
+impl<R> Bars<R> {
+    /// The row to show a report in, added with `add` when there is none;
+    /// `None` once the user closed it.
+    fn row(&mut self, key: BarKey, add: impl FnOnce() -> R) -> Option<&mut R> {
+        if self.dismissed.contains(&key) {
+            return None;
+        }
+        Some(self.rows.entry(key).or_insert_with(add))
+    }
+
+    fn is_dismissed(&self, key: BarKey) -> bool {
+        self.dismissed.contains(&key)
+    }
+
+    /// The job ended: its row goes, and so does any mark that it was closed.
+    fn finish(&mut self, key: BarKey) -> Option<R> {
+        self.dismissed.remove(&key);
+        self.rows.remove(&key)
+    }
+
+    /// The user closed the row; it stays away until the job ends.
+    fn dismiss(&mut self, key: BarKey) -> Option<R> {
+        self.dismissed.insert(key);
+        self.rows.remove(&key)
+    }
+
+    /// The connection ended, and with it every job it ran, reported or not.
+    fn clear_connection(&mut self, conn: u64) -> Vec<R> {
+        self.dismissed.retain(|&(c, _)| c != conn);
+        let keys: Vec<BarKey> = self.rows.keys().filter(|k| k.0 == conn).copied().collect();
+        keys.into_iter()
+            .filter_map(|k| self.rows.remove(&k))
+            .collect()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.rows.is_empty()
+    }
 }
 
 /// How long a failure stays on screen.
@@ -462,13 +524,22 @@ impl TransferBars {
         &self.list
     }
 
-    /// Show the state of job `id`; `cancel` is called with the id when the
-    /// user presses the row's button.
-    pub fn update(self: &Rc<Self>, id: u32, p: &Progress, cancel: impl Fn(u32) + 'static) {
+    /// Show the state of job `id` of connection `conn`; `cancel` is called
+    /// with the id when the user closes the row, which removes it at once.
+    pub fn update(
+        self: &Rc<Self>,
+        conn: u64,
+        id: u32,
+        p: &Progress,
+        cancel: impl Fn(u32) + 'static,
+    ) {
+        let key = (conn, id);
+        let mut rows = self.rows.borrow_mut();
         match &p.state {
             State::Running => {
-                let mut rows = self.rows.borrow_mut();
-                let row = rows.entry(id).or_insert_with(|| self.add_row(id, cancel));
+                let Some(row) = rows.row(key, || self.add_row(key, cancel)) else {
+                    return;
+                };
                 row.text
                     .set_text(&format!("Pasting {}: {}", p.label, describe(p)));
                 match p.percent() {
@@ -476,21 +547,40 @@ impl TransferBars {
                     None => row.bar.pulse(),
                 }
             }
-            State::Done | State::Cancelled => self.remove(id),
+            State::Done | State::Cancelled => {
+                let row = rows.finish(key);
+                drop(rows);
+                self.drop_rows(row);
+            }
             State::Failed(e) => {
-                let mut rows = self.rows.borrow_mut();
-                let row = rows.entry(id).or_insert_with(|| self.add_row(id, cancel));
+                if rows.is_dismissed(key) {
+                    rows.finish(key);
+                    return;
+                }
+                let Some(row) = rows.row(key, || self.add_row(key, cancel)) else {
+                    return;
+                };
                 row.text
                     .set_text(&format!("Paste of {} failed: {e}", p.label));
                 row.bar.set_visible(false);
                 drop(rows);
                 let this = self.clone();
-                glib::timeout_add_local_once(FAILURE_LINGER, move || this.remove(id));
+                glib::timeout_add_local_once(FAILURE_LINGER, move || {
+                    let row = this.rows.borrow_mut().finish(key);
+                    this.drop_rows(row);
+                });
             }
         }
     }
 
-    fn add_row(&self, id: u32, cancel: impl Fn(u32) + 'static) -> Row {
+    /// Remove the rows of a connection that ended. Its jobs died with it
+    /// without a final report, so nothing else would.
+    pub fn clear_connection(&self, conn: u64) {
+        let rows = self.rows.borrow_mut().clear_connection(conn);
+        self.drop_rows(rows);
+    }
+
+    fn add_row(self: &Rc<Self>, key: BarKey, cancel: impl Fn(u32) + 'static) -> Row {
         let root = gtk::Box::builder()
             .orientation(gtk::Orientation::Horizontal)
             .spacing(8)
@@ -513,7 +603,15 @@ impl TransferBars {
             .tooltip_text("Cancel")
             .valign(gtk::Align::Center)
             .build();
-        button.connect_clicked(move |_| cancel(id));
+        // The row goes whether or not the job is still there to cancel.
+        let bars = Rc::downgrade(self);
+        button.connect_clicked(move |_| {
+            cancel(key.1);
+            if let Some(bars) = bars.upgrade() {
+                let row = bars.rows.borrow_mut().dismiss(key);
+                bars.drop_rows(row);
+            }
+        });
         root.append(&column);
         root.append(&button);
         self.list.append(&root);
@@ -521,18 +619,80 @@ impl TransferBars {
         Row { root, text, bar }
     }
 
-    fn remove(&self, id: u32) {
-        let mut rows = self.rows.borrow_mut();
-        if let Some(row) = rows.remove(&id) {
+    fn drop_rows(&self, rows: impl IntoIterator<Item = Row>) {
+        for row in rows {
             self.list.remove(&row.root);
         }
-        self.list.set_visible(!rows.is_empty());
+        self.list.set_visible(!self.rows.borrow().is_empty());
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn shown(bars: &Bars<&'static str>) -> Vec<BarKey> {
+        let mut keys: Vec<BarKey> = bars.rows.keys().copied().collect();
+        keys.sort();
+        keys
+    }
+
+    #[test]
+    fn jobs_of_two_connections_keep_their_own_rows() {
+        let mut bars = Bars::default();
+        bars.row((1, 1), || "old");
+        bars.row((2, 1), || "new");
+        assert_eq!(shown(&bars), [(1, 1), (2, 1)]);
+        assert_eq!(bars.row((2, 1), || "replaced").map(|r| *r), Some("new"));
+        assert_eq!(bars.finish((2, 1)), Some("new"));
+        assert_eq!(shown(&bars), [(1, 1)]);
+    }
+
+    #[test]
+    fn an_ended_connection_takes_only_its_rows() {
+        let mut bars = Bars::default();
+        bars.row((1, 1), || "a");
+        bars.row((1, 2), || "b");
+        bars.row((2, 1), || "c");
+        let mut gone = bars.clear_connection(1);
+        gone.sort();
+        assert_eq!(gone, ["a", "b"]);
+        assert_eq!(shown(&bars), [(2, 1)]);
+        assert!(bars.clear_connection(1).is_empty());
+    }
+
+    #[test]
+    fn a_closed_row_stays_closed_until_its_job_ends() {
+        let mut bars = Bars::default();
+        bars.row((1, 1), || "a");
+        assert_eq!(bars.dismiss((1, 1)), Some("a"));
+        // A progress report already queued must not bring it back.
+        assert!(bars.row((1, 1), || "again").is_none());
+        assert!(bars.is_empty());
+        assert_eq!(bars.finish((1, 1)), None);
+        assert!(!bars.is_dismissed((1, 1)));
+    }
+
+    #[test]
+    fn a_row_with_no_job_left_can_still_be_closed() {
+        // The worker that ran the job is gone, so no report will follow.
+        let mut bars = Bars::default();
+        bars.row((1, 7), || "stale");
+        assert_eq!(bars.dismiss((1, 7)), Some("stale"));
+        assert!(bars.is_empty());
+    }
+
+    #[test]
+    fn closing_marks_go_with_their_connection() {
+        let mut bars = Bars::default();
+        bars.row((1, 1), || "a");
+        bars.row((2, 1), || "b");
+        bars.dismiss((1, 1));
+        bars.dismiss((2, 1));
+        bars.clear_connection(1);
+        assert!(!bars.is_dismissed((1, 1)));
+        assert!(bars.is_dismissed((2, 1)));
+    }
 
     #[test]
     fn every_session_is_revoked_when_the_servers_offer_takes_the_clipboard() {
