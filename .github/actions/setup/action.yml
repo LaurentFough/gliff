@@ -13,7 +13,7 @@ runs:
       shell: bash
       run: |
         pacman -Syu --noconfirm --needed \
-          rust pkgconf \
+          rust pkgconf openssh \
           wayland libxkbcommon libdrm mesa gtk4 libadwaita dbus
     - name: Set up build cache
       if: inputs.cache == 'true'

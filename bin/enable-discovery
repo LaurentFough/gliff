@@ -54,4 +54,5 @@ if destination.exists() and destination.read_text() != unit:
 destination.write_text(unit)
 subprocess.run(["systemctl", "--user", "daemon-reload"], check=True)
 subprocess.run(["systemctl", "--user", "enable", "--now", "gliff-discovery.service"], check=True)
+subprocess.run(["systemctl", "--user", "restart", "gliff-discovery.service"], check=True)
 print("Gliff discovery is enabled for this desktop user.")

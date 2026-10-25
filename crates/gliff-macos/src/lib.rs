@@ -17,6 +17,8 @@ mod client;
 mod clipboard;
 #[cfg(target_os = "macos")]
 mod server;
+#[cfg(target_os = "macos")]
+mod writer;
 
 #[cfg(target_os = "macos")]
 pub use client::client_main;

@@ -21,6 +21,8 @@ echo "== clippy"
 cargo clippy "${packages[@]}" --all-targets --locked -- -D warnings
 echo "== test"
 cargo test "${packages[@]}" --locked
+echo "== discovery service"
+python3 scripts/discovery-service-check.py
 if [ "$(uname -s)" = Darwin ]; then
     echo "== native bridge memory"
     python3 scripts/macos-memory-check.py

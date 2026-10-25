@@ -82,7 +82,13 @@ fn remote_command(target: &SshTarget) -> String {
         .collect::<Vec<_>>()
         .join(" ");
     if target.server_bin == "gliff-server" {
-        format!("if command -v gliff-server >/dev/null 2>&1; then exec gliff-server {args}; elif [ -x \"$HOME/Applications/Gliff.app/Contents/MacOS/gliff-server\" ]; then exec \"$HOME/Applications/Gliff.app/Contents/MacOS/gliff-server\" {args}; else exec \"$HOME/.local/bin/gliff-server\" {args}; fi")
+        // The login shell may be fish or csh. Only a simple exec reaches it;
+        // the fallback's POSIX syntax is parsed by /bin/sh explicitly.
+        let script = "if command -v gliff-server >/dev/null 2>&1; then exec gliff-server \"$@\"; elif [ -x \"$HOME/Applications/Gliff.app/Contents/MacOS/gliff-server\" ]; then exec \"$HOME/Applications/Gliff.app/Contents/MacOS/gliff-server\" \"$@\"; else exec \"$HOME/.local/bin/gliff-server\" \"$@\"; fi";
+        format!(
+            "exec /bin/sh -c {} gliff-server {args}",
+            shell_quote(script)
+        )
     } else {
         format!("{} {args}", target.server_bin)
     }
@@ -150,5 +156,59 @@ mod tests {
         assert!(command.contains("command -v gliff-server"));
         assert!(command.contains("$HOME/Applications/Gliff.app/Contents/MacOS/gliff-server"));
         assert!(command.contains("$HOME/.local/bin/gliff-server"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn default_fallback_executes_in_login_shells_with_literal_arguments() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = tempfile::tempdir().unwrap();
+        let bin = home.path().join("bin");
+        let bundle = home.path().join("Applications/Gliff.app/Contents/MacOS");
+        let local = home.path().join(".local/bin");
+        for dir in [&bin, &bundle, &local] {
+            std::fs::create_dir_all(dir).unwrap();
+            let server = dir.join("gliff-server");
+            std::fs::write(&server, "#!/bin/sh\nprintf '%s\\0' \"$@\"\n").unwrap();
+            std::fs::set_permissions(server, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let mut target = SshTarget::new("host");
+        target.server_args = vec!["--output".into(), "a'b; $(touch /tmp/no) \\\" $HOME".into()];
+        let expected = format!("--stdio\0--output\0{}\0", target.server_args[1]);
+        for stage in 0..3 {
+            if stage == 1 {
+                std::fs::remove_file(bin.join("gliff-server")).unwrap();
+            }
+            if stage == 2 {
+                std::fs::remove_file(bundle.join("gliff-server")).unwrap();
+            }
+            for shell in [
+                "/bin/sh",
+                "/bin/bash",
+                "/bin/zsh",
+                "/usr/bin/fish",
+                "/bin/csh",
+            ] {
+                if !std::path::Path::new(shell).exists() {
+                    continue;
+                }
+                let output = std::process::Command::new(shell)
+                    .args(["-c", &remote_command(&target)])
+                    .env("HOME", home.path())
+                    .env("PATH", &bin)
+                    .output()
+                    .unwrap();
+                assert!(
+                    output.status.success(),
+                    "{shell} fallback {stage}: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                assert_eq!(
+                    output.stdout,
+                    expected.as_bytes(),
+                    "{shell} fallback {stage}"
+                );
+            }
+        }
     }
 }

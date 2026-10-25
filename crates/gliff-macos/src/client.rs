@@ -1,14 +1,16 @@
 use anyhow::{bail, ensure, Context, Result};
 use bytes::Bytes;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", test))]
 use clap::Parser;
 use gliff_proto::{
     features, is_incompatible, ChromaMode, ClientCaps, ClientMsg, Codec, ServerMsg,
     FEATURE_CURSOR_IN_VIDEO, PROTOCOL_VERSION,
 };
-use gliff_transport::Framed;
 #[cfg(target_os = "macos")]
-use gliff_transport::{spawn_ssh, SshTarget};
+use gliff_transport::spawn_ssh;
+use gliff_transport::Framed;
+#[cfg(any(target_os = "macos", test))]
+use gliff_transport::SshTarget;
 use serde_json::{json, Value};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -16,7 +18,7 @@ use tokio::sync::mpsc;
 
 use crate::{keys, native};
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", test))]
 #[derive(Parser)]
 #[command(name = "gliff", version, about = "Remote desktop over SSH")]
 struct Cli {
@@ -26,7 +28,7 @@ struct Cli {
     /// List nearby Gliff computers as JSON without connecting or opening video.
     #[arg(long, conflicts_with_all = ["host", "connect", "check_frames"])]
     discover: bool,
-    /// SSH port (default: 22, or the port advertised by a selected computer).
+    /// SSH port (default: SSH configuration, or the selected computer's advertised port).
     #[arg(long, value_parser = clap::value_parser!(u16).range(1..))]
     port: Option<u16>,
     #[arg(long)]
@@ -42,6 +44,21 @@ struct Cli {
     /// Decode a fixed number of frames without opening a window (integration test).
     #[arg(long)]
     check_frames: Option<u32>,
+}
+
+#[cfg(any(target_os = "macos", test))]
+impl Cli {
+    fn ssh_target(&self, selected: &crate::discovery::Selection) -> SshTarget {
+        let mut target = SshTarget::new(selected.host.clone());
+        target.server_bin = self.server_bin.clone();
+        let port = self
+            .port
+            .or_else(|| self.host.is_none().then_some(selected.port));
+        if let Some(port) = port {
+            target.ssh_args.extend(["-p".into(), port.to_string()]);
+        }
+        target
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -102,11 +119,7 @@ pub fn client_main() -> Result<()> {
             session(rd, wr, &host, cli.check_frames).await
         } else {
             selected.validate()?;
-            let mut target = SshTarget::new(host.clone());
-            target.server_bin = cli.server_bin;
-            target
-                .ssh_args
-                .extend(["-p".into(), cli.port.unwrap_or(selected.port).to_string()]);
+            let mut target = cli.ssh_target(&selected);
             if cli.check_frames.is_none() {
                 target.askpass = Some(native::helper_path()?);
             }
@@ -455,6 +468,49 @@ fn server_payload(m: &ServerMsg) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn ssh_config_port_is_preserved_unless_selected_or_overridden() {
+        use std::io::Write;
+        for (args, expected) in [
+            (vec!["gliff", "office"], "port 2222"),
+            (vec!["gliff"], "port 4422"),
+            (vec!["gliff", "office", "--port", "9922"], "port 9922"),
+            (vec!["gliff", "--port", "9922"], "port 9922"),
+        ] {
+            let cli = Cli::try_parse_from(args).unwrap();
+            let selected = crate::discovery::Selection {
+                host: "office".into(),
+                port: 4422,
+                screen: crate::discovery::ScreenMode::Mirror,
+            };
+            let target = cli.ssh_target(&selected);
+            let mut ssh = std::process::Command::new("ssh")
+                .args(["-G", "-F", "/dev/stdin"])
+                .args(&target.ssh_args)
+                .arg(&target.host)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            ssh.stdin
+                .take()
+                .unwrap()
+                .write_all(b"Host office\n  HostName 127.0.0.1\n  Port 2222\n")
+                .unwrap();
+            let output = ssh.wait_with_output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .any(|line| line == expected));
+        }
+    }
 
     #[tokio::test]
     async fn pace_reconfiguration_keeps_decoder_reference_frames() -> Result<()> {

@@ -23,8 +23,12 @@ use crate::{encoder::Encoder, keys, native};
 pub(crate) struct Cli {
     #[arg(long, conflicts_with = "listen")]
     stdio: bool,
+    /// Dev only: listen on a TCP address (no auth; localhost).
     #[arg(long)]
     listen: Option<String>,
+    /// Allow an unauthenticated development listener on non-loopback addresses.
+    #[arg(long, requires = "listen")]
+    allow_remote: bool,
     #[arg(long, default_value = "auto", conflicts_with = "headless")]
     output: String,
     #[arg(long)]
@@ -111,7 +115,7 @@ where
         ensure!(!std::io::stdout().is_terminal(), "--stdio requires a pipe");
     }
     if let Some(addr) = &cli.listen {
-        let listener = tokio::net::TcpListener::bind(addr).await?;
+        let listener = gliff_transport::bind_development_listener(addr, cli.allow_remote).await?;
         let (socket, _) = listener.accept().await?;
         socket.set_nodelay(true)?;
         let (rd, wr) = tokio::io::split(socket);
@@ -164,11 +168,6 @@ where
     }
     let dual = caps.chroma.contains(&ChromaMode::Dual420)
         && (cfg.full_chroma && !cfg.low_bandwidth || !caps.chroma.contains(&ChromaMode::Single420));
-    let chroma = if dual {
-        ChromaMode::Dual420
-    } else {
-        ChromaMode::Single420
-    };
     let args = vec![
         cfg.output.clone(),
         caps.max_width.clamp(2, 1920).to_string(),
@@ -177,7 +176,7 @@ where
     ];
     let mut helper = native::spawn("capture", &args)?;
     let mut native_reader = helper.stdout.take().unwrap();
-    let mut native_writer = helper.stdin.take().unwrap();
+    let native_writer = helper.stdin.take().unwrap();
     let (kind, ready) =
         tokio::time::timeout(Duration::from_secs(15), native::read(&mut native_reader))
             .await
@@ -192,6 +191,41 @@ where
         writer.write_msg(&ServerMsg::error(256, m)).await?;
         bail!("{m}");
     }
+    let result = stream(
+        reader,
+        writer,
+        cfg,
+        ready,
+        native_reader,
+        native_writer,
+        dual,
+    )
+    .await;
+    let _ = tokio::time::timeout(Duration::from_secs(2), helper.wait()).await;
+    let _ = helper.kill().await;
+    result
+}
+
+async fn stream<R, W, NR, NW>(
+    mut reader: Framed<R>,
+    mut writer: Framed<W>,
+    cfg: &Cli,
+    ready: Value,
+    mut native_reader: NR,
+    mut native_writer: NW,
+    dual: bool,
+) -> Result<()>
+where
+    R: AsyncRead + Unpin + 'static,
+    W: AsyncWrite + Unpin + 'static,
+    NR: AsyncRead + Unpin + 'static,
+    NW: AsyncWrite + Unpin + 'static,
+{
+    let chroma = if dual {
+        ChromaMode::Dual420
+    } else {
+        ChromaMode::Single420
+    };
     let mut width = ready["width"].as_u64().context("missing display width")? as u32;
     let mut height = ready["height"].as_u64().context("missing display height")? as u32;
     let mut scale = ready["scale_milli"]
@@ -252,7 +286,7 @@ where
         })
         .await?;
     let (command_tx, mut commands) = mpsc::channel::<Value>(64);
-    tokio::task::spawn_local(async move {
+    let mut command_task = tokio::task::spawn_local(async move {
         while let Some(cmd) = commands.recv().await {
             native::write(
                 &mut native_writer,
@@ -264,7 +298,7 @@ where
         Ok::<_, anyhow::Error>(())
     });
     let (cap_tx, mut capture) = mpsc::channel::<Result<(u8, Vec<u8>)>>(1);
-    tokio::task::spawn_local(async move {
+    let capture_task = tokio::task::spawn_local(async move {
         loop {
             let frame = native::read(&mut native_reader).await;
             let stopped = frame.is_err();
@@ -274,7 +308,7 @@ where
         }
     });
     let (msg_tx, mut input) = mpsc::channel::<Result<(ClientMsg, Bytes)>>(64);
-    tokio::task::spawn_local(async move {
+    let input_task = tokio::task::spawn_local(async move {
         loop {
             let msg = async {
                 let msg = reader.read_msg::<ClientMsg>().await?;
@@ -305,10 +339,12 @@ where
     let mut last_frame = None;
     let mut refresh = tokio::time::interval(Duration::from_millis(250));
     let mut resend = false;
+    let mut writer = crate::writer::Writer::spawn(writer);
     let result: Result<()> = async {
         loop {
             tokio::select! {
-                Some((msg, payload)) = clips.recv() => { writer.write_msg_with_payloads(&ServerMsg::from(msg), &[&payload]).await?; }
+                result = writer.stopped() => return result,
+                Some((msg, payload)) = clips.recv() => { writer.send(ServerMsg::from(msg), vec![payload])?; }
                 _ = refresh.tick(), if last_frame.is_some() => { resend = true; }
                 msg = input.recv() => {
                     let Some(msg) = msg else { break; };
@@ -319,8 +355,8 @@ where
                             ClientMsg::Bye => break,
                             ClientMsg::FrameAck { frame_id: id, .. } => { ack = ack.max(id.min(frame_id)); }
                             ClientMsg::RequestKeyframe => { keyframe = true; }
-                            ClientMsg::Ping { t } => writer.write_msg(&ServerMsg::Pong { t, server_now_ms: crate::client::now_ms() }).await?,
-                            other => if let Some(cmd) = input_command(other) { command_tx.send(cmd).await?; },
+                            ClientMsg::Ping { t } => writer.send(ServerMsg::Pong { t, server_now_ms: crate::client::now_ms() }, vec![])?,
+                            other => if let Some(cmd) = input_command(other) { command_tx.try_send(cmd)?; },
                         }
                     }
                 }
@@ -334,7 +370,7 @@ where
                         ensure!(w <= 1920 && h <= 1200 && w.is_multiple_of(2) && h.is_multiple_of(2), "invalid display extent");
                         width = w; height = h; scale = s;
                         encoder = Encoder::new(gliff_sw::EncoderSettings { width, height, bitrate, framerate: 30 }, cpu, dual).await?;
-                        writer.write_msg(&ServerMsg::StreamConfig { codec: Codec::H264, chroma, pipeline: Some(encoder.pipeline()), width, height, scale_milli: scale, extradata: vec![], aux_extradata: None, view_width: width, view_height: height, fps_cap: 30 }).await?;
+                        writer.send(ServerMsg::StreamConfig { codec: Codec::H264, chroma, pipeline: Some(encoder.pipeline()), width, height, scale_milli: scale, extradata: vec![], aux_extradata: None, view_width: width, view_height: height, fps_cap: 30 }, vec![])?;
                         keyframe = true;
                     }
                     last_frame = Some(frame); resend = true;
@@ -345,22 +381,29 @@ where
             let pipeline = encoder.pipeline();
             let coded = encoder.encode(&frame[12..], keyframe).await?;
             if encoder.pipeline() != pipeline {
-                writer.write_msg(&ServerMsg::StreamConfig { codec: Codec::H264, chroma, pipeline: Some(encoder.pipeline()), width, height, scale_milli: scale, extradata: vec![], aux_extradata: None, view_width: width, view_height: height, fps_cap: 30 }).await?;
+                writer.send(ServerMsg::StreamConfig { codec: Codec::H264, chroma, pipeline: Some(encoder.pipeline()), width, height, scale_milli: scale, extradata: vec![], aux_extradata: None, view_width: width, view_height: height, fps_cap: 30 }, vec![])?;
             }
             if coded.main.is_empty() { continue; }
             keyframe = false; resend = false; frame_id += 1;
             let aux = coded.aux.as_deref().unwrap_or_default();
             let msg = ServerMsg::VideoFrame { frame_id, pts_us: started.elapsed().as_micros() as u64, keyframe: coded.keyframe, damage: vec![], data_len: coded.main.len() as u32, aux_len: aux.len() as u32 };
-            writer.write_msg_with_payloads(&msg, &[&coded.main, aux]).await?;
+            writer.send(msg, vec![coded.main.into(), coded.aux.unwrap_or_default().into()])?;
         }
         Ok(())
     }.await;
-    let _ = command_tx.send(json!({"type":"release"})).await;
-    // EOF lets the bridge release all held input before it exits.
+    drop(writer);
+    input_task.abort();
+    capture_task.abort();
+    let _ = command_tx.try_send(json!({"type":"release"}));
+    // EOF also releases held input if the native command queue was full.
     drop(clipboard);
     drop(command_tx);
-    let _ = tokio::time::timeout(Duration::from_secs(2), helper.wait()).await;
-    let _ = helper.kill().await;
+    if tokio::time::timeout(Duration::from_secs(2), &mut command_task)
+        .await
+        .is_err()
+    {
+        command_task.abort();
+    }
     result
 }
 
@@ -393,6 +436,155 @@ fn input_command(msg: ClientMsg) -> Option<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn stalled_video_still_processes_releases_bye_eof_and_timeout() {
+        for exit in ["bye", "eof", "timeout"] {
+            tokio::task::LocalSet::new()
+                .run_until(stalled_viewer(exit))
+                .await;
+        }
+    }
+
+    async fn stalled_viewer(exit: &str) {
+        // A 64-byte wire guarantees the encoded frame cannot finish
+        // while the viewer reads only its message header.
+        let (viewer, host) = tokio::io::duplex(64);
+        let (viewer_rd, viewer_wr) = tokio::io::split(viewer);
+        let (host_rd, host_wr) = tokio::io::split(host);
+        let mut viewer_rd = Framed::new(viewer_rd);
+        let mut viewer_wr = Framed::new(viewer_wr);
+        let (mut pixels, capture) = tokio::io::duplex(128 * 1024);
+        let (commands, mut native_commands) = tokio::io::duplex(4096);
+        let task = tokio::task::spawn_local(async move {
+            let cfg = Cli::try_parse_from(["gliff-server", "--video", "cpu"]).unwrap();
+            stream(
+                Framed::new(host_rd),
+                Framed::new(host_wr),
+                &cfg,
+                json!({"width":128,"height":128,"scale_milli":1000,"output":"test"}),
+                capture,
+                commands,
+                false,
+            )
+            .await
+        });
+        assert!(matches!(
+            viewer_rd.read_msg::<ServerMsg>().await.unwrap(),
+            ServerMsg::HelloAck { .. }
+        ));
+        assert!(matches!(
+            viewer_rd.read_msg::<ServerMsg>().await.unwrap(),
+            ServerMsg::StreamConfig { .. }
+        ));
+        {
+            let pressed = true;
+            viewer_wr
+                .write_msg(&ClientMsg::Key {
+                    keycode: 30,
+                    pressed,
+                })
+                .await
+                .unwrap();
+            viewer_wr
+                .write_msg(&ClientMsg::PointerButton {
+                    button: 272,
+                    pressed,
+                })
+                .await
+                .unwrap();
+            for _ in 0..2 {
+                let (_, data) = native::read(&mut native_commands).await.unwrap();
+                assert_eq!(
+                    serde_json::from_slice::<Value>(&data).unwrap()["pressed"],
+                    true
+                );
+            }
+        }
+        let mut frame = Vec::new();
+        for n in [128_u32, 128, 1000] {
+            frame.extend_from_slice(&n.to_le_bytes());
+        }
+        let mut random = 1_u32;
+        for _ in 0..128 * 128 {
+            random ^= random << 13;
+            random ^= random >> 17;
+            random ^= random << 5;
+            frame.extend_from_slice(&[
+                random as u8,
+                (random >> 8) as u8,
+                (random >> 16) as u8,
+                255,
+            ]);
+        }
+        native::write(&mut pixels, native::PIXELS, &frame)
+            .await
+            .unwrap();
+        assert!(
+            matches!(viewer_rd.read_msg::<ServerMsg>().await.unwrap(), ServerMsg::VideoFrame { data_len, .. } if data_len > 1024)
+        );
+        // Leave the payload unread, but keep sending client input.
+        viewer_wr
+            .write_msg(&ClientMsg::Key {
+                keycode: 30,
+                pressed: false,
+            })
+            .await
+            .unwrap();
+        viewer_wr
+            .write_msg(&ClientMsg::PointerButton {
+                button: 272,
+                pressed: false,
+            })
+            .await
+            .unwrap();
+        for kind in ["key", "button"] {
+            let (_, data) =
+                tokio::time::timeout(Duration::from_secs(2), native::read(&mut native_commands))
+                    .await
+                    .expect("input blocked behind video")
+                    .unwrap();
+            let command: Value = serde_json::from_slice(&data).unwrap();
+            assert_eq!(command["type"], kind);
+            assert_eq!(command["pressed"], false);
+        }
+        match exit {
+            "bye" => viewer_wr.write_msg(&ClientMsg::Bye).await.unwrap(),
+            "eof" => {
+                use tokio::io::AsyncWriteExt;
+                viewer_wr.into_inner().shutdown().await.unwrap();
+            }
+            "timeout" => {
+                tokio::time::pause();
+                tokio::time::advance(crate::writer::WRITE_TIMEOUT + Duration::from_millis(1)).await;
+            }
+            _ => unreachable!(),
+        }
+        let (_, data) =
+            tokio::time::timeout(Duration::from_secs(2), native::read(&mut native_commands))
+                .await
+                .expect("input cleanup blocked behind video")
+                .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&data).unwrap(),
+            json!({"type":"release"})
+        );
+        let result = tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .expect("session failed to stop")
+            .unwrap();
+        if exit == "timeout" {
+            assert!(format!("{:#}", result.unwrap_err()).contains("viewer stopped reading"));
+            tokio::time::resume();
+        } else {
+            result.unwrap();
+        }
+        assert!(
+            native::read(&mut native_commands).await.is_err(),
+            "native input pipe must close"
+        );
+    }
+
     #[test]
     fn input_translation_preserves_positions_and_bounds() {
         assert_eq!(

@@ -3,12 +3,14 @@
 
 use anyhow::{bail, ensure, Context, Result};
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 const DATA: u8 = 1;
 const STATUS: u8 = 2;
 const EOF: u8 = 3;
 const LIMIT: usize = 32 * 1024;
+const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Serialize, Deserialize)]
 struct Status {
@@ -26,10 +28,14 @@ async fn packet<R: AsyncRead + Unpin>(rd: &mut R) -> Result<(u8, Vec<u8>)> {
 
 async fn send<W: AsyncWrite + Unpin>(wr: &mut W, kind: u8, data: &[u8]) -> Result<()> {
     ensure!(data.len() <= LIMIT, "host bridge packet exceeds limit");
-    wr.write_u8(kind).await?;
-    wr.write_u32_le(data.len() as u32).await?;
-    wr.write_all(data).await?;
-    wr.flush().await?;
+    tokio::time::timeout(WRITE_TIMEOUT, async {
+        wr.write_u8(kind).await?;
+        wr.write_u32_le(data.len() as u32).await?;
+        wr.write_all(data).await?;
+        wr.flush().await
+    })
+    .await
+    .context("host bridge write timed out")??;
     Ok(())
 }
 
@@ -61,8 +67,12 @@ where
             .context("Gliff host app disconnected")?;
         match kind {
             DATA => {
-                wr.write_all(&data).await?;
-                wr.flush().await?;
+                tokio::time::timeout(WRITE_TIMEOUT, async {
+                    wr.write_all(&data).await?;
+                    wr.flush().await
+                })
+                .await
+                .context("host relay write timed out")??;
             }
             STATUS => {
                 let status: Status = serde_json::from_slice(&data)?;
@@ -134,8 +144,6 @@ pub async fn relay(config: &crate::server::Cli) -> Result<()> {
 
 #[cfg(target_os = "macos")]
 pub async fn app(path: &std::path::Path) -> Result<()> {
-    use std::time::Duration;
-
     let mut socket = tokio::net::UnixStream::connect(path).await?;
     let (kind, config) =
         tokio::time::timeout(Duration::from_secs(10), packet(&mut socket)).await??;
@@ -183,6 +191,20 @@ pub async fn app(path: &std::path::Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stalled_bridge_or_ssh_stdout_has_a_write_deadline() {
+        let (mut wr, _unread) = tokio::io::duplex(1);
+        assert!(
+            format!("{:#}", send(&mut wr, DATA, b"blocked").await.unwrap_err())
+                .contains("host bridge write timed out")
+        );
+        let (mut wire, rd) = tokio::io::duplex(128);
+        send(&mut wire, DATA, b"blocked").await.unwrap();
+        let (sink, _unread) = tokio::io::duplex(1);
+        assert!(format!("{:#}", output(rd, sink).await.unwrap_err())
+            .contains("host relay write timed out"));
+    }
 
     #[tokio::test]
     async fn relay_backpressure_eof_and_error() {
