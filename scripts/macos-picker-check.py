@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
-"""Check actual picker layout and keyboard handling without SSH or LAN access."""
+"""Check picker controls and default preferences inside and outside an app bundle."""
 import json
 import platform
+import plistlib
+import shutil
 import struct
 import subprocess
 import sys
@@ -23,9 +25,20 @@ def main():
 let app=NSApplication.shared
 app.setActivationPolicy(.regular)
 let preferences=UserDefaults(suiteName:CommandLine.arguments[2])!
-let picker=ComputerPicker(preferences:preferences);app.delegate=picker
+let checkDefault=CommandLine.arguments[1].hasPrefix("default-")
+let picker=checkDefault ? ComputerPicker() : ComputerPicker(preferences:preferences);app.delegate=picker
 Timer.scheduledTimer(withTimeInterval:0.4,repeats:false) { _ in
     let window=picker.window!
+    if checkDefault {
+        precondition(window.isVisible,"Default picker did not open")
+        if CommandLine.arguments[1]=="default-bundled" {
+            precondition(Bundle.main.bundleIdentifier=="org.omacom.gliff","Missing app-bundle fixture")
+            precondition(picker.preferences===UserDefaults.standard,"Bundled picker must use standard preferences")
+        }
+        diagnostic("DEFAULT PREFERENCES PASS: picker opens and cancels")
+        picker.cancel(nil)
+        return
+    }
     let emptySize=window.contentLayoutRect.size
     picker.nearby.records["fixture"] = NearbyComputer(id:"fixture",name:"Keyboard fixture",host:"keyboard.example",port:22,user:"tester",platform:"omarchy")
     picker.update()
@@ -91,24 +104,42 @@ withExtendedLifetime(picker) { app.run() }
             f"{platform.machine()}-apple-macosx13.0", "-warnings-as-errors",
             str(swift), "-o", str(binary),
         ], check=True, timeout=45)
-        for mode in ("connect", "cancel"):
+        bundle = Path(folder, "Gliff.app")
+        bundled_binary = bundle / "Contents/MacOS/picker"
+        bundled_binary.parent.mkdir(parents=True)
+        shutil.copy2(binary, bundled_binary)
+        with (bundle / "Contents/Info.plist").open("wb") as info:
+            plistlib.dump({
+                "CFBundleIdentifier": "org.omacom.gliff",
+                "CFBundleExecutable": "picker",
+                "CFBundlePackageType": "APPL",
+                "CFBundleName": "Gliff",
+            }, info)
+        subprocess.run(["codesign", "--force", "--sign", "-", str(bundle)],
+                       check=True, timeout=15)
+        for mode in ("connect", "cancel", "default-standalone", "default-bundled"):
             suite = f"org.omacom.gliff.picker-check.{uuid.uuid4()}"
-            child = subprocess.Popen([str(binary), mode, suite], stdin=subprocess.PIPE,
+            executable = bundled_binary if mode == "default-bundled" else binary
+            child = subprocess.Popen([str(executable), mode, suite], stdin=subprocess.PIPE,
                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             try:
                 code = child.wait(timeout=15)
                 errors = child.stderr.read().decode()
-                assert code == 0, errors
+                assert code == 0, f"picker exited {code}: {errors}"
                 packet = child.stdout.read()
                 assert len(packet) >= 5 and packet[0] == 2, "missing picker result"
                 length = struct.unpack("<I", packet[1:5])[0]
                 assert len(packet) == 5 + length, "unexpected extra picker result"
                 event = json.loads(packet[5:])
-                assert event["type"] == mode, event
+                expected = "cancel" if mode.startswith("default-") else mode
+                assert event["type"] == expected, event
                 if mode == "connect":
                     assert event["host"] == "tester@keyboard.example" and event["port"] == 2222, event
                     assert event["screen"] == "private", event
-                print(f"PICKER LAYOUT/KEYBOARD PASS: compact list, scrolling, wrapped status, user resize; Tab focuses Port without connecting; {mode}: {event}")
+                if mode.startswith("default-"):
+                    print(f"PICKER DEFAULT PREFERENCES PASS: {mode}; opens and cancels")
+                else:
+                    print(f"PICKER LAYOUT/KEYBOARD PASS: compact list, scrolling, wrapped status, user resize; Tab focuses Port without connecting; {mode}: {event}")
             finally:
                 if child.poll() is None:
                     child.kill(); child.wait()

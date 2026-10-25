@@ -195,7 +195,7 @@ mod tests {
             }
             Err(error) => return Err(error),
         };
-        let mut decoder = gliff_sw::Decoder::new(false)?;
+        let mut decoder = gliff_sw::Decoder::new(false, 64, 64)?;
         let mut last_decoded = None;
         let pixels: Vec<u8> = [40, 120, 200, 255].repeat(64 * 64);
         for i in 0..8 {
@@ -245,7 +245,7 @@ mod tests {
             encoder.pipeline() == gliff_proto::VideoPipeline::Cpu && frame.keyframe,
             "fallback must announce CPU and start with a keyframe"
         );
-        let mut decoder = gliff_sw::Decoder::new(false)?;
+        let mut decoder = gliff_sw::Decoder::new(false, 64, 64)?;
         let decoded = decoder
             .decode(&frame.main, &[])?
             .or(decoder.flush()?)

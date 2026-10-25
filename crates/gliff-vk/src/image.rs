@@ -30,6 +30,9 @@ pub struct DmabufPlane<'a> {
 pub struct Image {
     gpu: Arc<Gpu>,
     pub(crate) image: vk::Image,
+    /// A plane-per-image import (see `import_nv12_planes`): `image` is the
+    /// Y plane and these hold the others. Barriers cover them all.
+    extra: Vec<vk::Image>,
     /// One allocation, or one per plane for a disjoint import.
     memory: Vec<vk::DeviceMemory>,
     pub format: vk::Format,
@@ -41,54 +44,6 @@ pub struct Image {
     /// Per-plane views of layer 0 (R8 for Y, R8G8 for UV) for compute.
     pub(crate) plane_views: Vec<vk::ImageView>,
     pub(crate) layout: std::cell::Cell<vk::ImageLayout>,
-}
-
-/// One decoded NV12 surface as the recombine shader samples it. Keep
-/// NVIDIA's separate R8/RG88 layers in their exported formats: combining
-/// them as disjoint NV12 misreads their tiling on current drivers.
-pub(crate) struct DecodedImage {
-    images: Vec<Image>,
-    views: [vk::ImageView; 2],
-}
-
-impl DecodedImage {
-    pub(crate) fn import(gpu: &Arc<Gpu>, desc: &PrimeDescriptor) -> Result<Self> {
-        if desc.objects.len() == 1 {
-            let image = Image::import_nv12(gpu, desc, false)?;
-            return Ok(Self {
-                views: [image.plane_views[0], image.plane_views[1]],
-                images: vec![image],
-            });
-        }
-        if desc.objects.len() != 2 || desc.planes.len() != 2 {
-            return Err(Error::Unsupported(
-                "decoded NV12 requires one shared object or two separate planes".into(),
-            ));
-        }
-        let images = (0..2)
-            .map(|i| Image::import_nv12_plane(gpu, desc, i))
-            .collect::<Result<Vec<_>>>()?;
-        Ok(Self {
-            views: [images[0].view0(), images[1].view0()],
-            images,
-        })
-    }
-
-    pub(crate) fn views(&self) -> [vk::ImageView; 2] {
-        self.views
-    }
-
-    pub(crate) fn acquire_foreign(&self, cmd: vk::CommandBuffer, new: vk::ImageLayout) {
-        for image in &self.images {
-            image.acquire_foreign(cmd, new);
-        }
-    }
-
-    pub(crate) fn release_foreign(&self, cmd: vk::CommandBuffer) {
-        for image in &self.images {
-            image.release_foreign(cmd);
-        }
-    }
 }
 
 impl Image {
@@ -138,6 +93,7 @@ impl Image {
             layers: 1,
             layer_views: Vec::new(),
             plane_views: Vec::new(),
+            extra: Vec::new(),
             layout: vk::ImageLayout::UNDEFINED.into(),
         };
         let plane_usage = vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::SAMPLED;
@@ -211,6 +167,7 @@ impl Image {
             layers: 1,
             layer_views: Vec::new(),
             plane_views: Vec::new(),
+            extra: Vec::new(),
             layout: vk::ImageLayout::UNDEFINED.into(),
         };
         let video_usage = usage
@@ -256,7 +213,8 @@ impl Image {
             .push_next(&mut external)
             .push_next(&mut format_list);
         // SAFETY: valid create info; dedicated exportable allocation bound
-        // before use.
+        // before use. On failure the image and memory are released before
+        // returning, since a refused large output can be asked for again.
         let (image, memory) = unsafe {
             let image = gpu.device.create_image(&info, None)?;
             let mut dedicated_reqs = vk::MemoryDedicatedRequirements::default();
@@ -268,16 +226,33 @@ impl Image {
             let mut export = vk::ExportMemoryAllocateInfo::default()
                 .handle_types(vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT);
             let mut dedicated = vk::MemoryDedicatedAllocateInfo::default().image(image);
+            let memory_type = match gpu.memory_type(
+                reqs.memory_requirements.memory_type_bits,
+                vk::MemoryPropertyFlags::DEVICE_LOCAL,
+            ) {
+                Ok(t) => t,
+                Err(e) => {
+                    gpu.device.destroy_image(image, None);
+                    return Err(e);
+                }
+            };
             let alloc = vk::MemoryAllocateInfo::default()
                 .allocation_size(reqs.memory_requirements.size)
-                .memory_type_index(gpu.memory_type(
-                    reqs.memory_requirements.memory_type_bits,
-                    vk::MemoryPropertyFlags::DEVICE_LOCAL,
-                )?)
+                .memory_type_index(memory_type)
                 .push_next(&mut export)
                 .push_next(&mut dedicated);
-            let memory = gpu.device.allocate_memory(&alloc, None)?;
-            gpu.device.bind_image_memory(image, memory, 0)?;
+            let memory = match gpu.device.allocate_memory(&alloc, None) {
+                Ok(m) => m,
+                Err(e) => {
+                    gpu.device.destroy_image(image, None);
+                    return Err(e.into());
+                }
+            };
+            if let Err(e) = gpu.device.bind_image_memory(image, memory, 0) {
+                gpu.device.destroy_image(image, None);
+                gpu.device.free_memory(memory, None);
+                return Err(e.into());
+            }
             (image, memory)
         };
         let mut img = Self {
@@ -290,6 +265,7 @@ impl Image {
             layers: 1,
             layer_views: Vec::new(),
             plane_views: Vec::new(),
+            extra: Vec::new(),
             layout: vk::ImageLayout::UNDEFINED.into(),
         };
         // The shader declares `rgba8`, so it stores through an RGBA view of
@@ -343,6 +319,7 @@ impl Image {
             layers: 1,
             layer_views: Vec::new(),
             plane_views: Vec::new(),
+            extra: Vec::new(),
             layout: vk::ImageLayout::UNDEFINED.into(),
         };
         img.layer_views.push(img.view(
@@ -442,6 +419,7 @@ impl Image {
             layers: 1,
             layer_views: Vec::new(),
             plane_views: Vec::new(),
+            extra: Vec::new(),
             layout: vk::ImageLayout::UNDEFINED.into(),
         };
         img.layer_views.push(img.view(
@@ -450,90 +428,6 @@ impl Image {
             0,
             vk::ImageUsageFlags::SAMPLED,
         )?);
-        Ok(img)
-    }
-
-    /// Import one separate DRM layer of an NV12 surface in its exported
-    /// format, keeping its dimensions, pitch, offset and modifier intact.
-    fn import_nv12_plane(gpu: &Arc<Gpu>, desc: &PrimeDescriptor, index: usize) -> Result<Self> {
-        let plane = &desc.planes[index];
-        let (fourcc, format, width, height) = if index == 0 {
-            (DrmFourcc::R8, vk::Format::R8_UNORM, desc.width, desc.height)
-        } else {
-            (
-                DrmFourcc::Gr88,
-                vk::Format::R8G8_UNORM,
-                desc.width.div_ceil(2),
-                desc.height.div_ceil(2),
-            )
-        };
-        // NVIDIA labels the chroma layer RG88, Mesa uses GR88. The NV12
-        // surface fixes the byte order to U then V in either descriptor.
-        let nvidia_uv = index == 1 && plane.drm_format == DrmFourcc::Rg88 as u32;
-        if plane.drm_format != fourcc as u32 && !nvidia_uv {
-            return Err(Error::Unsupported(format!(
-                "NV12 layer {index} has format {:#x}, expected {fourcc:?}",
-                plane.drm_format
-            )));
-        }
-        let fd = desc.objects.get(plane.object).ok_or_else(|| {
-            Error::Unsupported(format!("NV12 layer {index} refers to a missing object"))
-        })?;
-        let (memory_planes, _) =
-            gpu.modifier_properties(format, desc.modifier)
-                .ok_or_else(|| {
-                    Error::Unsupported(format!(
-                        "{fourcc:?} with modifier {:#x} is not importable",
-                        desc.modifier
-                    ))
-                })?;
-        if memory_planes != 1 {
-            return Err(Error::Unsupported(format!(
-                "NV12 layer {index} requires {memory_planes} memory planes"
-            )));
-        }
-        let layouts = [vk::SubresourceLayout {
-            offset: plane.offset as u64,
-            row_pitch: plane.pitch as u64,
-            ..Default::default()
-        }];
-        let mut explicit = vk::ImageDrmFormatModifierExplicitCreateInfoEXT::default()
-            .drm_format_modifier(desc.modifier)
-            .plane_layouts(&layouts);
-        let mut external = vk::ExternalMemoryImageCreateInfo::default()
-            .handle_types(vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT);
-        let usage = vk::ImageUsageFlags::SAMPLED;
-        let info = vk::ImageCreateInfo::default()
-            .image_type(vk::ImageType::TYPE_2D)
-            .format(format)
-            .extent(vk::Extent3D {
-                width,
-                height,
-                depth: 1,
-            })
-            .mip_levels(1)
-            .array_layers(1)
-            .samples(vk::SampleCountFlags::TYPE_1)
-            .tiling(vk::ImageTiling::DRM_FORMAT_MODIFIER_EXT)
-            .usage(usage)
-            .initial_layout(vk::ImageLayout::UNDEFINED)
-            .push_next(&mut explicit)
-            .push_next(&mut external);
-        let (image, memory) = Self::create_imported(gpu, &info, fd.as_fd())?;
-        let mut img = Self {
-            gpu: gpu.clone(),
-            image,
-            memory: vec![memory],
-            format,
-            width,
-            height,
-            layers: 1,
-            layer_views: Vec::new(),
-            plane_views: Vec::new(),
-            layout: vk::ImageLayout::GENERAL.into(),
-        };
-        img.layer_views
-            .push(img.view(format, vk::ImageAspectFlags::COLOR, 0, usage)?);
         Ok(img)
     }
 
@@ -656,6 +550,7 @@ impl Image {
             layers: 1,
             layer_views: Vec::new(),
             plane_views: Vec::new(),
+            extra: Vec::new(),
             layout: vk::ImageLayout::GENERAL.into(),
         };
         let plane_usage = usage & (vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::SAMPLED);
@@ -671,6 +566,128 @@ impl Image {
             0,
             plane_usage,
         )?);
+        Ok(img)
+    }
+
+    /// Import an exported VA-API NV12 surface whose planes are separate
+    /// dmabufs (NVIDIA's VA-API driver) as one image per plane: R8 for Y,
+    /// R8G8 at half size for UV, each with the plane's own extent. Imported
+    /// as one DISJOINT NV12 image, NVIDIA's Vulkan driver lays the chroma
+    /// plane out differently from how the VA-API driver wrote it at many
+    /// sizes (1920x1080 among them), and chroma reads back as zeros.
+    pub(crate) fn import_nv12_planes(gpu: &Arc<Gpu>, desc: &PrimeDescriptor) -> Result<Self> {
+        if desc.planes.len() != 2
+            || desc.objects.len() != 2
+            || desc.planes.iter().enumerate().any(|(i, p)| p.object != i)
+        {
+            return Err(Error::Unsupported(
+                "per-plane import needs one dmabuf per plane".into(),
+            ));
+        }
+        let families = gpu.families.all();
+        let formats = [vk::Format::R8_UNORM, vk::Format::R8G8_UNORM];
+        let extents = [
+            (desc.width, desc.height),
+            (desc.width.div_ceil(2), desc.height.div_ceil(2)),
+        ];
+        let mut images = Vec::new();
+        let mut memory = Vec::new();
+        // SAFETY: these handles belong to this failed import and have not
+        // been submitted to any queue; release only what was created so far.
+        let release = |images: &[vk::Image], memory: &[vk::DeviceMemory]| unsafe {
+            // SAFETY: nothing else refers to these yet.
+            for &i in images {
+                gpu.device.destroy_image(i, None);
+            }
+            for &m in memory {
+                gpu.device.free_memory(m, None);
+            }
+        };
+        for i in 0..2 {
+            if !sampled_plane_modifier(gpu.modifier_properties(formats[i], desc.modifier)) {
+                release(&images, &memory);
+                return Err(Error::Unsupported(format!(
+                    "{:?} with modifier {:#x} requires one sampleable memory plane",
+                    formats[i], desc.modifier
+                )));
+            }
+            let layouts = [vk::SubresourceLayout {
+                offset: desc.planes[i].offset as u64,
+                size: 0,
+                row_pitch: desc.planes[i].pitch as u64,
+                array_pitch: 0,
+                depth_pitch: 0,
+            }];
+            let mut explicit = vk::ImageDrmFormatModifierExplicitCreateInfoEXT::default()
+                .drm_format_modifier(desc.modifier)
+                .plane_layouts(&layouts);
+            let mut external = vk::ExternalMemoryImageCreateInfo::default()
+                .handle_types(vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT);
+            let mut info = vk::ImageCreateInfo::default()
+                .image_type(vk::ImageType::TYPE_2D)
+                .format(formats[i])
+                .extent(vk::Extent3D {
+                    width: extents[i].0,
+                    height: extents[i].1,
+                    depth: 1,
+                })
+                .mip_levels(1)
+                .array_layers(1)
+                .samples(vk::SampleCountFlags::TYPE_1)
+                .tiling(vk::ImageTiling::DRM_FORMAT_MODIFIER_EXT)
+                .usage(vk::ImageUsageFlags::SAMPLED)
+                .initial_layout(vk::ImageLayout::UNDEFINED)
+                .push_next(&mut explicit)
+                .push_next(&mut external);
+            if families.len() > 1 {
+                info = info
+                    .sharing_mode(vk::SharingMode::CONCURRENT)
+                    .queue_family_indices(&families);
+            }
+            match Self::create_imported(gpu, &info, desc.objects[i].as_fd()) {
+                Ok((image, mem)) => {
+                    images.push(image);
+                    memory.push(mem);
+                }
+                Err(e) => {
+                    release(&images, &memory);
+                    return Err(e);
+                }
+            }
+        }
+        let mut img = Self {
+            gpu: gpu.clone(),
+            image: images[0],
+            extra: vec![images[1]],
+            memory,
+            format: NV12,
+            width: desc.width,
+            height: desc.height,
+            layers: 1,
+            layer_views: Vec::new(),
+            plane_views: Vec::new(),
+            layout: vk::ImageLayout::GENERAL.into(),
+        };
+        for (i, &format) in formats.iter().enumerate() {
+            let image = if i == 0 { img.image } else { img.extra[0] };
+            let mut usage_info =
+                vk::ImageViewUsageCreateInfo::default().usage(vk::ImageUsageFlags::SAMPLED);
+            let info = vk::ImageViewCreateInfo::default()
+                .image(image)
+                .view_type(vk::ImageViewType::TYPE_2D)
+                .format(format)
+                .subresource_range(vk::ImageSubresourceRange {
+                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    base_mip_level: 0,
+                    level_count: 1,
+                    base_array_layer: 0,
+                    layer_count: 1,
+                })
+                .push_next(&mut usage_info);
+            // SAFETY: a valid image and range; `img` destroys the view.
+            img.plane_views
+                .push(unsafe { gpu.device.create_image_view(&info, None) }?);
+        }
         Ok(img)
     }
 
@@ -813,6 +830,14 @@ impl Image {
     /// Record a plane-by-plane copy of another NV12 image of the same size.
     /// `src` must be in TRANSFER_SRC_OPTIMAL and `self` in TRANSFER_DST_OPTIMAL.
     pub(crate) fn copy_nv12_from(&self, cmd: vk::CommandBuffer, src: &Image) {
+        debug_assert!(
+            self.extra.is_empty(),
+            "operation needs a single Vulkan image"
+        );
+        debug_assert!(
+            src.extra.is_empty(),
+            "copy needs a single Vulkan source image"
+        );
         let region = |aspect: vk::ImageAspectFlags, w: u32, h: u32| vk::ImageCopy {
             src_subresource: vk::ImageSubresourceLayers {
                 aspect_mask: aspect,
@@ -881,6 +906,10 @@ impl Image {
     }
 
     pub(crate) fn view0(&self) -> vk::ImageView {
+        debug_assert!(
+            self.extra.is_empty(),
+            "operation needs a single Vulkan image"
+        );
         self.layer_views[0]
     }
 
@@ -907,7 +936,10 @@ impl Image {
                 base_array_layer: 0,
                 layer_count: self.layers,
             });
-        let barriers = [barrier];
+        let barriers: Vec<_> = std::iter::once(self.image)
+            .chain(self.extra.iter().copied())
+            .map(|image| barrier.image(image))
+            .collect();
         let dep = vk::DependencyInfo::default().image_memory_barriers(&barriers);
         // SAFETY: recording into a command buffer in the recording state.
         unsafe { self.gpu.device.cmd_pipeline_barrier2(cmd, &dep) };
@@ -949,7 +981,10 @@ impl Image {
                 base_array_layer: 0,
                 layer_count: self.layers,
             });
-        let barriers = [barrier];
+        let barriers: Vec<_> = std::iter::once(self.image)
+            .chain(self.extra.iter().copied())
+            .map(|image| barrier.image(image))
+            .collect();
         let dep = vk::DependencyInfo::default().image_memory_barriers(&barriers);
         // SAFETY: recording into a command buffer in the recording state.
         unsafe { self.gpu.device.cmd_pipeline_barrier2(cmd, &dep) };
@@ -972,6 +1007,10 @@ impl Image {
 
     /// Record a copy of packed 32-bit pixels from `buf` into the image.
     pub(crate) fn copy_rgba_from_buffer(&self, cmd: vk::CommandBuffer, buf: &HostBuffer) {
+        debug_assert!(
+            self.extra.is_empty(),
+            "operation needs a single Vulkan image"
+        );
         let regions = [vk::BufferImageCopy {
             buffer_offset: 0,
             buffer_row_length: self.width,
@@ -998,6 +1037,10 @@ impl Image {
 
     /// Record a copy of a single-plane 32-bit image into `buf`, packed.
     pub(crate) fn copy_rgba_to_buffer(&self, cmd: vk::CommandBuffer, buf: &HostBuffer) {
+        debug_assert!(
+            self.extra.is_empty(),
+            "operation needs a single Vulkan image"
+        );
         let regions = [vk::BufferImageCopy {
             buffer_offset: 0,
             buffer_row_length: self.width,
@@ -1040,6 +1083,9 @@ impl Drop for Image {
                 self.gpu.device.destroy_image_view(v, None);
             }
             self.gpu.device.destroy_image(self.image, None);
+            for image in self.extra.drain(..) {
+                self.gpu.device.destroy_image(image, None);
+            }
             for m in self.memory.drain(..) {
                 self.gpu.device.free_memory(m, None);
             }
@@ -1156,5 +1202,35 @@ impl Drop for HostBuffer {
             self.gpu.device.destroy_buffer(self.buffer, None);
             self.gpu.device.free_memory(self.memory, None);
         }
+    }
+}
+
+/// A separately imported color plane needs exactly its one supplied layout
+/// and must support the sampled-image use requested when it is created.
+fn sampled_plane_modifier(properties: Option<(u32, vk::FormatFeatureFlags)>) -> bool {
+    properties.is_some_and(|(planes, features)| {
+        planes == 1 && features.contains(vk::FormatFeatureFlags::SAMPLED_IMAGE)
+    })
+}
+
+#[cfg(test)]
+mod plane_modifier_tests {
+    use super::*;
+
+    #[test]
+    fn a_plane_import_rejects_metadata_planes_and_unsampleable_formats() {
+        assert!(sampled_plane_modifier(Some((
+            1,
+            vk::FormatFeatureFlags::SAMPLED_IMAGE
+        ))));
+        assert!(!sampled_plane_modifier(Some((
+            2,
+            vk::FormatFeatureFlags::SAMPLED_IMAGE
+        ))));
+        assert!(!sampled_plane_modifier(Some((
+            1,
+            vk::FormatFeatureFlags::TRANSFER_SRC
+        ))));
+        assert!(!sampled_plane_modifier(None));
     }
 }

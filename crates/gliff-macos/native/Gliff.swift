@@ -700,8 +700,11 @@ final class ComputerPicker: NSObject, NSApplicationDelegate, NSWindowDelegate, N
     var updating = false
     var finished = false
     var selectedID: String?
-    init(screenOverride: String? = nil, preferences: UserDefaults = UserDefaults(suiteName: "org.omacom.gliff")!) {
-        self.screenOverride = screenOverride; self.preferences = preferences
+    init(screenOverride: String? = nil, preferences: UserDefaults? = nil) {
+        self.screenOverride = screenOverride
+        if let preferences = preferences { self.preferences = preferences }
+        else if Bundle.main.bundleIdentifier == "org.omacom.gliff" { self.preferences = .standard }
+        else { self.preferences = UserDefaults(suiteName: "org.omacom.gliff") ?? .standard }
         super.init()
     }
     func label(_ text: String, _ size: CGFloat = 13) -> NSTextField {

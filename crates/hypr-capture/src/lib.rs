@@ -121,6 +121,17 @@ pub struct CaptureConfig {
     /// Paint the cursor into video; avoids a separate cursor capture session.
     /// Takes precedence over `cursor`.
     pub cursor_in_video: bool,
+    /// Refuse to allocate a ring for an output past this size; the capture
+    /// then ends with an error.
+    pub max_size: Option<SizeLimit>,
+}
+
+/// The largest output a capture ring is allocated for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SizeLimit {
+    /// Neither side may be longer.
+    pub side: u32,
+    pub pixels: u64,
 }
 
 pub const DEFAULT_RENDER_NODE: &str = "/dev/dri/renderD128";
@@ -151,6 +162,7 @@ impl CaptureConfig {
             shm_fallback: true,
             cursor: true,
             cursor_in_video: false,
+            max_size: None,
         }
     }
 }

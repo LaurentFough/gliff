@@ -87,13 +87,98 @@ struct Gbm {
     device: Arc<Mutex<Device<File>>>,
 }
 
-#[derive(Default)]
-struct Constraints {
+/// One batch of session buffer constraints.
+#[derive(Debug, Default, Clone, PartialEq)]
+struct ConstraintSet {
     width: u32,
     height: u32,
     formats: Vec<(u32, Vec<u64>)>,
     shm_formats: Vec<u32>,
+}
+
+/// The buffer constraints of a capture session. The compositor sends them
+/// as a full batch in no particular order, ended by `done`, and re-sends a
+/// batch whenever they change. Events fill `pending` and `done` promotes it
+/// to `complete`, which is all that allocation reads, so a reallocation
+/// between batches (the wl_shm fallback after a failed GPU encode) sees the
+/// last full set rather than an empty or half-filled one.
+#[derive(Default)]
+struct Constraints {
+    pending: ConstraintSet,
+    complete: ConstraintSet,
     done: bool,
+}
+
+impl Constraints {
+    /// Applies a session event: constraint events fill the pending batch
+    /// and `done` makes it the complete set. Other events are ignored.
+    fn apply(&mut self, event: &session_proto::Event) {
+        match event {
+            session_proto::Event::BufferSize { width, height } => {
+                self.pending.width = *width;
+                self.pending.height = *height;
+            }
+            session_proto::Event::ShmFormat {
+                format: wayland_client::WEnum::Value(f),
+            } => {
+                self.pending.shm_formats.push(*f as u32);
+            }
+            session_proto::Event::DmabufFormat { format, modifiers } => {
+                let mods = modifiers
+                    .chunks_exact(8)
+                    .map(|b| u64::from_ne_bytes(b.try_into().unwrap_or([0; 8])))
+                    .collect();
+                self.pending.formats.push((*format, mods));
+            }
+            session_proto::Event::Done => {
+                // Every batch carries the full set, so the next one starts
+                // empty.
+                self.complete = std::mem::take(&mut self.pending);
+                self.done = true;
+            }
+            _ => {}
+        }
+    }
+}
+
+/// The dmabuf format and modifiers to allocate the ring with.
+fn dmabuf_format(cfg: &CaptureConfig, set: &ConstraintSet) -> Option<(u32, Vec<u64>)> {
+    const PREFERRED: [DrmFourcc; 4] = [
+        DrmFourcc::Xrgb8888,
+        DrmFourcc::Argb8888,
+        DrmFourcc::Xbgr8888,
+        DrmFourcc::Abgr8888,
+    ];
+    for want in PREFERRED {
+        if let Some((f, mods)) = set.formats.iter().find(|(f, _)| *f == want as u32) {
+            let linear = u64::from(DrmModifier::Linear);
+            let mut mods = mods.clone();
+            if cfg.prefer_linear && mods.contains(&linear) {
+                mods = vec![linear];
+            }
+            if mods.is_empty() {
+                mods.push(linear);
+            }
+            return Some((*f, mods));
+        }
+    }
+    None
+}
+
+/// The wl_shm format to capture into, when the ring should be wl_shm
+/// rather than dmabuf. `gbm` and `shm` say whether a GBM device and the
+/// wl_shm global are there.
+fn shm_choice(
+    cfg: &CaptureConfig,
+    gbm: bool,
+    shm: bool,
+    set: &ConstraintSet,
+) -> Option<(u32, wl_shm::Format)> {
+    if !shm {
+        return None;
+    }
+    let dmabuf = gbm.then(|| dmabuf_format(cfg, set));
+    shm_ring_format(cfg, dmabuf, &set.shm_formats)
 }
 
 struct State {
@@ -276,6 +361,23 @@ fn run(
     let _ = state.conn.roundtrip();
     std::mem::swap(&mut state.sink, sink);
     result
+}
+
+/// Every ring buffer has the output's size, so an output past the caller's
+/// limit would cost that much memory several times over.
+fn check_ring_size(cfg: &CaptureConfig, width: u32, height: u32) -> Result<()> {
+    match cfg.max_size {
+        Some(max)
+            if width.max(height) > max.side
+                || u64::from(width) * u64::from(height) > max.pixels =>
+        {
+            Err(Error::Capture(format!(
+                "output {width}x{height} is past the capture limit of {} a side and {} pixels",
+                max.side, max.pixels
+            )))
+        }
+        _ => Ok(()),
+    }
 }
 
 fn open_gbm(render_node: &std::path::Path) -> Result<Device<File>> {
@@ -482,43 +584,20 @@ impl State {
     }
 
     fn choose_format(&self) -> Option<(u32, Vec<u64>)> {
-        const PREFERRED: [DrmFourcc; 4] = [
-            DrmFourcc::Xrgb8888,
-            DrmFourcc::Argb8888,
-            DrmFourcc::Xbgr8888,
-            DrmFourcc::Abgr8888,
-        ];
-        for want in PREFERRED {
-            if let Some((f, mods)) = self
-                .constraints
-                .formats
-                .iter()
-                .find(|(f, _)| *f == want as u32)
-            {
-                let linear = u64::from(DrmModifier::Linear);
-                let mut mods = mods.clone();
-                if self.cfg.prefer_linear && mods.contains(&linear) {
-                    mods = vec![linear];
-                }
-                if mods.is_empty() {
-                    mods.push(linear);
-                }
-                return Some((*f, mods));
-            }
-        }
-        None
+        dmabuf_format(&self.cfg, &self.constraints.complete)
     }
 
-    /// The wl_shm format to capture into, when the ring should be wl_shm
-    /// rather than dmabuf.
     fn choose_shm_format(&self) -> Option<(u32, wl_shm::Format)> {
-        self.shm.as_ref()?;
-        let dmabuf = self.gbm.as_ref().map(|_| self.choose_format());
-        shm_ring_format(&self.cfg, dmabuf, &self.constraints.shm_formats)
+        shm_choice(
+            &self.cfg,
+            self.gbm.is_some(),
+            self.shm.is_some(),
+            &self.constraints.complete,
+        )
     }
 
     fn allocate_ring(&mut self) -> Result<()> {
-        if self.constraints.width == 0 || self.constraints.height == 0 {
+        if self.constraints.complete.width == 0 || self.constraints.complete.height == 0 {
             // A new headless output has no mode yet. Wait for the
             // constraints that come with its first mode instead of
             // allocating an empty ring (a zero-sized wl_shm pool is a
@@ -529,6 +608,11 @@ impl State {
             tracing::debug!("output has no size yet; waiting before allocating the ring");
             return Ok(());
         }
+        check_ring_size(
+            &self.cfg,
+            self.constraints.complete.width,
+            self.constraints.complete.height,
+        )?;
         self.ring_generation += 1;
         if let Some((fourcc, format)) = self.choose_shm_format() {
             return self.allocate_shm_ring(fourcc, format);
@@ -555,17 +639,20 @@ impl State {
         let Some(gbm) = &self.gbm else {
             return Err(Error::Capture(format!(
                 "no usable wl_shm format offered (got {:x?})",
-                self.constraints.shm_formats
+                self.constraints.complete.shm_formats
             )));
         };
         let (dmabuf, device) = (gbm.dmabuf.clone(), Arc::clone(&gbm.device));
         let (fourcc, modifiers) = self.choose_format().ok_or_else(|| {
             Error::Capture(format!(
                 "no usable dmabuf format offered (got {:x?})",
-                self.constraints.formats
+                self.constraints.complete.formats
             ))
         })?;
-        let (w, h) = (self.constraints.width, self.constraints.height);
+        let (w, h) = (
+            self.constraints.complete.width,
+            self.constraints.complete.height,
+        );
         for slot in self.ring.drain(..) {
             slot.destroy();
         }
@@ -660,7 +747,10 @@ impl State {
         let Some(shm) = self.shm.clone() else {
             return Err(Error::Capture("wl_shm is not available".into()));
         };
-        let (w, h) = (self.constraints.width, self.constraints.height);
+        let (w, h) = (
+            self.constraints.complete.width,
+            self.constraints.complete.height,
+        );
         let layout = ShmLayout::new(w, h)?;
         let stride = layout.row_bytes;
         for slot in self.ring.drain(..) {
@@ -707,7 +797,10 @@ impl State {
     }
 
     fn ring_ready(&mut self, fourcc: u32, modifier: u64, kind: &str) {
-        let (w, h) = (self.constraints.width, self.constraints.height);
+        let (w, h) = (
+            self.constraints.complete.width,
+            self.constraints.complete.height,
+        );
         self.ring_format = Some((fourcc, modifier));
         tracing::info!(
             w,
@@ -763,34 +856,17 @@ impl State {
             Kind::Screen => &mut self.constraints,
             Kind::Cursor => &mut self.cursor_constraints,
         };
+        c.apply(&event);
         match event {
-            session_proto::Event::BufferSize { width, height } => {
-                c.width = width;
-                c.height = height;
-            }
-            session_proto::Event::ShmFormat {
-                format: wayland_client::WEnum::Value(f),
-            } => {
-                c.shm_formats.push(f as u32);
-            }
-            session_proto::Event::DmabufDevice { .. } => {}
-            session_proto::Event::DmabufFormat { format, modifiers } => {
-                let mods = modifiers
-                    .chunks_exact(8)
-                    .map(|b| u64::from_ne_bytes(b.try_into().unwrap_or([0; 8])))
-                    .collect();
-                c.formats.push((format, mods));
-            }
             session_proto::Event::Done => {
-                c.done = true;
                 match kind {
                     Kind::Screen => {
                         let size_changed = self
                             .ring
                             .first()
                             .map(|s| {
-                                s.buffer.info.width != self.constraints.width
-                                    || s.buffer.info.height != self.constraints.height
+                                s.buffer.info.width != self.constraints.complete.width
+                                    || s.buffer.info.height != self.constraints.complete.height
                             })
                             .unwrap_or(true);
                         if size_changed {
@@ -804,13 +880,9 @@ impl State {
                                 return;
                             }
                         }
-                        self.constraints.formats.clear();
-                        self.constraints.shm_formats.clear();
                         self.maybe_capture();
                     }
                     Kind::Cursor => {
-                        self.cursor_constraints.shm_formats.clear();
-                        self.cursor_constraints.formats.clear();
                         // The compositor completes the in-flight frame right
                         // after new constraints; let it finish and reallocate
                         // once its result is in.
@@ -984,8 +1056,8 @@ impl State {
 
     fn realloc_cursor_buffer(&mut self) {
         let (w, h) = (
-            self.cursor_constraints.width,
-            self.cursor_constraints.height,
+            self.cursor_constraints.complete.width,
+            self.cursor_constraints.complete.height,
         );
         let same = self
             .cursor_buf
@@ -1037,8 +1109,8 @@ impl State {
                     f.destroy();
                 }
                 let current = self.cursor_buf.as_ref().is_some_and(|b| {
-                    b.width == self.cursor_constraints.width
-                        && b.height == self.cursor_constraints.height
+                    b.width == self.cursor_constraints.complete.width
+                        && b.height == self.cursor_constraints.complete.height
                 });
                 if let Some(buf) = self.cursor_buf.as_ref().filter(|_| current) {
                     match buf.read_argb() {
@@ -1219,6 +1291,7 @@ delegate_noop!(State: ExtImageCopyCaptureManagerV1);
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::SizeLimit;
 
     const XRGB: u32 = DrmFourcc::Xrgb8888 as u32;
     const ARGB_SHM: u32 = wl_shm::Format::Argb8888 as u32;
@@ -1233,6 +1306,23 @@ mod tests {
 
     fn linear() -> u64 {
         u64::from(DrmModifier::Linear)
+    }
+
+    #[test]
+    fn ring_size_respects_the_limit() {
+        let mut c = cfg(true, true);
+        assert!(check_ring_size(&c, 16384, 16384).is_ok());
+        c.max_size = Some(SizeLimit {
+            side: 4096,
+            pixels: 3840 * 2160,
+        });
+        assert!(check_ring_size(&c, 3840, 2160).is_ok());
+        assert!(check_ring_size(&c, 2160, 3840).is_ok());
+        assert!(check_ring_size(&c, 4096, 1000).is_ok());
+        assert!(check_ring_size(&c, 3842, 2160).is_err());
+        assert!(check_ring_size(&c, 4098, 1000).is_err());
+        assert!(check_ring_size(&c, 1000, 4098).is_err());
+        assert!(check_ring_size(&c, 16384, 16384).is_err());
     }
 
     #[test]
@@ -1327,5 +1417,148 @@ mod tests {
         let rgb565 = wl_shm::Format::Rgb565 as u32;
         assert_eq!(shm_ring_format(&cfg(true, true), None, &[rgb565]), None);
         assert_eq!(shm_ring_format(&cfg(true, true), None, &[]), None);
+    }
+
+    fn size(width: u32, height: u32) -> session_proto::Event {
+        session_proto::Event::BufferSize { width, height }
+    }
+
+    fn shm(format: wl_shm::Format) -> session_proto::Event {
+        session_proto::Event::ShmFormat {
+            format: wayland_client::WEnum::Value(format),
+        }
+    }
+
+    fn dmabuf(format: u32, modifiers: &[u64]) -> session_proto::Event {
+        session_proto::Event::DmabufFormat {
+            format,
+            modifiers: modifiers.iter().flat_map(|m| m.to_ne_bytes()).collect(),
+        }
+    }
+
+    /// Feeds one batch through the same `apply` the session handler uses,
+    /// ending it with `done`.
+    fn batch(c: &mut Constraints, events: Vec<session_proto::Event>) {
+        for event in events {
+            c.apply(&event);
+        }
+        c.apply(&session_proto::Event::Done);
+    }
+
+    /// The ring format `allocate_ring` picks after `Cmd::UseShm`, which
+    /// leaves wl_shm mode and no GBM.
+    fn use_shm_choice(c: &Constraints) -> Option<(u32, wl_shm::Format)> {
+        let mut cfg = cfg(true, true);
+        cfg.mode = CaptureMode::Shm;
+        shm_choice(&cfg, false, true, &c.complete)
+    }
+
+    #[test]
+    fn constraint_events_in_any_order_give_the_same_set() {
+        let mut a = Constraints::default();
+        batch(
+            &mut a,
+            vec![
+                size(1920, 1080),
+                shm(wl_shm::Format::Xrgb8888),
+                dmabuf(XRGB, &[linear()]),
+            ],
+        );
+        let mut b = Constraints::default();
+        batch(
+            &mut b,
+            vec![
+                dmabuf(XRGB, &[linear()]),
+                shm(wl_shm::Format::Xrgb8888),
+                size(1920, 1080),
+            ],
+        );
+        assert_eq!(a.complete, b.complete);
+        assert_eq!((a.complete.width, a.complete.height), (1920, 1080));
+        assert_eq!(a.complete.formats, vec![(XRGB, vec![linear()])]);
+        assert_eq!(a.complete.shm_formats, vec![XRGB_SHM]);
+    }
+
+    #[test]
+    fn use_shm_after_done_finds_a_shm_format() {
+        let mut c = Constraints::default();
+        batch(
+            &mut c,
+            vec![
+                size(1920, 1080),
+                dmabuf(XRGB, &[linear()]),
+                shm(wl_shm::Format::Argb8888),
+            ],
+        );
+        assert_eq!(
+            use_shm_choice(&c),
+            Some((DrmFourcc::Argb8888 as u32, wl_shm::Format::Argb8888))
+        );
+        assert!(c.pending.shm_formats.is_empty());
+    }
+
+    #[test]
+    fn unchanged_size_done_keeps_the_formats() {
+        let events = || {
+            vec![
+                size(1280, 800),
+                dmabuf(XRGB, &[linear()]),
+                shm(wl_shm::Format::Xrgb8888),
+            ]
+        };
+        let mut c = Constraints::default();
+        batch(&mut c, events());
+        let first = c.complete.clone();
+        batch(&mut c, events());
+        assert_eq!(c.complete, first);
+        assert_eq!(use_shm_choice(&c), Some((XRGB, wl_shm::Format::Xrgb8888)));
+    }
+
+    #[test]
+    fn fallback_during_an_incomplete_batch_uses_the_last_complete_set() {
+        let mut c = Constraints::default();
+        batch(
+            &mut c,
+            vec![
+                size(1920, 1080),
+                dmabuf(XRGB, &[linear()]),
+                shm(wl_shm::Format::Xrgb8888),
+            ],
+        );
+        // The next batch has begun (a resize) but its `done` has not come.
+        c.apply(&size(2560, 1440));
+        c.apply(&shm(wl_shm::Format::Argb8888));
+        assert_eq!((c.complete.width, c.complete.height), (1920, 1080));
+        assert_eq!(c.complete.shm_formats, vec![XRGB_SHM]);
+        assert_eq!(use_shm_choice(&c), Some((XRGB, wl_shm::Format::Xrgb8888)));
+        // Its `done` then replaces the whole set, size and formats together.
+        c.apply(&dmabuf(XRGB, &[linear()]));
+        c.apply(&session_proto::Event::Done);
+        assert_eq!((c.complete.width, c.complete.height), (2560, 1440));
+        assert_eq!(c.complete.shm_formats, vec![ARGB_SHM]);
+    }
+
+    #[test]
+    fn a_new_batch_drops_formats_it_no_longer_offers() {
+        let mut c = Constraints::default();
+        batch(
+            &mut c,
+            vec![
+                size(1920, 1080),
+                dmabuf(XRGB, &[linear()]),
+                shm(wl_shm::Format::Xrgb8888),
+                shm(wl_shm::Format::Argb8888),
+            ],
+        );
+        batch(
+            &mut c,
+            vec![size(1920, 1080), shm(wl_shm::Format::Argb8888)],
+        );
+        assert!(c.complete.formats.is_empty());
+        assert_eq!(c.complete.shm_formats, vec![ARGB_SHM]);
+        assert_eq!(
+            use_shm_choice(&c),
+            Some((DrmFourcc::Argb8888 as u32, wl_shm::Format::Argb8888))
+        );
     }
 }

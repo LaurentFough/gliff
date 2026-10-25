@@ -272,7 +272,7 @@ where
                             // Pace, scale and pipeline metadata can change without
                             // a new coded stream or keyframe. Preserve references.
                             if coded_stream != Some((width, height, chroma)) {
-                                decoder = Some(gliff_sw::Decoder::new(chroma == ChromaMode::Dual420)?);
+                                decoder = Some(gliff_sw::Decoder::new(chroma == ChromaMode::Dual420, width, height)?);
                                 coded_stream = Some((width, height, chroma));
                             }
                             scale = scale_milli;
