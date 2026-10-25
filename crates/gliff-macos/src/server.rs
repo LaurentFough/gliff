@@ -191,34 +191,26 @@ where
         writer.write_msg(&ServerMsg::error(256, m)).await?;
         bail!("{m}");
     }
-    let result = stream(
-        reader,
-        writer,
-        cfg,
-        ready,
-        native_reader,
-        native_writer,
-        dual,
-    )
-    .await;
+    let (capture_task, capture) = capture_reader(native_reader);
+    let result = stream(reader, writer, cfg, ready, capture, native_writer, dual).await;
     let _ = tokio::time::timeout(Duration::from_secs(2), helper.wait()).await;
     let _ = helper.kill().await;
+    capture_task.abort();
     result
 }
 
-async fn stream<R, W, NR, NW>(
+async fn stream<R, W, NW>(
     mut reader: Framed<R>,
     mut writer: Framed<W>,
     cfg: &Cli,
     ready: Value,
-    mut native_reader: NR,
+    mut capture: mpsc::Receiver<Result<(u8, Vec<u8>)>>,
     mut native_writer: NW,
     dual: bool,
 ) -> Result<()>
 where
     R: AsyncRead + Unpin + 'static,
     W: AsyncWrite + Unpin + 'static,
-    NR: AsyncRead + Unpin + 'static,
     NW: AsyncWrite + Unpin + 'static,
 {
     let chroma = if dual {
@@ -296,16 +288,6 @@ where
             .await?;
         }
         Ok::<_, anyhow::Error>(())
-    });
-    let (cap_tx, mut capture) = mpsc::channel::<Result<(u8, Vec<u8>)>>(1);
-    let capture_task = tokio::task::spawn_local(async move {
-        loop {
-            let frame = native::read(&mut native_reader).await;
-            let stopped = frame.is_err();
-            if cap_tx.send(frame).await.is_err() || stopped {
-                break;
-            }
-        }
     });
     let (msg_tx, mut input) = mpsc::channel::<Result<(ClientMsg, Bytes)>>(64);
     let input_task = tokio::task::spawn_local(async move {
@@ -393,7 +375,10 @@ where
     }.await;
     drop(writer);
     input_task.abort();
-    capture_task.abort();
+    // Stop delivering frames to the session, but keep the helper's stdout
+    // open and drained until its stdin-EOF handler releases input and exits.
+    capture.close();
+    drop(capture);
     let _ = command_tx.try_send(json!({"type":"release"}));
     // EOF also releases held input if the native command queue was full.
     drop(clipboard);
@@ -405,6 +390,31 @@ where
         command_task.abort();
     }
     result
+}
+
+type CapturePackets = mpsc::Receiver<Result<(u8, Vec<u8>)>>;
+
+fn capture_reader<R: AsyncRead + Unpin + 'static>(
+    mut reader: R,
+) -> (tokio::task::JoinHandle<()>, CapturePackets) {
+    let (tx, rx) = mpsc::channel(1);
+    let task = tokio::task::spawn_local(async move {
+        loop {
+            let frame = native::read(&mut reader).await;
+            let stopped = frame.is_err();
+            if tx.send(frame).await.is_err() {
+                // A broken stdout makes the native helper exit immediately.
+                // Drain raw bytes with bounded storage during shutdown so it
+                // can process the queued release/EOF before stdout closes.
+                let _ = tokio::io::copy(&mut reader, &mut tokio::io::sink()).await;
+                break;
+            }
+            if stopped {
+                break;
+            }
+        }
+    });
+    (task, rx)
 }
 
 fn input_command(msg: ClientMsg) -> Option<Value> {
@@ -455,6 +465,7 @@ mod tests {
         let mut viewer_rd = Framed::new(viewer_rd);
         let mut viewer_wr = Framed::new(viewer_wr);
         let (mut pixels, capture) = tokio::io::duplex(128 * 1024);
+        let (capture_task, capture) = capture_reader(capture);
         let (commands, mut native_commands) = tokio::io::duplex(4096);
         let task = tokio::task::spawn_local(async move {
             let cfg = Cli::try_parse_from(["gliff-server", "--video", "cpu"]).unwrap();
@@ -569,6 +580,17 @@ mod tests {
             serde_json::from_slice::<Value>(&data).unwrap(),
             json!({"type":"release"})
         );
+        // Model ScreenCaptureKit still writing as the helper shuts down.
+        // The read half must survive session teardown until helper stdout EOF.
+        tokio::task::yield_now().await;
+        native::write(&mut pixels, native::PIXELS, &frame)
+            .await
+            .expect("capture stdout closed before helper exit");
+        drop(pixels);
+        tokio::time::timeout(Duration::from_secs(2), capture_task)
+            .await
+            .expect("capture drain failed to stop at EOF")
+            .unwrap();
         let result = tokio::time::timeout(Duration::from_secs(2), task)
             .await
             .expect("session failed to stop")
