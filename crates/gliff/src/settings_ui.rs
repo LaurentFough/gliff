@@ -63,6 +63,13 @@ struct View {
 
 /// Open the window on `machine`, else the first machine, else the defaults.
 pub fn present(parent: &impl IsA<gtk::Widget>, env: Rc<Env>, machine: Option<String>) {
+    let (view, dialog) = build(env, machine);
+    dialog.present(Some(parent));
+    view.search.grab_focus();
+}
+
+/// The dialog, and the view it owns.
+fn build(env: Rc<Env>, machine: Option<String>) -> (Rc<View>, adw::Dialog) {
     let config = Config::load(&env.config_path);
     let scope = match machine {
         Some(m) if config.machines.contains(&m) => Scope::Machine(m),
@@ -228,8 +235,7 @@ pub fn present(parent: &impl IsA<gtk::Widget>, env: Rc<Env>, machine: Option<Str
     }
     view.select_in_list(&scope);
     view.refresh(true);
-    dialog.present(Some(parent));
-    search.grab_focus();
+    (view, dialog)
 }
 
 fn scope_title(scope: &Scope) -> String {
@@ -675,4 +681,65 @@ fn video_index(v: Video) -> u32 {
 
 fn video_at(i: u32) -> Video {
     [Video::Auto, Video::Gpu, Video::Cpu][i as usize]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_env(name: &str) -> Rc<Env> {
+        let dir = std::env::temp_dir().join(format!("gliff-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        Rc::new(Env {
+            config_path: dir.join("config.toml"),
+            cli: Settings::default(),
+            changed: Rc::new(|| {}),
+        })
+    }
+
+    #[test]
+    #[ignore = "requires an isolated Wayland session; run by scripts/e2e.sh"]
+    fn the_window_keeps_a_typed_command_and_is_freed_with_its_dialog() {
+        adw::init().unwrap();
+        let env = temp_env("settings-ui");
+        let (view, dialog) = build(env.clone(), None);
+
+        // A server command typed but not applied survives an edit to another
+        // option, and a reset puts the saved value back.
+        let (entry, switch) = {
+            let rows = view.rows.borrow();
+            let entry = rows
+                .iter()
+                .find_map(|r| r.widget.clone().downcast::<adw::EntryRow>().ok())
+                .expect("a text option");
+            let switch = rows
+                .iter()
+                .find_map(|r| r.widget.clone().downcast::<adw::SwitchRow>().ok())
+                .expect("a switch option");
+            (entry, switch)
+        };
+        let saved = entry.text().to_string();
+        entry.set_text("typed but not applied");
+        switch.set_active(!switch.is_active());
+        assert!(
+            Config::load(&env.config_path).defaults != Settings::default(),
+            "the switch was not saved"
+        );
+        assert_eq!(
+            entry.text(),
+            "typed but not applied",
+            "another edit wiped the typed command"
+        );
+        view.refresh(true);
+        assert_eq!(entry.text(), saved, "a reset kept the typed command");
+
+        // Closing the window frees the view: nothing else keeps it alive.
+        let weak = Rc::downgrade(&view);
+        drop((view, entry, switch));
+        drop(dialog);
+        let context = gtk::glib::MainContext::default();
+        while context.iteration(false) {}
+        assert!(weak.upgrade().is_none(), "the settings view was leaked");
+        let _ = std::fs::remove_dir_all(env.config_path.parent().unwrap());
+    }
 }

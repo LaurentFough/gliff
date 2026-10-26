@@ -148,6 +148,12 @@ echo "== 5b. sensitive clipboard selections are withheld =="
 cargo test --locked -p gliff clipboard_ui::tests::password_manager_selection_cannot_be_offered_or_read -- --ignored >/tmp/gliff-e2e-sensitive.log 2>&1 || fail "sensitive clipboard selection"
 echo "   sensitive clipboard selection PASS"
 
+echo "== 5c. clipboard sharing off, settings window =="
+cargo test --locked -p gliff clipboard_ui::tests::clearing_a_sessions_offer_leaves_other_clipboard_content -- --ignored >/tmp/gliff-e2e-clear-offer.log 2>&1 || fail "clearing a session's clipboard offer"
+echo "   clearing a session's clipboard offer PASS"
+cargo test --locked -p gliff settings_ui::tests::the_window_keeps_a_typed_command_and_is_freed_with_its_dialog -- --ignored >/tmp/gliff-e2e-settings-ui.log 2>&1 || fail "settings window"
+echo "   settings window keeps a typed command, is freed on close PASS"
+
 echo "== 6. text clipboard both directions =="
 command -v wl-copy >/dev/null && command -v wl-paste >/dev/null || fail "wl-clipboard not installed"
 # The probe offers its item after a few frames and requests the compositor's

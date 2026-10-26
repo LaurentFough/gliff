@@ -1259,12 +1259,9 @@ fn reconnect_machine(ui: &Rc<App>, name: &str) {
     let shown = active(ui).filter(|s| s.name != name);
     // A TCP tab reconnects to its own address; only an SSH one is rebuilt
     // from the saved settings.
-    let endpoint = match find_session(ui, name).map(|s| s.endpoint.clone()) {
-        Some(Endpoint::Ssh(_)) | None => {
-            ssh_endpoint(&ui.cli, &Config::load(&ui.config_path), name)
-        }
-        Some(tcp) => tcp,
-    };
+    let endpoint = reconnect_endpoint(find_session(ui, name).map(|s| s.endpoint.clone()), || {
+        ssh_endpoint(&ui.cli, &Config::load(&ui.config_path), name)
+    });
     // Stopping forgets the machine was open, and it is remembered again
     // only once the new session connects. Keep it open in the meantime, so
     // a reconnect that fails, or a window closed before it ends, still
@@ -1279,6 +1276,15 @@ fn reconnect_machine(ui: &Rc<App>, name: &str) {
     open_session(ui, endpoint);
     if let Some(shown) = shown {
         show_session(ui, &shown);
+    }
+}
+
+/// Where a reconnect goes: a TCP tab back to its own address, anything else
+/// to what `ssh` builds from the saved settings.
+fn reconnect_endpoint(current: Option<Endpoint>, ssh: impl FnOnce() -> Endpoint) -> Endpoint {
+    match current {
+        Some(tcp @ Endpoint::Tcp(_)) => tcp,
+        _ => ssh(),
     }
 }
 
@@ -3032,6 +3038,32 @@ mod tests {
         assert!(!hk.matches(gdk::Key::Escape, none, None, &lt)); // first tap forwarded
         assert!(hk.matches(gdk::Key::Escape, none, None, &lt)); // quick second releases
         assert!(!hk.matches(gdk::Key::Escape, none, None, &lt)); // counter reset
+    }
+}
+
+#[cfg(test)]
+mod reconnect_tests {
+    use super::{reconnect_endpoint, Endpoint};
+    use gliff_transport::SshTarget;
+
+    fn ssh(host: &str) -> Endpoint {
+        Endpoint::Ssh(SshTarget::new(host.to_string()))
+    }
+
+    #[test]
+    fn a_tcp_tab_reconnects_to_its_own_address() {
+        let got = reconnect_endpoint(Some(Endpoint::Tcp("127.0.0.1:9070".into())), || {
+            panic!("a TCP tab must not be rebuilt as SSH")
+        });
+        assert!(matches!(got, Endpoint::Tcp(a) if a == "127.0.0.1:9070"));
+    }
+
+    #[test]
+    fn an_ssh_tab_is_rebuilt_from_the_saved_settings() {
+        let got = reconnect_endpoint(Some(ssh("old@host")), || ssh("new@host"));
+        assert!(matches!(got, Endpoint::Ssh(t) if t.host == "new@host"));
+        let got = reconnect_endpoint(None, || ssh("new@host"));
+        assert!(matches!(got, Endpoint::Ssh(_)));
     }
 }
 
