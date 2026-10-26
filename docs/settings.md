@@ -65,6 +65,5 @@ absent from `main`. Land the feature first, then its row.
   the nearest one before creating a group.
 - Titles are short noun phrases or "Share the clipboard"-style verbs;
   subtitles are one sentence.
-- Never hide an option because the host lacks a feature; the host decides.
 - Libadwaita widgets only (`SwitchRow`, `ComboRow`, `EntryRow`,
   `SpinRow`), so the window follows the Omarchy theme with no CSS.
