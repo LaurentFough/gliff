@@ -11,6 +11,8 @@ mod keymap;
 mod net;
 mod paintable;
 mod recent;
+mod settings;
+mod settings_ui;
 mod theme;
 
 use std::cell::{Cell, RefCell};
@@ -27,12 +29,14 @@ use gliff_proto::{Axis, ClientMsg};
 use gliff_transport::SshTarget;
 use gliff_vk::DisplayFrame;
 use gtk::gdk;
+use gtk::gio;
 use gtk::glib;
 use gtk4 as gtk;
 use libadwaita as adw;
 use net::Frame;
 use net::{Endpoint, Picture, Status, Worker};
 use recent::Config;
+use settings::{Resolved, Screen, Settings, Video};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
 
 /// A message plus optional trailing payload, sent from the UI to the worker.
@@ -133,6 +137,12 @@ struct App {
     config_path: PathBuf,
     cli: Cli,
     keymap: keymap::Keymap,
+    /// Bumped by every settings change, so only the last one in a burst is
+    /// applied.
+    settings_gen: Cell<u64>,
+    /// A tab's right-click menu is open: in fullscreen it keeps the header
+    /// from sliding away with the menu on it.
+    menu_open: Rc<Cell<bool>>,
 }
 
 /// One connection to a machine. Every session keeps streaming while the
@@ -185,6 +195,8 @@ struct Session {
     cursor: RefCell<Option<gdk::Cursor>>,
     status: RefCell<String>,
     stats: RefCell<String>,
+    /// The options the session was started with.
+    opts: RefCell<Resolved>,
 }
 
 impl Session {
@@ -218,6 +230,7 @@ impl Session {
             cursor: RefCell::new(None),
             status: RefCell::new(String::new()),
             stats: RefCell::new(String::new()),
+            opts: RefCell::new(Settings::default().resolve()),
         }
     }
 }
@@ -245,25 +258,54 @@ fn main() -> glib::ExitCode {
 }
 
 /// The endpoints named on the command line, if any.
-fn endpoints_from_cli(cli: &Cli) -> Vec<Endpoint> {
+fn endpoints_from_cli(cli: &Cli, config: &Config) -> Vec<Endpoint> {
     if !cli.connect.is_empty() {
         return cli.connect.iter().cloned().map(Endpoint::Tcp).collect();
     }
     cli.host
         .iter()
-        .map(|host| ssh_endpoint(cli, host))
+        .map(|host| ssh_endpoint(cli, config, host))
         .collect()
 }
 
-fn ssh_endpoint(cli: &Cli, host: &str) -> Endpoint {
+fn ssh_endpoint(cli: &Cli, config: &Config, host: &str) -> Endpoint {
+    let opts = resolved_for(cli, config, host);
     let mut t = SshTarget::new(host.to_string());
-    t.server_bin = cli.server_bin.clone();
-    t.server_args = match (&cli.output, cli.headless) {
-        (Some(name), _) => vec!["--output".into(), name.clone()],
-        (None, true) => vec!["--headless".into()],
-        (None, false) => vec!["--output".into(), "auto".into()],
-    };
+    t.server_bin = opts.server_bin.clone();
+    t.server_args = server_args(cli, &opts);
     Endpoint::Ssh(t)
+}
+
+/// What the command line sets for every machine, as the layer under a
+/// machine's own choices.
+fn cli_settings(cli: &Cli) -> Settings {
+    Settings {
+        screen: cli.headless.then_some(Screen::Own),
+        decode: match cli.video.as_deref() {
+            Some("gpu") => Some(Video::Gpu),
+            Some("cpu") => Some(Video::Cpu),
+            _ => None,
+        },
+        server_bin: (cli.server_bin != settings::DEFAULT_SERVER_BIN)
+            .then(|| cli.server_bin.clone()),
+        ..Settings::default()
+    }
+}
+
+/// The options `machine` runs with: the built-in values, the config's
+/// defaults, the command line, then what the machine's own settings change.
+fn resolved_for(cli: &Cli, config: &Config, machine: &str) -> Resolved {
+    config.settings_for(&cli_settings(cli), machine).resolve()
+}
+
+/// What the server shows: the screen `--output` names, which beats the
+/// settings, else a private one of its own or the focused one.
+fn server_args(cli: &Cli, opts: &Resolved) -> Vec<String> {
+    match (&cli.output, opts.screen) {
+        (Some(name), _) => vec!["--output".into(), name.clone()],
+        (None, Screen::Own) => vec!["--headless".into()],
+        (None, Screen::Mirror) => vec!["--output".into(), "auto".into()],
+    }
 }
 
 /// The tab name for an endpoint.
@@ -335,6 +377,11 @@ fn build_ui(app: &adw::Application, cli: &Cli) {
     header.pack_start(&add_revealer);
     header.pack_end(&fullscreen_btn);
     header.pack_end(&stats_btn);
+    let settings_btn = gtk::Button::builder()
+        .icon_name("preferences-system-symbolic")
+        .tooltip_text("Settings")
+        .build();
+    header.pack_end(&settings_btn);
 
     let stats = gtk::Label::builder()
         .halign(gtk::Align::Start)
@@ -388,6 +435,7 @@ fn build_ui(app: &adw::Application, cli: &Cli) {
     content.append(&header);
     content.append(&overlay);
     window.set_content(Some(&content));
+    let menu_open = Rc::new(Cell::new(false));
     install_fullscreen_bars(
         &window,
         &content,
@@ -395,6 +443,7 @@ fn build_ui(app: &adw::Application, cli: &Cli) {
         &header,
         &fullscreen_btn,
         &entry,
+        menu_open.clone(),
     );
 
     let ui = Rc::new(App {
@@ -422,6 +471,8 @@ fn build_ui(app: &adw::Application, cli: &Cli) {
         config_path: Config::default_path(),
         cli: cli.clone(),
         keymap: keymap::watch(),
+        settings_gen: Cell::new(0),
+        menu_open: menu_open.clone(),
     });
 
     let hotkey = ReleaseHotkey::parse(&cli.release_hotkey).unwrap_or_else(|e| {
@@ -430,6 +481,28 @@ fn build_ui(app: &adw::Application, cli: &Cli) {
     });
     install_input_handlers(&ui, &video, &window, hotkey);
     install_resize_handler(&ui);
+    {
+        let weak = Rc::downgrade(&ui);
+        settings_btn.connect_clicked(move |_| {
+            if let Some(ui) = weak.upgrade() {
+                open_settings(&ui);
+            }
+        });
+        let weak = Rc::downgrade(&ui);
+        let shortcut = gtk::Shortcut::new(
+            gtk::ShortcutTrigger::parse_string("<Control>comma"),
+            Some(gtk::CallbackAction::new(move |_, _| {
+                if let Some(ui) = weak.upgrade() {
+                    open_settings(&ui);
+                }
+                glib::Propagation::Stop
+            })),
+        );
+        let controller = gtk::ShortcutController::new();
+        controller.set_scope(gtk::ShortcutScope::Global);
+        controller.add_shortcut(shortcut);
+        window.add_controller(controller);
+    }
     install_address_bar(&ui, &connect_btn);
     refresh_tabs(&ui);
 
@@ -505,9 +578,9 @@ fn build_ui(app: &adw::Application, cli: &Cli) {
     // Reconnect the machines that were connected when the window last
     // closed, then any named on the command line, which is shown first.
     let config = Config::load(&ui.config_path);
-    let from_cli = endpoints_from_cli(cli);
+    let from_cli = endpoints_from_cli(cli, &config);
     for machine in &config.open {
-        open_session(&ui, ssh_endpoint(cli, machine));
+        open_session(&ui, ssh_endpoint(cli, &config, machine));
     }
     for endpoint in from_cli.iter().cloned() {
         if find_session(&ui, machine_name(&endpoint)).is_none() {
@@ -612,7 +685,10 @@ fn connect_from_address_bar(ui: &Rc<App>) {
     ui.entry.set_text("");
     match find_session(ui, &machine) {
         Some(s) => show_session(ui, &s),
-        None => open_session(ui, ssh_endpoint(&ui.cli, &machine)),
+        None => open_session(
+            ui,
+            ssh_endpoint(&ui.cli, &Config::load(&ui.config_path), &machine),
+        ),
     }
     show_address_bar(ui, false);
     if active(ui).is_some() {
@@ -655,6 +731,7 @@ fn running_inputs(sessions: &[Rc<Session>], no_clipboard: bool) -> Vec<OutSender
     }
     sessions
         .iter()
+        .filter(|s| s.opts.borrow().clipboard)
         .filter_map(|s| s.input_tx.borrow().clone())
         .collect()
 }
@@ -672,6 +749,7 @@ fn local_offer_targets(
     sessions
         .iter()
         .filter(|s| active.is_some_and(|a| Rc::ptr_eq(a, s)))
+        .filter(|s| s.opts.borrow().clipboard)
         .filter_map(|s| s.input_tx.borrow().clone())
         .collect()
 }
@@ -739,7 +817,7 @@ fn serve_local_read(
     reply: tokio::sync::mpsc::Sender<std::io::Result<bytes::Bytes>>,
     shown: impl Fn() -> (Option<Rc<Session>>, Option<clipboard_ui::LocalSelection>) + 'static,
 ) {
-    if no_clipboard {
+    if no_clipboard || !s.opts.borrow().clipboard {
         return;
     }
     let s = s.clone();
@@ -932,7 +1010,251 @@ fn machine_tab(ui: &Rc<App>, name: &str) -> gtk::Box {
         });
     }
     tab.add_controller(drop);
+    install_tab_menu(ui, &tab, name, running);
     tab
+}
+
+/// The ways to show a machine, with what each means, in menu order.
+const SCREENS: [(Screen, &str, &str); 2] = [
+    (
+        Screen::Mirror,
+        "Mirror",
+        "The machine's focused screen, fitted into the window",
+    ),
+    (
+        Screen::Own,
+        "Own screen",
+        "A private screen sized and scaled to the window",
+    ),
+];
+
+/// The right-click menu of a machine's tab: the everyday choices for that
+/// machine, ending with the full settings window. Each choice is saved as the
+/// machine's own setting, like the same row in that window.
+fn install_tab_menu(ui: &Rc<App>, tab: &gtk::Box, name: &str, running: bool) {
+    let click = gtk::GestureClick::builder().button(3).build();
+    let ui = ui.clone();
+    let name = name.to_string();
+    let tab_weak = tab.downgrade();
+    click.connect_pressed(move |gesture, _, x, y| {
+        gesture.set_state(gtk::EventSequenceState::Claimed);
+        let Some(tab) = tab_weak.upgrade() else {
+            return;
+        };
+        let opts = resolved_for(&ui.cli, &Config::load(&ui.config_path), &name);
+        let group = gio::SimpleActionGroup::new();
+        let menu = gio::Menu::new();
+
+        // What the handlers do runs once the menu is done with the click,
+        // since several of them rebuild the tab that holds it.
+        let act = |id: &str, f: fn(&Rc<App>, &str)| {
+            let action = gio::SimpleAction::new(id, None);
+            let (ui, name) = (ui.clone(), name.clone());
+            action.connect_activate(move |_, _| {
+                let (ui, name) = (ui.clone(), name.clone());
+                glib::idle_add_local_once(move || f(&ui, &name));
+            });
+            group.add_action(&action);
+        };
+
+        let session = gio::Menu::new();
+        if running {
+            session.append(Some("Reconnect"), Some("tab.reconnect"));
+            session.append(Some("Disconnect"), Some("tab.disconnect"));
+            act("reconnect", reconnect_machine);
+            act("disconnect", stop_session);
+        } else {
+            session.append(Some("Connect"), Some("tab.connect"));
+            act("connect", select_tab);
+        }
+        menu.append_section(None, &session);
+
+        // A radio group: the machine's current way of being shown is marked.
+        let screens = gio::Menu::new();
+        let state = ["mirror", "own"][SCREENS
+            .iter()
+            .position(|(o, _, _)| *o == opts.screen)
+            .unwrap_or(0)];
+        let screen_action = gio::SimpleAction::new_stateful(
+            "screen",
+            Some(glib::VariantTy::STRING),
+            &state.to_variant(),
+        );
+        {
+            let (ui, name) = (ui.clone(), name.clone());
+            screen_action.connect_activate(move |_, value| {
+                let screen = match value.and_then(|v| v.str()) {
+                    Some("mirror") => Screen::Mirror,
+                    Some("own") => Screen::Own,
+                    _ => return,
+                };
+                let (ui, name) = (ui.clone(), name.clone());
+                glib::idle_add_local_once(move || {
+                    edit_machine(&ui, &name, |s| s.screen = Some(screen))
+                });
+            });
+        }
+        group.add_action(&screen_action);
+        for (target, (_, label, _)) in ["mirror", "own"].iter().zip(SCREENS) {
+            let item = gio::MenuItem::new(Some(label), None);
+            item.set_action_and_target_value(Some("tab.screen"), Some(&target.to_variant()));
+            screens.append_item(&item);
+        }
+        menu.append_submenu(Some("Show as"), &screens);
+
+        let toggles = gio::Menu::new();
+        let clipboard =
+            gio::SimpleAction::new_stateful("clipboard", None, &opts.clipboard.to_variant());
+        {
+            let (ui, name, on) = (ui.clone(), name.clone(), opts.clipboard);
+            clipboard.connect_activate(move |a, _| {
+                let on = !a.state().and_then(|v| v.get::<bool>()).unwrap_or(on);
+                let (ui, name) = (ui.clone(), name.clone());
+                glib::idle_add_local_once(move || {
+                    edit_machine(&ui, &name, |s| s.clipboard = Some(on))
+                });
+            });
+        }
+        group.add_action(&clipboard);
+        toggles.append(Some("Share the clipboard"), Some("tab.clipboard"));
+        menu.append_section(None, &toggles);
+
+        let more = gio::Menu::new();
+        more.append(Some("Settings…"), Some("tab.settings"));
+        act("settings", |ui, name| {
+            open_settings_for(ui, Some(name.to_string()))
+        });
+        if running {
+            more.append(Some("Disconnect and forget"), Some("tab.forget"));
+        } else {
+            more.append(Some("Forget"), Some("tab.forget"));
+        }
+        act("forget", |ui, name| {
+            stop_session(ui, name);
+            forget_machine(ui, name);
+        });
+        menu.append_section(None, &more);
+
+        let popover = gtk::PopoverMenu::from_model_full(&menu, gtk::PopoverMenuFlags::NESTED);
+        popover.set_parent(&tab);
+        popover.insert_action_group("tab", Some(&group));
+        popover.set_has_arrow(false);
+        popover.set_halign(gtk::Align::Start);
+        popover.set_pointing_to(Some(&gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
+        // The tab may be rebuilt while the menu is open; let go of it then.
+        let menu_open = ui.menu_open.clone();
+        menu_open.set(true);
+        popover.connect_closed(move |p| {
+            menu_open.set(false);
+            let p = p.clone();
+            glib::idle_add_local_once(move || p.unparent());
+        });
+        popover.popup();
+    });
+    tab.add_controller(click);
+}
+
+/// Change what one machine sets for itself and have it applied. The same
+/// path as the settings window, so the two always agree.
+fn edit_machine(ui: &Rc<App>, name: &str, change: impl Fn(&mut Settings)) {
+    let mut config = Config::load(&ui.config_path);
+    let mut own = config.machine(name).cloned().unwrap_or_default();
+    change(&mut own);
+    config.set_machine(name, own);
+    save_config(ui, &config);
+    settings_changed(ui);
+}
+
+/// Open the settings window on the machine shown.
+fn open_settings(ui: &Rc<App>) {
+    let machine = active(ui)
+        .filter(|s| matches!(s.endpoint, Endpoint::Ssh(_)))
+        .map(|s| s.name.clone());
+    open_settings_for(ui, machine);
+}
+
+/// Open the settings window on `machine`, or on the first machine.
+fn open_settings_for(ui: &Rc<App>, machine: Option<String>) {
+    let weak = Rc::downgrade(ui);
+    let env = Rc::new(settings_ui::Env {
+        config_path: ui.config_path.clone(),
+        cli: cli_settings(&ui.cli),
+        changed: Rc::new(move || {
+            if let Some(ui) = weak.upgrade() {
+                settings_changed(&ui);
+            }
+        }),
+    });
+    settings_ui::present(&ui.window, env, machine);
+}
+
+/// A settings change was saved. Apply it to the running sessions once the
+/// changes stop, since most of them reconnect the machine.
+fn settings_changed(ui: &Rc<App>) {
+    let generation = ui.settings_gen.get() + 1;
+    ui.settings_gen.set(generation);
+    let weak = Rc::downgrade(ui);
+    glib::timeout_add_local_once(Duration::from_millis(800), move || {
+        if let Some(ui) = weak.upgrade() {
+            if ui.settings_gen.get() == generation {
+                apply_settings(&ui);
+            }
+        }
+    });
+}
+
+/// Bring every running machine in line with the saved settings: the
+/// clipboard applies to the session as it runs, anything else opens a new
+/// one.
+fn apply_settings(ui: &Rc<App>) {
+    let config = Config::load(&ui.config_path);
+    let sessions: Vec<Rc<Session>> = ui.sessions.borrow().clone();
+    for s in sessions {
+        if !matches!(s.endpoint, Endpoint::Ssh(_)) {
+            continue;
+        }
+        let new = resolved_for(&ui.cli, &config, &s.name);
+        let old = s.opts.borrow().clone();
+        if new == old {
+            continue;
+        }
+        let live_only = Resolved {
+            clipboard: old.clipboard,
+            ..new.clone()
+        } == old;
+        if live_only {
+            *s.opts.borrow_mut() = new;
+            if !clipboard_allowed(ui, &s) {
+                revoke_local_offer(Some(&s), ui.cli.no_clipboard);
+            } else if is_active(ui, &s) {
+                if let Some(watch) = ui.local_clipboard.borrow().as_ref() {
+                    watch.reoffer();
+                }
+            }
+        } else {
+            let name = s.name.clone();
+            reconnect_machine(ui, &name);
+        }
+    }
+}
+
+/// Whether the session's machine may see the local clipboard.
+fn clipboard_allowed(ui: &App, s: &Session) -> bool {
+    !ui.cli.no_clipboard && s.opts.borrow().clipboard
+}
+
+/// End a machine's session and start it again with its saved settings. The
+/// tab keeps its place and stays the one shown.
+fn reconnect_machine(ui: &Rc<App>, name: &str) {
+    // Opening a session shows it; a machine in the background goes back to
+    // being one.
+    let shown = active(ui).filter(|s| s.name != name);
+    stop_session(ui, name);
+    let endpoint = ssh_endpoint(&ui.cli, &Config::load(&ui.config_path), name);
+    open_session(ui, endpoint);
+    if let Some(shown) = shown {
+        show_session(ui, &shown);
+    }
 }
 
 /// Show a machine's tab: switch to its running session, retrying one whose
@@ -947,13 +1269,18 @@ fn select_tab(ui: &Rc<App>, name: &str) {
             }
             show_session(ui, &s);
         }
-        None => open_session(ui, ssh_endpoint(&ui.cli, name)),
+        None => open_session(
+            ui,
+            ssh_endpoint(&ui.cli, &Config::load(&ui.config_path), name),
+        ),
     }
 }
 
 /// Connect to `endpoint` in a new session and show it.
 fn open_session(ui: &Rc<App>, endpoint: Endpoint) {
     let s = Rc::new(Session::new(endpoint));
+    let opts = resolved_for(&ui.cli, &Config::load(&ui.config_path), &s.name);
+    *s.opts.borrow_mut() = opts;
     ui.sessions.borrow_mut().push(s.clone());
     start_session(ui.clone(), s.clone());
     show_session(ui, &s);
@@ -1142,7 +1469,7 @@ fn start_session(ui: Rc<App>, s: Rc<Session>) {
     );
 
     let endpoint = s.endpoint.clone();
-    let video = gliff_sw::VideoMode::resolve(ui.cli.video.as_deref());
+    let video = gliff_sw::VideoMode::resolve(s.opts.borrow().decode.flag());
     let keymap = ui.keymap.clone();
     std::thread::Builder::new()
         .name("gliff-net".into())
@@ -1400,7 +1727,7 @@ fn poll_status(ui: Rc<App>, s: Rc<Session>, rx: Receiver<Status>, generation: u6
                     mime_types,
                     files,
                 } => {
-                    if !ui.cli.no_clipboard && is_active(&ui, &s) {
+                    if !ui.cli.no_clipboard && s.opts.borrow().clipboard && is_active(&ui, &s) {
                         if let Some(tx) = s.input_tx.borrow().as_ref() {
                             clipboard_ui::set_remote_offer(tx, serial, mime_types, files);
                         }
@@ -2039,7 +2366,7 @@ fn install_input_handlers(
 
 /// In fullscreen the header leaves the layout, so the picture gets the whole
 /// screen, and slides in over it while the pointer is at the top edge. The header stays while the address bar is in use, so
-/// it does not slide away under a half-typed machine.
+/// it does not slide away under a half-typed machine or an open tab menu.
 fn install_fullscreen_bars(
     window: &adw::ApplicationWindow,
     content: &gtk::Box,
@@ -2047,10 +2374,11 @@ fn install_fullscreen_bars(
     header: &adw::HeaderBar,
     fullscreen_btn: &gtk::ToggleButton,
     entry: &gtk::Entry,
+    menu_open: Rc<Cell<bool>>,
 ) {
     let address_bar_in_use = {
         let (window, entry) = (window.clone(), entry.clone());
-        Rc::new(move || address_bar_in_use(&window, &entry))
+        Rc::new(move || address_bar_in_use(&window, &entry) || menu_open.get())
     };
     let top = gtk::Revealer::builder()
         .transition_type(gtk::RevealerTransitionType::SlideDown)
