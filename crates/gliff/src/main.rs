@@ -884,6 +884,9 @@ fn machine_tab(ui: &Rc<App>, name: &str) -> gtk::Box {
     let label = gtk::Label::builder()
         .label(name)
         .css_classes(["tab-label"])
+        .tooltip_text(name)
+        .ellipsize(gtk::pango::EllipsizeMode::Middle)
+        .max_width_chars(28)
         .build();
     if !running {
         label.add_css_class("dim-label");

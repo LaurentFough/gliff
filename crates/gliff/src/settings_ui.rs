@@ -113,8 +113,10 @@ pub fn present(parent: &impl IsA<gtk::Widget>, env: Rc<Env>, machine: Option<Str
     for sc in machine_scopes.chain([Scope::Defaults]) {
         let row = adw::ActionRow::builder()
             .title(scope_title(&sc))
+            .tooltip_text(scope_title(&sc))
             .use_markup(false)
             .activatable(true)
+            .title_lines(1)
             .build();
         row.add_prefix(&gtk::Image::from_icon_name(match sc {
             Scope::Defaults => "preferences-system-symbolic",
@@ -523,6 +525,7 @@ impl View {
                 view.edit(|s| set(s, at));
             });
         }
+        row.set_factory(Some(&whole_value_factory()));
         let weak = row.downgrade();
         self.add_row(
             group,
@@ -576,6 +579,28 @@ impl View {
             }),
         );
     }
+}
+
+/// Shows a combo row's chosen value whole. The row's own factory ellipsizes
+/// it to what a long subtitle leaves, so "Own screen" would show as "Own ...";
+/// this one does not, and the subtitle wraps instead.
+fn whole_value_factory() -> gtk::SignalListItemFactory {
+    let factory = gtk::SignalListItemFactory::new();
+    factory.connect_setup(|_, item| {
+        if let Some(item) = item.downcast_ref::<gtk::ListItem>() {
+            item.set_child(Some(&gtk::Label::builder().xalign(0.0).build()));
+        }
+    });
+    factory.connect_bind(|_, item| {
+        let Some(item) = item.downcast_ref::<gtk::ListItem>() else {
+            return;
+        };
+        let text = item.item().and_downcast::<gtk::StringObject>();
+        if let (Some(label), Some(text)) = (item.child().and_downcast::<gtk::Label>(), text) {
+            label.set_label(&text.string());
+        }
+    });
+    factory
 }
 
 fn group(title: &str, description: Option<&str>) -> adw::PreferencesGroup {
