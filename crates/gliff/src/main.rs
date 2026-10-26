@@ -1229,6 +1229,11 @@ fn apply_settings(ui: &Rc<App>) {
             *s.opts.borrow_mut() = new;
             if !clipboard_allowed(ui, &s) {
                 revoke_local_offer(Some(&s), ui.cli.no_clipboard);
+                // Also stop pastes from reaching the host through the
+                // selection it already put on the local clipboard.
+                if let Some(tx) = s.input_tx.borrow().as_ref() {
+                    clipboard_ui::clear_remote_offer(tx);
+                }
             } else if is_active(ui, &s) {
                 if let Some(watch) = ui.local_clipboard.borrow().as_ref() {
                     watch.reoffer();
@@ -1252,8 +1257,25 @@ fn reconnect_machine(ui: &Rc<App>, name: &str) {
     // Opening a session shows it; a machine in the background goes back to
     // being one.
     let shown = active(ui).filter(|s| s.name != name);
+    // A TCP tab reconnects to its own address; only an SSH one is rebuilt
+    // from the saved settings.
+    let endpoint = match find_session(ui, name).map(|s| s.endpoint.clone()) {
+        Some(Endpoint::Ssh(_)) | None => {
+            ssh_endpoint(&ui.cli, &Config::load(&ui.config_path), name)
+        }
+        Some(tcp) => tcp,
+    };
+    // Stopping forgets the machine was open, and it is remembered again
+    // only once the new session connects. Keep it open in the meantime, so
+    // a reconnect that fails, or a window closed before it ends, still
+    // brings the machine back at the next start.
+    let was_open = Config::load(&ui.config_path).open.iter().any(|m| m == name);
     stop_session(ui, name);
-    let endpoint = ssh_endpoint(&ui.cli, &Config::load(&ui.config_path), name);
+    if was_open {
+        let mut config = Config::load(&ui.config_path);
+        config.set_open(name, true);
+        save_config(ui, &config);
+    }
     open_session(ui, endpoint);
     if let Some(shown) = shown {
         show_session(ui, &shown);

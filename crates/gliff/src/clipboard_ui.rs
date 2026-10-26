@@ -335,6 +335,23 @@ pub fn set_remote_offer(
     }
 }
 
+/// Take the server's offer off the local clipboard when it came through
+/// `tx`'s session, so a later paste cannot fetch from that host. A selection
+/// from anywhere else is left alone.
+pub fn clear_remote_offer(tx: &UnboundedSender<ToWorker>) {
+    let Some(cb) = clipboard() else {
+        return;
+    };
+    let ours = cb
+        .content()
+        .and_then(|p| p.downcast::<RemoteProvider>().ok())
+        .and_then(|p| p.imp().tx.borrow().as_ref().and_then(|w| w.upgrade()))
+        .is_some_and(|t| t.same_channel(tx));
+    if ours {
+        let _ = cb.set_content(gdk::ContentProvider::NONE);
+    }
+}
+
 glib::wrapper! {
     /// A content provider for the server's offer; each paste fetches the
     /// item from the server through the worker.

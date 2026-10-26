@@ -29,6 +29,10 @@ enum Scope {
     Machine(String),
 }
 
+/// Brings a row's widget in line with the resolved options; the flag says to
+/// drop an edit that is not applied yet.
+type SyncRow = Box<dyn Fn(&Resolved, bool)>;
+
 /// One option's row: how to bring it in line with the saved values.
 struct RowRef {
     field: Field,
@@ -39,7 +43,7 @@ struct RowRef {
     /// "Default" or "Built-in" while the option follows the layer below.
     tag: gtk::Label,
     reset: gtk::Button,
-    sync: Box<dyn Fn(&Resolved)>,
+    sync: SyncRow,
 }
 
 struct View {
@@ -186,26 +190,44 @@ pub fn present(parent: &impl IsA<gtk::Widget>, env: Rc<Env>, machine: Option<Str
         .build();
 
     {
-        let view = view.clone();
+        let view = Rc::downgrade(&view);
         list.connect_row_selected(move |_, row| {
             let Some(row) = row else {
                 return;
             };
-            if let Some(scope) = by_index.get(row.index() as usize) {
+            if let (Some(view), Some(scope)) = (view.upgrade(), by_index.get(row.index() as usize))
+            {
                 view.select(scope.clone());
             }
         });
     }
     {
-        let view = view.clone();
-        search.connect_search_changed(move |_| view.filter());
+        let view = Rc::downgrade(&view);
+        search.connect_search_changed(move |_| {
+            if let Some(view) = view.upgrade() {
+                view.filter();
+            }
+        });
     }
     {
-        let view = view.clone();
-        reset_all.connect_clicked(move |_| view.reset_everything());
+        let view = Rc::downgrade(&view);
+        reset_all.connect_clicked(move |_| {
+            if let Some(view) = view.upgrade() {
+                view.reset_everything();
+            }
+        });
+    }
+    // The handlers hold the view weakly; the dialog owns it, so it is freed
+    // with the dialog instead of staying allocated for each time Settings
+    // is opened.
+    {
+        let owner = view.clone();
+        dialog.connect_closed(move |_| {
+            let _ = &owner;
+        });
     }
     view.select_in_list(&scope);
-    view.refresh();
+    view.refresh(true);
     dialog.present(Some(parent));
     search.grab_focus();
 }
@@ -247,11 +269,17 @@ impl View {
         self.search.set_text("");
         self.title.set_title(&scope_title(&scope));
         self.build_page();
-        self.refresh();
+        self.refresh(true);
     }
 
     /// Save a change to the scope's settings and have the app apply it.
     fn edit(self: &Rc<Self>, change: impl Fn(&mut Settings)) {
+        self.edit_with(false, change);
+    }
+
+    /// `edit`, saying whether the rows drop edits that are not applied yet:
+    /// a reset does, since it puts the saved value back.
+    fn edit_with(self: &Rc<Self>, discard_edits: bool, change: impl Fn(&mut Settings)) {
         if self.syncing.get() {
             return;
         }
@@ -267,11 +295,11 @@ impl View {
                 config.set_machine(&m, o);
             }
         }
-        self.save(&config);
+        self.save(&config, discard_edits);
     }
 
     fn clear(self: &Rc<Self>, field: Field) {
-        self.edit(|s| s.clear(field));
+        self.edit_with(true, |s| s.clear(field));
     }
 
     fn reset_everything(self: &Rc<Self>) {
@@ -280,19 +308,19 @@ impl View {
             Scope::Defaults => config.defaults = Settings::default(),
             Scope::Machine(m) => config.set_machine(&m, Settings::default()),
         }
-        self.save(&config);
+        self.save(&config, true);
     }
 
-    fn save(self: &Rc<Self>, config: &Config) {
+    fn save(self: &Rc<Self>, config: &Config, discard_edits: bool) {
         if let Err(e) = config.save(&self.env.config_path) {
             tracing::warn!(path = %self.env.config_path.display(), error = %e, "cannot save config");
         }
         (self.env.changed)();
-        self.refresh();
+        self.refresh(discard_edits);
     }
 
     /// Bring every row, and the sidebar, in line with the saved settings.
-    fn refresh(&self) {
+    fn refresh(&self, discard_edits: bool) {
         let config = Config::load(&self.env.config_path);
         let (layer, resolved) = self.layer(&config);
         let defaults_scope = *self.scope.borrow() == Scope::Defaults;
@@ -306,7 +334,7 @@ impl View {
             } else {
                 "Default"
             });
-            (row.sync)(&resolved);
+            (row.sync)(&resolved, discard_edits);
         }
         self.syncing.set(false);
         self.reset_all.set_sensitive(!layer.is_empty());
@@ -432,7 +460,7 @@ impl View {
         row: &(impl IsA<adw::PreferencesRow> + IsA<gtk::Widget>),
         title: &str,
         subtitle: &str,
-        sync: Box<dyn Fn(&Resolved)>,
+        sync: SyncRow,
     ) {
         let tag = gtk::Label::builder()
             .css_classes(["dim-label", "caption"])
@@ -445,8 +473,12 @@ impl View {
             .css_classes(["flat", "circular"])
             .build();
         {
-            let view = self.clone();
-            reset.connect_clicked(move |_| view.clear(field));
+            let view = Rc::downgrade(self);
+            reset.connect_clicked(move |_| {
+                if let Some(view) = view.upgrade() {
+                    view.clear(field);
+                }
+            });
         }
         let suffix = gtk::Box::builder().spacing(6).build();
         suffix.append(&tag);
@@ -482,10 +514,12 @@ impl View {
     ) {
         let row = adw::SwitchRow::builder().subtitle(subtitle).build();
         {
-            let view = self.clone();
+            let view = Rc::downgrade(self);
             row.connect_active_notify(move |r| {
                 let on = r.is_active();
-                view.edit(|s| set(s, on));
+                if let Some(view) = view.upgrade() {
+                    view.edit(|s| set(s, on));
+                }
             });
         }
         let weak = row.downgrade();
@@ -495,7 +529,7 @@ impl View {
             &row,
             title,
             subtitle,
-            Box::new(move |r| {
+            Box::new(move |r, _| {
                 if let Some(row) = weak.upgrade() {
                     row.set_active(get(r));
                 }
@@ -519,10 +553,12 @@ impl View {
             .model(&gtk::StringList::new(choices))
             .build();
         {
-            let view = self.clone();
+            let view = Rc::downgrade(self);
             row.connect_selected_notify(move |r| {
                 let at = r.selected();
-                view.edit(|s| set(s, at));
+                if let Some(view) = view.upgrade() {
+                    view.edit(|s| set(s, at));
+                }
             });
         }
         row.set_factory(Some(&whole_value_factory()));
@@ -533,7 +569,7 @@ impl View {
             &row,
             title,
             subtitle,
-            Box::new(move |r| {
+            Box::new(move |r, _| {
                 if let Some(row) = weak.upgrade() {
                     row.set_selected(get(r));
                 }
@@ -554,9 +590,22 @@ impl View {
             .show_apply_button(true)
             .tooltip_text(subtitle)
             .build();
+        let dirty = Rc::new(Cell::new(false));
         {
-            let view = self.clone();
+            let (view, dirty) = (Rc::downgrade(self), dirty.clone());
+            row.connect_changed(move |_| {
+                if view.upgrade().is_some_and(|v| !v.syncing.get()) {
+                    dirty.set(true);
+                }
+            });
+        }
+        {
+            let (view, dirty) = (Rc::downgrade(self), dirty.clone());
             row.connect_apply(move |r| {
+                let Some(view) = view.upgrade() else {
+                    return;
+                };
+                dirty.set(false);
                 let text = r.text().trim().to_string();
                 if text.is_empty() {
                     view.clear(field);
@@ -572,9 +621,14 @@ impl View {
             &row,
             title,
             subtitle,
-            Box::new(move |r| {
+            Box::new(move |r, discard| {
                 if let Some(row) = weak.upgrade() {
-                    row.set_text(&get(r));
+                    // Typing is saved by the apply button; a change to
+                    // another option must not wipe what is still being typed.
+                    if discard || !dirty.get() {
+                        row.set_text(&get(r));
+                        dirty.set(false);
+                    }
                 }
             }),
         );
