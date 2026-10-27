@@ -40,6 +40,16 @@ jobs:
       - uses: ./.github/actions/setup
       - run: mbx test --workspace --locked
 
+  macos:
+    #= The macOS client builds alone: the rest of the workspace is Linux-only.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: rustup component add clippy
+      - run: cargo clippy -p gliff-mac --all-targets --locked -- -D warnings
+      - run: cargo test -p gliff-mac --locked
+      - run: scripts/macos/bundle.sh
+
   release:
     needs: [fmt, clippy, test]
     if: github.ref_type == 'tag'

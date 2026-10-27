@@ -32,6 +32,12 @@ both ends, and falls back to the CPU on machines where it cannot.
   `intel-media-driver` for Intel). Without them, and on NVIDIA, gliff uses
   the CPU and needs nothing extra.
 
+## macOS
+
+A native macOS client, `gliff-mac`, connects from a Mac to a Hyprland
+machine running `gliff-server`: `cargo build --release -p gliff-mac`, then
+`gliff-mac user@host`. See [docs/macos.md](docs/macos.md).
+
 ## Install
 
 Install gliff on both machines: your machine runs `gliff`, the remote one
