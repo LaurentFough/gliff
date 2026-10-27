@@ -192,8 +192,13 @@ mod tests {
                 if !std::path::Path::new(shell).exists() {
                     continue;
                 }
+                // Start from an empty environment: a developer's ZDOTDIR,
+                // BASH_ENV or XDG_CONFIG_HOME would otherwise load their real
+                // shell startup files, whose output or PATH changes break the
+                // byte-exact comparison below.
                 let output = std::process::Command::new(shell)
                     .args(["-c", &remote_command(&target)])
+                    .env_clear()
                     .env("HOME", home.path())
                     .env("PATH", &bin)
                     .output()
