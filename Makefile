@@ -1,5 +1,5 @@
 #= Makefile — one front door to gliff's bin/ and scripts/ entry points.
-#= Version: 0.1.0
+#= Version: 0.2.0
 #=
 #= Every target calls the script that already does the job, with the
 #= arguments that script expects; nothing here re-implements a build step.
@@ -20,8 +20,10 @@
 #=   SSH_PORT                 port for `make discovery`
 #=   GLIFF_CODESIGN_IDENTITY  signing fingerprint (else auto-detected; see docs/macos.md)
 #=   GLIFF_NOTARY_PROFILE     notarytool keychain profile (release packaging only)
+#=   CHECK=1                  `make macos`: run scripts/check.sh before installing
+#=   SIGNING=0                `make macos`: skip creating the gliff-local identity
 
-MAKEFILE_VERSION := 0.1.0
+MAKEFILE_VERSION := 0.2.0
 
 #= bash for pipefail, so `cmd | tee log` fails when cmd fails. Present on
 #= macOS (/bin/bash 3.2) and every Linux this repo targets. make 3.81
@@ -39,6 +41,10 @@ APP ?= $(ROOT)/target/macos/Gliff.app
 SIGN_MODE ?= development
 OUT ?=
 SSH_PORT ?= 22
+CHECK ?= 0
+SIGNING ?= 1
+#= Where bin/install-macos puts the app (fixed by that script).
+INSTALLED_APP := $(HOME)/Applications/Gliff.app
 SYSLOG ?= 0
 V ?= 0
 
@@ -65,7 +71,7 @@ define run
 	        logger -t gliff-make "[$(1)] $$*" || true; \
 	    fi; \
 	}; \
-	say "start: $(2)"; \
+	say "start (V=1 shows the commands)"; \
 	cd "$(ROOT)"; \
 	if ( $(2) ) 2>&1 | tee -a "$$log"; then \
 	    say "ok (log: $$log)"; \
@@ -88,7 +94,7 @@ endef
 
 .PHONY: help version doctor \
         build check fix test e2e clean \
-        signing signing-show app install package package-release icon \
+        macos verify signing signing-show app install package package-release icon \
         dev install-dev discovery discovery-off \
         logs-clean
 
@@ -157,6 +163,44 @@ logs-clean: ## Remove target/logs
 	$(Q)rm -rf "$(LOG_DIR)"
 
 #== macOS
+
+macos: ## Pipeline: signing identity, [CHECK=1: checks], build + sign + install, verify
+	$(call need_os,Darwin,macos)
+	@#= Each step is a separate make so the order holds even under -j, and
+	@#= ARGS is cleared so one step's extra arguments never reach another.
+
+	$(Q)if [ "$(SIGNING)" = 1 ]; then \
+	    $(MAKE) --no-print-directory signing ARGS=; \
+	else \
+	    echo "make macos: SIGNING=0, using an existing identity or ad-hoc signing"; \
+	fi
+	$(Q)if [ "$(CHECK)" = 1 ]; then $(MAKE) --no-print-directory check ARGS=; fi
+	$(Q)$(MAKE) --no-print-directory install ARGS=
+	$(Q)$(MAKE) --no-print-directory verify
+	@printf '\nGliff is installed at %s\nOpen it, or run: ~/.local/bin/gliff user@host\n' "$(INSTALLED_APP)"
+
+#= Inside the run helper's command, write case patterns as (pattern): a bare
+#= closing parenthesis would end make's call argument early.
+verify: ## Check the installed app's signature and the ~/.local/bin links
+	$(call need_os,Darwin,verify)
+	$(call run,verify,\
+	    app="$(INSTALLED_APP)"; \
+	    [ -d "$$app" ] || { echo "no app at $$app (run: make install)"; exit 1; }; \
+	    codesign --verify --deep --strict "$$app"; \
+	    info=$$(codesign -dvv "$$app" 2>&1); \
+	    printf '%s\n' "$$info" | grep -E '^(Identifier|Authority|Signature|TeamIdentifier)='; \
+	    if printf '%s\n' "$$info" | grep -q '^Signature=adhoc'; then \
+	        echo "warning: ad-hoc signed; privacy grants reset on every rebuild (run: make signing install)"; \
+	    fi; \
+	    for name in gliff gliff-server; do \
+	        link="$(HOME)/.local/bin/$$name"; \
+	        target=$$(readlink "$$link" 2>/dev/null || true); \
+	        case "$$target" in \
+	            ("$$app"/*) echo "$$link -> $$target" ;; \
+	            (*) echo "$$link does not point into $$app"; exit 1 ;; \
+	        esac; \
+	    done; \
+	    echo "signature and links OK")
 
 signing: ## Create the local "gliff-local" signing identity once (bin/setup-macos-signing)
 	$(call need_os,Darwin,signing)
