@@ -55,8 +55,6 @@ pub mod ev {
     pub const KEY_RIGHTALT: u32 = 100;
     pub const KEY_LEFTMETA: u32 = 125;
     pub const KEY_RIGHTMETA: u32 = 126;
-    pub const KEY_GRAVE: u32 = 41;
-    pub const KEY_102ND: u32 = 86;
     pub const BTN_LEFT: u32 = 0x110;
     pub const BTN_RIGHT: u32 = 0x111;
     pub const BTN_MIDDLE: u32 = 0x112;
@@ -65,7 +63,6 @@ pub mod ev {
 
 //= macOS virtual key codes for the modifier keys (Events.h).
 pub mod vk {
-    pub const ESCAPE: u16 = 0x35;
     pub const RIGHT_COMMAND: u16 = 0x36;
     pub const COMMAND: u16 = 0x37;
     pub const SHIFT: u16 = 0x38;
@@ -75,7 +72,6 @@ pub mod vk {
     pub const RIGHT_SHIFT: u16 = 0x3C;
     pub const RIGHT_OPTION: u16 = 0x3D;
     pub const RIGHT_CONTROL: u16 = 0x3E;
-    pub const FUNCTION: u16 = 0x3F;
     pub const ISO_SECTION: u16 = 0x0A;
     pub const ANSI_GRAVE: u16 = 0x32;
 }
@@ -159,7 +155,6 @@ pub mod device_mask {
 
 /// Device-independent modifier flags (`NSEventModifierFlags`).
 pub mod flag {
-    pub const CAPS_LOCK: u64 = 1 << 16;
     pub const SHIFT: u64 = 1 << 17;
     pub const CONTROL: u64 = 1 << 18;
     pub const OPTION: u64 = 1 << 19;
@@ -286,6 +281,7 @@ impl HeldKeys {
         rest
     }
 
+    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.keys.is_empty()
     }
@@ -357,7 +353,7 @@ mod tests {
         assert_eq!(evdev_key(vk::COMMAND, o(CommandAs::Super)), Some(125));
         assert_eq!(evdev_key(vk::RIGHT_COMMAND, o(CommandAs::Ctrl)), Some(97));
         assert_eq!(evdev_key(vk::COMMAND, o(CommandAs::Alt)), Some(56));
-        assert_eq!(key(vk::FUNCTION), None);
+        assert_eq!(key(0x3F), None); //= Fn
         assert_eq!(key(0x7F), None);
         assert_eq!(key(0x1234), None);
     }
@@ -368,8 +364,8 @@ mod tests {
             iso_swap: true,
             ..Default::default()
         };
-        assert_eq!(evdev_key(vk::ISO_SECTION, o), Some(ev::KEY_GRAVE));
-        assert_eq!(evdev_key(vk::ANSI_GRAVE, o), Some(ev::KEY_102ND));
+        assert_eq!(evdev_key(vk::ISO_SECTION, o), Some(41)); //= KEY_GRAVE
+        assert_eq!(evdev_key(vk::ANSI_GRAVE, o), Some(86)); //= KEY_102ND
     }
 
     #[test]

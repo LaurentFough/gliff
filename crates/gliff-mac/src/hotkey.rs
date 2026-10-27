@@ -226,7 +226,7 @@ mod tests {
     fn chords_compare_modifiers_exactly() {
         let mut m = HotkeyMatcher::new(ReleaseHotkey::parse("shift+escape").unwrap());
         let now = Instant::now();
-        assert!(m.on_key_down(0x35, flag::SHIFT | flag::CAPS_LOCK, now));
+        assert!(m.on_key_down(0x35, flag::SHIFT | (1 << 16), now)); //= + Caps Lock
         assert!(!m.on_key_down(0x35, flag::SHIFT | flag::COMMAND, now));
         assert!(!m.on_key_down(0x35, 0, now));
     }
