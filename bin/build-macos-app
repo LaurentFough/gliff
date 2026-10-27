@@ -29,15 +29,34 @@ ROOT="$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)"
 cd "$ROOT"
 export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.cargo/bin:$PATH"
 export MACOSX_DEPLOYMENT_TARGET=13.0
-cargo build --release --locked -p gliff -p gliff-server
+# Ask cargo where it put the binaries rather than assuming target/release:
+# a build.target-dir or build.target in ~/.cargo/config.toml (or
+# CARGO_TARGET_DIR / CARGO_BUILD_TARGET) moves them. Diagnostics still go to
+# the terminal; only the JSON artifact records are captured.
+GLIFF_ARTIFACTS=$(mktemp "${TMPDIR:-/tmp}/gliff-artifacts.XXXXXX")
+cargo build --release --locked -p gliff -p gliff-server \
+    --message-format=json-render-diagnostics >"$GLIFF_ARTIFACTS"
+gliff_bin() {
+    # The last "executable" record whose file name is exactly $1.
+    grep -o '"executable":"[^"]*"' "$GLIFF_ARTIFACTS" |
+        sed 's/^"executable":"//; s/"$//' |
+        awk -v name="$1" '{ n = $0; sub(/.*\//, "", n); if (n == name) path = $0 } END { print path }'
+}
+GLIFF_CLIENT_BIN=$(gliff_bin gliff)
+GLIFF_SERVER_BIN=$(gliff_bin gliff-server)
+rm -f "$GLIFF_ARTIFACTS"
+for bin in "$GLIFF_CLIENT_BIN" "$GLIFF_SERVER_BIN"; do
+    [ -n "$bin" ] && [ -x "$bin" ] || { echo 'cargo built, but did not report the gliff and gliff-server binaries.' >&2; exit 1; }
+done
+printf 'Using binaries from %s\n' "$(dirname -- "$GLIFF_CLIENT_BIN")"
 GLIFF_BUNDLE_COMPLETE=0
 cleanup() { [ "$GLIFF_BUNDLE_COMPLETE" -eq 1 ] || rm -rf "$GLIFF_APP"; }
 trap cleanup EXIT
 trap 'exit 1' HUP INT TERM
 mkdir -p "$GLIFF_APP/Contents/MacOS" "$GLIFF_APP/Contents/Resources"
-cp target/release/gliff target/release/gliff-server "$GLIFF_APP/Contents/MacOS/"
+cp "$GLIFF_CLIENT_BIN" "$GLIFF_SERVER_BIN" "$GLIFF_APP/Contents/MacOS/"
 cp crates/gliff-macos/resources/Gliff.icns LICENSE NOTICE "$GLIFF_APP/Contents/Resources/"
-target/release/gliff-server --install-native "$GLIFF_APP/Contents/MacOS/gliff-native"
+"$GLIFF_SERVER_BIN" --install-native "$GLIFF_APP/Contents/MacOS/gliff-native"
 GLIFF_VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
 cat > "$GLIFF_APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
