@@ -32,12 +32,16 @@ pub(crate) struct Caps {
     pub(crate) max_extent: (u32, u32),
     pub(crate) std_header: vk::ExtensionProperties,
     pub(crate) bitstream_alignment: u64,
+    /// Whether the driver took the profile with its usage hints; every
+    /// later use of the profile must pass the same.
+    pub(crate) usage_hints: bool,
 }
 
-/// Build the encode profile (High, 4:2:0, 8-bit, desktop streaming at
-/// ultra-low latency) and hand it to `f`. The chain lives on this stack
-/// frame, so every use gets a fresh, identical copy.
-fn with_profile<R>(f: impl FnOnce(&mut vk::VideoProfileInfoKHR) -> R) -> R {
+/// Build the encode profile (High, 4:2:0, 8-bit) and hand it to `f`. With
+/// `usage_hints` it also chains the usage info (desktop streaming at
+/// ultra-low latency). The chain lives on this stack frame, so every use
+/// gets a fresh, identical copy.
+fn with_profile<R>(usage_hints: bool, f: impl FnOnce(&mut vk::VideoProfileInfoKHR) -> R) -> R {
     let mut h264 = vk::VideoEncodeH264ProfileInfoKHR::default()
         .std_profile_idc(sv::StdVideoH264ProfileIdc_STD_VIDEO_H264_PROFILE_IDC_HIGH);
     let mut usage = vk::VideoEncodeUsageInfoKHR::default()
@@ -49,14 +53,19 @@ fn with_profile<R>(f: impl FnOnce(&mut vk::VideoProfileInfoKHR) -> R) -> R {
         .chroma_subsampling(vk::VideoChromaSubsamplingFlagsKHR::TYPE_420)
         .luma_bit_depth(vk::VideoComponentBitDepthFlagsKHR::TYPE_8)
         .chroma_bit_depth(vk::VideoComponentBitDepthFlagsKHR::TYPE_8)
-        .push_next(&mut h264)
-        .push_next(&mut usage);
+        .push_next(&mut h264);
+    if usage_hints {
+        profile = profile.push_next(&mut usage);
+    }
     f(&mut profile)
 }
 
 /// Like `with_profile`, as the one-entry profile list images and buffers take.
-fn with_profile_list<R>(f: impl FnOnce(&mut vk::VideoProfileListInfoKHR) -> R) -> R {
-    with_profile(|p| {
+fn with_profile_list<R>(
+    usage_hints: bool,
+    f: impl FnOnce(&mut vk::VideoProfileListInfoKHR) -> R,
+) -> R {
+    with_profile(usage_hints, |p| {
         let profiles = [*p];
         let mut list = vk::VideoProfileListInfoKHR::default().profiles(&profiles);
         f(&mut list)
@@ -89,13 +98,45 @@ pub(crate) fn family_encodes_h264(
 
 /// The driver's capabilities for the encode profile, or `None` when it
 /// refuses the profile or lacks what the encoder needs (CBR, NV12 input).
+/// The profile is asked for with its usage hints first, then without: the
+/// hints are optional, and some drivers refuse any profile that carries
+/// them (NVIDIA Pascal on 580).
 pub(crate) fn query_caps(
     entry: &ash::Entry,
     instance: &ash::Instance,
     pd: vk::PhysicalDevice,
 ) -> Option<Caps> {
     let fns = ash::khr::video_queue::Instance::new(entry, instance);
-    with_profile(|profile| {
+    select_profile(|usage_hints| profile_caps(&fns, pd, usage_hints))
+}
+
+/// Retry without optional hints when the hinted profile is rejected or
+/// lacks required capabilities. Only a usable profile ends the search.
+fn select_profile<T>(
+    mut query: impl FnMut(bool) -> std::result::Result<Option<T>, vk::Result>,
+) -> Option<T> {
+    for usage_hints in [true, false] {
+        match query(usage_hints) {
+            Ok(Some(caps)) => return Some(caps),
+            Ok(None) => {}
+            Err(r) => tracing::debug!(
+                result = ?r,
+                usage_hints,
+                "vulkan video: h264 encode profile refused"
+            ),
+        }
+    }
+    None
+}
+
+/// `query_caps` for one form of the profile: `Err` when the driver refuses
+/// the profile, `Ok(None)` when it lacks what the encoder needs.
+fn profile_caps(
+    fns: &ash::khr::video_queue::Instance,
+    pd: vk::PhysicalDevice,
+    usage_hints: bool,
+) -> std::result::Result<Option<Caps>, vk::Result> {
+    with_profile(usage_hints, |profile| {
         let mut h264 = vk::VideoEncodeH264CapabilitiesKHR::default();
         let mut encode = vk::VideoEncodeCapabilitiesKHR::default();
         let mut caps = vk::VideoCapabilitiesKHR::default()
@@ -106,8 +147,7 @@ pub(crate) fn query_caps(
             (fns.fp().get_physical_device_video_capabilities_khr)(pd, profile, &mut caps)
         };
         if r != vk::Result::SUCCESS {
-            tracing::debug!(result = ?r, "vulkan video: h264 encode profile refused");
-            return None;
+            return Err(r);
         }
         let found = Caps {
             max_extent: (caps.max_coded_extent.width, caps.max_coded_extent.height),
@@ -116,6 +156,7 @@ pub(crate) fn query_caps(
                 .min_bitstream_buffer_size_alignment
                 .max(caps.min_bitstream_buffer_offset_alignment)
                 .max(1),
+            usage_hints,
         };
         let (dpb_slots, active_refs) = (caps.max_dpb_slots, caps.max_active_reference_pictures);
         if !encode
@@ -123,17 +164,18 @@ pub(crate) fn query_caps(
             .contains(vk::VideoEncodeRateControlModeFlagsKHR::CBR)
         {
             tracing::debug!(modes = ?encode.rate_control_modes, "vulkan video: no CBR");
-            return None;
+            return Ok(None);
         }
         if dpb_slots < 2 || active_refs < 1 {
             tracing::debug!("vulkan video: too few DPB slots");
-            return None;
+            return Ok(None);
         }
-        if !encode_src_is_nv12(&fns, pd, profile) {
+        if !encode_src_is_nv12(fns, pd, profile) {
             tracing::debug!("vulkan video: encoder input is not NV12");
-            return None;
+            return Ok(None);
         }
-        Some(found)
+        tracing::debug!(usage_hints, "vulkan video: h264 encode profile taken");
+        Ok(Some(found))
     })
 }
 
@@ -237,7 +279,7 @@ impl VkH264Encoder {
         // the returned encoder and destroyed in `Drop`; on an early error
         // the partially built encoder is dropped the same way.
         unsafe {
-            let session = with_profile(|profile| {
+            let session = with_profile(video.usage_hints, |profile| {
                 let info = vk::VideoSessionCreateInfoKHR::default()
                     .queue_family_index(video.family)
                     .video_profile(profile)
@@ -258,7 +300,7 @@ impl VkH264Encoder {
                 session,
                 session_memory: Vec::new(),
                 parameters: vk::VideoSessionParametersKHR::null(),
-                input: with_profile_list(|list| {
+                input: with_profile_list(video.usage_hints, |list| {
                     Image::video_nv12(
                         gpu,
                         cw,
@@ -269,7 +311,7 @@ impl VkH264Encoder {
                     )
                 })?,
                 dpb: [
-                    with_profile_list(|list| {
+                    with_profile_list(video.usage_hints, |list| {
                         Image::video_nv12(
                             gpu,
                             cw,
@@ -278,7 +320,7 @@ impl VkH264Encoder {
                             list,
                         )
                     })?,
-                    with_profile_list(|list| {
+                    with_profile_list(video.usage_hints, |list| {
                         Image::video_nv12(
                             gpu,
                             cw,
@@ -288,7 +330,7 @@ impl VkH264Encoder {
                         )
                     })?,
                 ],
-                bitstream: with_profile_list(|list| {
+                bitstream: with_profile_list(video.usage_hints, |list| {
                     let size = ((cw * ch * 2) as u64)
                         .max(1 << 20)
                         .next_multiple_of(video.bitstream_alignment.max(4096));
@@ -319,7 +361,7 @@ impl VkH264Encoder {
             enc.bind_session_memory()?;
             enc.create_parameters()?;
             enc.parameter_sets = enc.encoded_parameter_sets()?;
-            enc.query_pool = with_profile(|profile| {
+            enc.query_pool = with_profile(video.usage_hints, |profile| {
                 let mut feedback = vk::QueryPoolVideoEncodeFeedbackCreateInfoKHR::default()
                     .encode_feedback_flags(
                         vk::VideoEncodeFeedbackFlagsKHR::BITSTREAM_BUFFER_OFFSET
@@ -901,4 +943,70 @@ fn step_error(step: &str, e: vk::Result) -> Error {
 
 fn has_start_code(data: &[u8]) -> bool {
     data.starts_with(&[0, 0, 1]) || data.starts_with(&[0, 0, 0, 1])
+}
+
+#[cfg(test)]
+mod profile_tests {
+    use super::*;
+
+    #[test]
+    fn accepted_hinted_profiles_are_used_without_retrying() {
+        let mut attempts = Vec::new();
+        assert_eq!(
+            select_profile(|hints| {
+                attempts.push(hints);
+                Ok(Some(hints))
+            }),
+            Some(true)
+        );
+        assert_eq!(attempts, [true]);
+    }
+
+    #[test]
+    fn rejected_hints_retry_once_and_select_the_unhinted_profile() {
+        let mut attempts = Vec::new();
+        assert_eq!(
+            select_profile(|hints| {
+                attempts.push(hints);
+                if hints {
+                    Err(vk::Result::ERROR_VIDEO_PROFILE_FORMAT_NOT_SUPPORTED_KHR)
+                } else {
+                    Ok(Some(hints))
+                }
+            }),
+            Some(false)
+        );
+        assert_eq!(attempts, [true, false]);
+    }
+
+    #[test]
+    fn an_accepted_but_unusable_hinted_profile_can_fall_back() {
+        let mut attempts = Vec::new();
+        assert_eq!(
+            select_profile(|hints| {
+                attempts.push(hints);
+                Ok(if hints { None } else { Some(hints) })
+            }),
+            Some(false)
+        );
+        assert_eq!(attempts, [true, false]);
+    }
+
+    #[test]
+    fn missing_required_capabilities_also_retry_without_hints() {
+        let mut attempts = Vec::new();
+        let selected: Option<()> = select_profile(|hints| {
+            attempts.push(hints);
+            Ok(None)
+        });
+        assert_eq!(selected, None);
+        assert_eq!(attempts, [true, false]);
+        let mut attempts = Vec::new();
+        let selected: Option<()> = select_profile(|hints| {
+            attempts.push(hints);
+            Err(vk::Result::ERROR_VIDEO_PROFILE_FORMAT_NOT_SUPPORTED_KHR)
+        });
+        assert_eq!(selected, None);
+        assert_eq!(attempts, [true, false]);
+    }
 }

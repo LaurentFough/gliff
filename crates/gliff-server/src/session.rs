@@ -1487,6 +1487,69 @@ impl VideoEncoder {
     }
 }
 
+/// Blocking compositor IPC stays off the single-threaded streaming runtime.
+/// One worker per headless output also prevents overlapping slow polls.
+struct KeepAwake {
+    stop: std::sync::mpsc::Sender<()>,
+    cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    task: Option<std::thread::JoinHandle<()>>,
+}
+
+impl KeepAwake {
+    fn start(instance: hypr_ipc::Instance, name: String) -> std::io::Result<Self> {
+        Self::poll(Duration::from_secs(2), move |cancelled| {
+            match instance.monitors() {
+                Ok(mons) if mons.iter().any(|m| m.name == name && !m.dpms_status) => {
+                    if let Err(e) = instance.set_dpms_if(&name, true, || {
+                        !cancelled.load(std::sync::atomic::Ordering::Acquire)
+                    }) {
+                        tracing::warn!(error = %e, "could not switch the headless output on");
+                    }
+                }
+                Ok(_) => {}
+                Err(e) => tracing::debug!(error = %e, "cannot read the output's DPMS state"),
+            }
+        })
+    }
+
+    fn poll(
+        every: Duration,
+        mut check: impl FnMut(&std::sync::atomic::AtomicBool) + Send + 'static,
+    ) -> std::io::Result<Self> {
+        use std::sync::mpsc::{channel, RecvTimeoutError};
+        let (stop, rx) = channel();
+        let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let task_cancelled = cancelled.clone();
+        let task = std::thread::Builder::new()
+            .name("gliff-output-awake".into())
+            .spawn(move || loop {
+                if task_cancelled.load(std::sync::atomic::Ordering::Acquire) {
+                    break;
+                }
+                check(&task_cancelled);
+                if !matches!(rx.recv_timeout(every), Err(RecvTimeoutError::Timeout)) {
+                    break;
+                }
+            })?;
+        Ok(Self {
+            stop,
+            cancelled,
+            task: Some(task),
+        })
+    }
+}
+
+impl Drop for KeepAwake {
+    fn drop(&mut self) {
+        self.cancelled
+            .store(true, std::sync::atomic::Ordering::Release);
+        let _ = self.stop.send(());
+        if let Some(task) = self.task.take() {
+            let _ = task.join();
+        }
+    }
+}
+
 // Runs before the fields drop, so held keys are released before the
 // capture thread ends, as the threads and output in `ServedOutput` go after.
 impl Drop for Session {
@@ -1537,6 +1600,7 @@ struct SessionOutput {
     /// Output scale; the logical size the pointer works in is size / scale.
     scale: f32,
     headless: Option<hypr_ipc::Instance>,
+    awake: Option<KeepAwake>,
 }
 
 impl SessionOutput {
@@ -1556,6 +1620,9 @@ impl SessionOutput {
 
 impl Drop for SessionOutput {
     fn drop(&mut self) {
+        // Join the poller before removing its output, so every in-flight
+        // DPMS request finishes while we still own the monitor.
+        drop(self.awake.take());
         if let Some(instance) = &self.headless {
             let _ = instance.remove_output(&self.name);
         }
@@ -1634,28 +1701,40 @@ fn setup_output(
             } & !1,
             scale: m.scale,
             headless: None,
+            awake: None,
         });
     }
-    let before: Vec<String> = instance.monitors()?.into_iter().map(|m| m.name).collect();
     let requested = format!("gliff-{}", std::process::id());
-    instance
-        .create_headless_output(&requested)
-        .context("create headless output")?;
-    // Hyprland names the output itself, so find the one that appeared.
+    let (wait, timed_out) = match instance.create_headless_output(&requested) {
+        Ok(()) => (Duration::from_secs(1), None),
+        Err(e) if creation_may_complete(&e) => {
+            tracing::warn!(error = %e, "headless request timed out; waiting for its named output");
+            (Duration::from_secs(10), Some(e))
+        }
+        Err(e) => return Err(e).context("create headless output"),
+    };
+    // Own cleanup immediately, including timeouts while polling. Never adopt
+    // another session's output or a physical monitor hotplugged during setup.
     let mut output = SessionOutput {
         name: requested,
         width: 0,
         height: 0,
         scale: 1.0,
         headless: Some(instance.clone()),
+        awake: None,
     };
-    std::thread::sleep(Duration::from_millis(200));
-    let after = instance.monitors()?;
-    let m = after
-        .iter()
-        .find(|m| !before.contains(&m.name))
-        .context("headless output did not appear")?;
-    output.name = m.name.clone();
+    wait_for_output(&output.name, wait, || {
+        instance
+            .monitors()
+            .map(|mons| mons.into_iter().map(|m| m.name).collect())
+    })
+    .map_err(|e| match timed_out {
+        // Report why the output was waited for, not only that it never came.
+        Some(cause) => anyhow::Error::new(cause)
+            .context("create headless output")
+            .context(e),
+        None => e,
+    })?;
     let width = caps.max_width.clamp(320, 1920) & !1;
     let height = caps.max_height.clamp(240, 1080) & !1;
     if let Err(e) = instance.set_monitor_mode(&output.name, width, height, 60, 1.0) {
@@ -1679,7 +1758,36 @@ fn setup_output(
     output.width = w & !1;
     output.height = h & !1;
     output.scale = scale;
+    // An output added while the remote sleeps comes up switched off.
+    output.awake = Some(KeepAwake::start(instance.clone(), output.name.clone())?);
     Ok(output)
+}
+
+/// A timed-out request may still finish in the compositor. An explicit
+/// rejection must fail immediately instead of waiting for an unrelated output.
+fn creation_may_complete(error: &hypr_ipc::Error) -> bool {
+    matches!(error, hypr_ipc::Error::Io(e)
+        if matches!(e.kind(), std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock))
+}
+
+fn wait_for_output(
+    requested: &str,
+    wait: Duration,
+    mut monitors: impl FnMut() -> hypr_ipc::Result<Vec<String>>,
+) -> Result<()> {
+    let deadline = Instant::now() + wait;
+    loop {
+        match monitors() {
+            Ok(names) if names.iter().any(|name| name == requested) => return Ok(()),
+            Ok(_) => {}
+            Err(e) => tracing::debug!(error = %e, "waiting for headless output discovery"),
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            anyhow::bail!("headless output {requested} did not appear before the setup deadline");
+        }
+        std::thread::sleep(Duration::from_millis(200).min(deadline - now));
+    }
 }
 
 /// The screen the user is most likely looking at: the focused monitor, else
@@ -1813,6 +1921,61 @@ fn stream_limit(encoder: (u32, u32), caps: &ClientCaps) -> Result<(u32, u32)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn slow_dpms_ipc_does_not_block_the_streaming_runtime() {
+        let (started, ready) = std::sync::mpsc::channel();
+        let (release, blocked) = std::sync::mpsc::channel();
+        let poll = KeepAwake::poll(Duration::from_secs(60), move |_| {
+            started.send(()).unwrap();
+            blocked.recv().unwrap();
+        })
+        .unwrap();
+        ready.recv_timeout(Duration::from_secs(2)).unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async { tokio::time::sleep(Duration::from_millis(10)).await });
+        release.send(()).unwrap();
+        drop(poll);
+    }
+
+    #[test]
+    fn only_the_requested_output_is_adopted() {
+        let result = wait_for_output("gliff-42", Duration::ZERO, || {
+            Ok(vec!["DP-2".into(), "gliff-420".into(), "gliff-99".into()])
+        });
+        assert!(result.is_err());
+        assert!(
+            wait_for_output("gliff-42", Duration::ZERO, || Ok(vec!["gliff-42".into()])).is_ok()
+        );
+    }
+
+    #[test]
+    fn discovery_recovers_after_an_ipc_timeout() {
+        let mut calls = 0;
+        wait_for_output("gliff-42", Duration::from_millis(500), || {
+            calls += 1;
+            if calls == 1 {
+                Err(hypr_ipc::Error::Io(std::io::ErrorKind::TimedOut.into()))
+            } else {
+                Ok(vec!["gliff-42".into()])
+            }
+        })
+        .unwrap();
+        assert_eq!(calls, 2);
+        assert!(creation_may_complete(&hypr_ipc::Error::Io(
+            std::io::ErrorKind::WouldBlock.into()
+        )));
+        assert!(!creation_may_complete(&hypr_ipc::Error::Io(
+            std::io::ErrorKind::PermissionDenied.into()
+        )));
+        assert!(!creation_may_complete(&hypr_ipc::Error::Command {
+            command: "output create".into(),
+            response: "refused".into()
+        }));
+    }
+
     #[test]
     fn initial_stream_respects_client_limits_before_first_resize() {
         let caps = ClientCaps {
