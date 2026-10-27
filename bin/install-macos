@@ -9,7 +9,20 @@ export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.cargo/bin:$PATH"
 GLIFF_DEST_APP="$HOME/Applications/Gliff.app"
 # Reuse the certificate chosen for this installation across future builds.
 # A fingerprint avoids ambiguous certificate names and needs no XML escaping.
-GLIFF_SIGNING_IDENTITY="${GLIFF_CODESIGN_IDENTITY:-$(/usr/libexec/PlistBuddy -c 'Print :GliffSigningIdentity' "$GLIFF_DEST_APP/Contents/Info.plist" 2>/dev/null || printf '-')}"
+# Read it only from an existing app, with plutil: PlistBuddy prints its
+# errors ("File Doesn't Exist", "Does Not Exist") on stdout, which a first
+# install would otherwise capture as the identity. Anything that is not a
+# 40-digit fingerprint counts as no saved choice.
+GLIFF_SAVED_IDENTITY=-
+GLIFF_DEST_PLIST="$GLIFF_DEST_APP/Contents/Info.plist"
+if [ -f "$GLIFF_DEST_PLIST" ]; then
+    GLIFF_SAVED_IDENTITY=$(plutil -extract GliffSigningIdentity raw -o - "$GLIFF_DEST_PLIST" 2>/dev/null) || GLIFF_SAVED_IDENTITY=-
+    case "$GLIFF_SAVED_IDENTITY" in
+        *[!a-fA-F0-9]*|'') GLIFF_SAVED_IDENTITY=- ;;
+        *) [ "${#GLIFF_SAVED_IDENTITY}" -eq 40 ] || GLIFF_SAVED_IDENTITY=- ;;
+    esac
+fi
+GLIFF_SIGNING_IDENTITY="${GLIFF_CODESIGN_IDENTITY:-$GLIFF_SAVED_IDENTITY}"
 # No choice yet: prefer a stable local identity over ad-hoc signing, so
 # privacy grants survive rebuilds without a paid developer account. Order:
 # the self-signed one from bin/setup-macos-signing, then a free Apple ID's
@@ -27,8 +40,8 @@ if [ "$GLIFF_SIGNING_IDENTITY" = - ] && [ -z "${GLIFF_CODESIGN_IDENTITY:-}" ]; t
 fi
 case "$GLIFF_SIGNING_IDENTITY" in
     -) ;;
-    *[!a-fA-F0-9]*|'') echo 'GLIFF_CODESIGN_IDENTITY must be a certificate SHA-1 fingerprint.' >&2; exit 1 ;;
-    *) [ "${#GLIFF_SIGNING_IDENTITY}" -eq 40 ] || { echo 'Invalid signing fingerprint.' >&2; exit 1; } ;;
+    *[!a-fA-F0-9]*|'') printf 'GLIFF_CODESIGN_IDENTITY must be a certificate SHA-1 fingerprint (40 hex digits), not "%s".\n' "$GLIFF_SIGNING_IDENTITY" >&2; exit 1 ;;
+    *) [ "${#GLIFF_SIGNING_IDENTITY}" -eq 40 ] || { printf 'Invalid signing fingerprint "%s": expected 40 hex digits.\n' "$GLIFF_SIGNING_IDENTITY" >&2; exit 1; } ;;
 esac
 mkdir -p "$HOME/Applications" "$HOME/.local/bin"
 GLIFF_STAGE=$(mktemp -d "$HOME/Applications/.gliff-install.XXXXXX")
