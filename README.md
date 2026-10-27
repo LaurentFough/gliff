@@ -51,14 +51,37 @@ omarchy pkg add gliff
 Then open **Gliff** from the app launcher, or run `gliff` in a terminal.
 
 On macOS, build and install the native app from this checkout (Rust and
-Xcode Command Line Tools are required):
+Xcode Command Line Tools are required; an Apple Developer Program membership
+is not):
 
 ```
+make macos            # create a local signing identity once, build, sign, install, verify
+make macos CHECK=1    # the same, running the CI checks first
+```
+
+`make macos` runs `bin/setup-macos-signing`, `bin/install-macos` and
+`make verify` in that order. The first run creates a self-signed
+`gliff-local` code-signing identity in your login keychain and asks for your
+password once, to trust it for code signing; later runs reuse it. Signing
+every build with the same identity keeps the Screen Recording, Accessibility
+and Local Network grants across rebuilds, which ad-hoc signing does not.
+`SIGNING=0` skips the identity and signs ad-hoc. Without make:
+
+```
+bin/setup-macos-signing   # once
 bin/install-macos
 ```
 
+The installer picks its signing identity in this order:
+`GLIFF_CODESIGN_IDENTITY` (a 40-digit SHA-1 fingerprint), the identity saved
+in the installed app, `gliff-local`, an "Apple Development" certificate (a
+free Apple ID in Xcode › Settings › Accounts provides one), then ad-hoc. Such
+builds run on Macs that trust the certificate; builds for other people need
+Developer ID signing and notarization (`make package-release`, see
+[macOS support](docs/macos.md)).
+
 This installs `~/Applications/Gliff.app`, with `gliff` and `gliff-server`
-links in `~/.local/bin`. Open the app to select a nearby computer or enter an
+links in `~/.local/bin`; `make verify` checks the signature and the links. Open the app to select a nearby computer or enter an
 SSH address, or run:
 
 ```
@@ -105,6 +128,39 @@ bin/install
 This uses the current checkout, including fixes newer than the last release.
 
 To build from source, see [docs/development.md](docs/development.md).
+
+### Make targets
+
+The `Makefile` is a front end for the scripts in `bin/` and `scripts/`: each
+target calls the script that does the job, with the arguments it expects.
+`make` lists them. Output goes to the terminal and to
+`target/logs/<target>.log`; `SYSLOG=1` also logs each step's start and result
+to syslog, and `V=1` shows the commands. Platform-specific targets stop with a
+message on the other platform, and a failing script fails the target with its
+exit status.
+
+| Target | Runs |
+|---|---|
+| `make doctor` | tool check, cargo output directory, signing setup |
+| `make build` | `bin/build` |
+| `make check` / `make fix` | `scripts/check.sh` / `scripts/check.sh --fix` |
+| `make test` | `cargo test --workspace --locked` |
+| `make e2e` | `scripts/e2e.sh` (Linux, inside Hyprland) |
+| `make install` | `bin/install`: the Mac app on macOS, `makepkg` on Arch |
+| `make macos` | macOS: `signing`, `check` with `CHECK=1`, `install`, `verify` |
+| `make signing` / `make signing-show` | `bin/setup-macos-signing` / its `--show` |
+| `make app` | `bin/build-macos-app` into `target/macos/Gliff.app` (`APP=`, `SIGN_MODE=`) |
+| `make verify` | checks the installed app's signature and `~/.local/bin` links |
+| `make package` | `bin/package-macos --development`: ad-hoc signed ZIP and checksum (`OUT=`) |
+| `make package-release` | `bin/package-macos`: Developer ID, notarized (`GLIFF_NOTARY_PROFILE`) |
+| `make icon` | `bin/export-macos-icon` |
+| `make dev` / `make install-dev` | `bin/dev` / `bin/install-dev` (Linux) |
+| `make discovery` / `make discovery-off` | `bin/enable-discovery` (`SSH_PORT=`) / `--disable` |
+| `make clean` | `cargo clean` |
+
+Pass extra script or cargo arguments with `ARGS`, for example
+`make build ARGS="-p gliff"`. The Makefile works with the GNU make 3.81 that
+macOS ships.
 
 ## Use
 
@@ -188,6 +244,39 @@ gliff --server-bin 'gliff-server --low-bandwidth' user@host
   The server then encodes on the CPU.
 - Linux streams reduce screens wider than 4096 pixels. Mac hosting is capped
   at 1920×1200 and 30 fps.
+- On macOS, `make doctor` shows the cargo output directory, the tools and the
+  signing setup, and `make verify` checks the installed app. If macOS asks
+  for Screen Recording or Accessibility again after every rebuild, the app is
+  ad-hoc signed: run `make signing install`.
+- A `build.target-dir` or `build.target` in `~/.cargo/config.toml`, or
+  `CARGO_TARGET_DIR` / `CARGO_BUILD_TARGET`, moves cargo's output; the Mac
+  app build asks cargo where the binaries are, so it works either way.
+
+## Changes in this fork
+
+This branch builds on
+[acrogenesis/gliff `acrogenesis/macos-client-host`](https://github.com/acrogenesis/gliff/tree/acrogenesis/macos-client-host)
+(the macOS client and host) and adds:
+
+- **Local signing without a paid developer account** (`35fde42`):
+  `bin/setup-macos-signing` creates, trusts and tests a self-signed
+  `gliff-local` identity, and `bin/install-macos` picks it, or an Apple
+  Development certificate, when no fingerprint is given or saved.
+- **First-install fix** (`b9e2bdb`): the installer reads the saved signing
+  identity with `plutil`, and only from an existing app. `PlistBuddy` prints
+  its errors on stdout, so a first install read them as the identity and
+  failed with `GLIFF_CODESIGN_IDENTITY must be a certificate SHA-1
+  fingerprint`. A malformed value is now shown in the error.
+- **Cargo output location** (`e259d5d`): `bin/build-macos-app` takes the
+  `gliff` and `gliff-server` paths from cargo's build messages instead of
+  assuming `target/release`, which failed with `cp: target/release/gliff: No
+  such file or directory` when cargo's output was moved.
+- **Hermetic ssh test** (`328badd`): the login-shell fallback test in
+  `gliff-transport` runs each shell with an empty environment plus `HOME` and
+  `PATH`, so a developer's `ZDOTDIR`, `BASH_ENV` or `XDG_CONFIG_HOME` no
+  longer breaks `scripts/check.sh`.
+- **Makefile** (`6ba1339`, `2bfb7b8`): the targets above, including the
+  `make macos` pipeline and `make verify`.
 
 ## More
 
