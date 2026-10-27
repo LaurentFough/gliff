@@ -1,0 +1,172 @@
+#!/bin/sh
+#= setup-macos-signing — create (once) a self-signed code-signing identity for
+#= local Gliff builds, so macOS privacy grants (Screen Recording,
+#= Accessibility, Local Network) survive rebuilds without an Apple Developer
+#= Program membership.
+#=
+#= Version: 0.1.0
+#=
+#= Usage: bin/setup-macos-signing [--name NAME] [--days N] [--no-trust]
+#=                                [--show] [--log FILE] [--syslog] [--debug]
+#=
+#=   --name NAME   certificate common name (default: gliff-local)
+#=   --days N      validity in days (default: 3650)
+#=   --no-trust    skip marking the certificate trusted for code signing
+#=                 (codesign may then refuse it; see docs/macos.md)
+#=   --show        only print the fingerprint of an existing identity
+#=   --log FILE    also append log lines to FILE
+#=   --syslog      also log through logger(1)
+#=   --debug       trace commands (set -x)
+#=
+#= Prints the identity's SHA-1 fingerprint on stdout, for
+#=   GLIFF_CODESIGN_IDENTITY=<fingerprint> bin/install-macos
+#= (bin/install-macos also finds it on its own when the name is gliff-local).
+#=
+#= Idempotent: an existing identity with the same name is reused, never
+#= replaced. Keys stay in your login keychain; nothing leaves this Mac.
+
+set -eu
+
+SCRIPT_VERSION="0.1.0"
+NAME="gliff-local"
+DAYS=3650
+TRUST=1
+SHOW_ONLY=0
+LOG_FILE=""
+USE_SYSLOG=0
+KEYCHAIN="$HOME/Library/Keychains/login.keychain-db"
+#= Apple's LibreSSL writes PKCS#12 files `security import` accepts; a
+#= Homebrew OpenSSL 3 earlier on PATH would need -legacy, so pin it.
+OPENSSL=/usr/bin/openssl
+
+#= ---- logging -------------------------------------------------------------
+log() {
+    level="$1"; shift
+    line="$(date '+%Y-%m-%dT%H:%M:%S') setup-macos-signing[$level] $*"
+    printf '%s\n' "$line" >&2
+    [ -z "$LOG_FILE" ] || printf '%s\n' "$line" >>"$LOG_FILE" || true
+    if [ "$USE_SYSLOG" -eq 1 ] && command -v logger >/dev/null 2>&1; then
+        logger -t gliff-signing "[$level] $*" || true
+    fi
+}
+die() { log ERROR "$*"; exit 1; }
+usage() { sed -n 's/^#= \{0,1\}//p' "$0" | sed -n '1,27p'; }
+
+#= ---- arguments -----------------------------------------------------------
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --name) [ $# -ge 2 ] || die "--name needs a value"; NAME="$2"; shift ;;
+        --days) [ $# -ge 2 ] || die "--days needs a value"; DAYS="$2"; shift ;;
+        --no-trust) TRUST=0 ;;
+        --show) SHOW_ONLY=1 ;;
+        --log) [ $# -ge 2 ] || die "--log needs a file"; LOG_FILE="$2"; shift ;;
+        --syslog) USE_SYSLOG=1 ;;
+        --debug) set -x ;;
+        -h|--help) usage; exit 0 ;;
+        *) die "unknown argument: $1 (try --help)" ;;
+    esac
+    shift
+done
+
+#= ---- input checks --------------------------------------------------------
+[ "$(uname -s)" = Darwin ] || die "run this on the Mac (uname is $(uname -s))"
+case "$NAME" in
+    ''|*[!A-Za-z0-9._-]*) die "--name may use letters, digits, '.', '_' and '-' only" ;;
+esac
+case "$DAYS" in
+    ''|*[!0-9]*) die "--days must be a whole number" ;;
+esac
+[ "$DAYS" -ge 1 ] && [ "$DAYS" -le 36500 ] || die "--days must be between 1 and 36500"
+for tool in security codesign; do
+    command -v "$tool" >/dev/null 2>&1 || die "missing tool: $tool"
+done
+[ -x "$OPENSSL" ] || die "missing $OPENSSL (part of macOS)"
+[ -f "$KEYCHAIN" ] || die "no login keychain at $KEYCHAIN"
+
+#= ---- lookup --------------------------------------------------------------
+#= SHA-1 of the first identity whose label is exactly NAME. No -v: an
+#= identity not yet trusted is still listed, so a rerun can finish setup.
+fingerprint() {
+    security find-identity -p codesigning "$KEYCHAIN" 2>/dev/null |
+        awk -v name="\"$NAME\"" '$3 == name { print $2; exit }'
+}
+
+FP="$(fingerprint)"
+if [ "$SHOW_ONLY" -eq 1 ]; then
+    [ -n "$FP" ] || die "no identity named $NAME; run without --show to create it"
+    printf '%s\n' "$FP"
+    exit 0
+fi
+
+log INFO "setup-macos-signing $SCRIPT_VERSION (identity: $NAME)"
+
+if [ -n "$FP" ]; then
+    log INFO "reusing existing identity $NAME ($FP)"
+else
+    TMP="$(mktemp -d "${TMPDIR:-/tmp}/gliff-signing.XXXXXX")"
+    #= The private key exists unencrypted only here, briefly; always wipe.
+    trap 'rm -rf "$TMP"' EXIT
+    trap 'exit 1' HUP INT TERM
+    chmod 700 "$TMP"
+    cat >"$TMP/cert.cnf" <<CNF
+[ req ]
+distinguished_name = dn
+x509_extensions    = codesign
+prompt             = no
+[ dn ]
+CN = $NAME
+[ codesign ]
+basicConstraints     = critical, CA:false
+keyUsage             = critical, digitalSignature
+extendedKeyUsage     = critical, codeSigning
+subjectKeyIdentifier = hash
+CNF
+    log INFO "creating a $DAYS-day RSA-2048 code-signing certificate"
+    "$OPENSSL" req -x509 -newkey rsa:2048 -sha256 -nodes -days "$DAYS" \
+        -config "$TMP/cert.cnf" -keyout "$TMP/key.pem" -out "$TMP/cert.pem" \
+        2>"$TMP/openssl.err" || { cat "$TMP/openssl.err" >&2; die "openssl req failed"; }
+    #= A throwaway passphrase only for the transfer into the keychain.
+    PASS="$("$OPENSSL" rand -hex 16)"
+    "$OPENSSL" pkcs12 -export -inkey "$TMP/key.pem" -in "$TMP/cert.pem" \
+        -name "$NAME" -out "$TMP/identity.p12" -passout "pass:$PASS" \
+        2>"$TMP/openssl.err" || { cat "$TMP/openssl.err" >&2; die "openssl pkcs12 failed"; }
+    #= -T: let codesign use the key without a keychain prompt each build.
+    security import "$TMP/identity.p12" -k "$KEYCHAIN" -P "$PASS" \
+        -T /usr/bin/codesign -T /usr/bin/security >/dev/null ||
+        die "security import failed (is the login keychain locked?)"
+    FP="$(fingerprint)"
+    [ -n "$FP" ] || die "imported, but no identity named $NAME is listed"
+    log INFO "created identity $NAME ($FP)"
+fi
+
+#= ---- trust ---------------------------------------------------------------
+#= codesign accepts only identities that evaluate as valid. Trust the leaf
+#= for code signing in the user's trust settings (no admin rights; macOS
+#= asks for your login password once).
+if [ "$TRUST" -eq 1 ]; then
+    if security find-identity -v -p codesigning "$KEYCHAIN" | grep -q "$FP"; then
+        log INFO "identity already trusted for code signing"
+    else
+        CERT="$(mktemp "${TMPDIR:-/tmp}/gliff-cert.XXXXXX")"
+        security find-certificate -c "$NAME" -p "$KEYCHAIN" >"$CERT" ||
+            die "cannot export the certificate for trust settings"
+        log INFO "marking $NAME trusted for code signing (macOS will ask for your password)"
+        security add-trusted-cert -r trustRoot -p codeSign -k "$KEYCHAIN" "$CERT" ||
+            { rm -f "$CERT"; die "add-trusted-cert failed or was cancelled"; }
+        rm -f "$CERT"
+    fi
+fi
+
+#= ---- self-test -----------------------------------------------------------
+PROBE="$(mktemp "${TMPDIR:-/tmp}/gliff-probe.XXXXXX")"
+cp /usr/bin/true "$PROBE"
+if codesign --force --sign "$FP" "$PROBE" 2>/dev/null && codesign --verify "$PROBE" 2>/dev/null; then
+    log INFO "codesign test passed"
+else
+    rm -f "$PROBE"
+    die "codesign could not sign with $FP; rerun without --no-trust, or see docs/macos.md"
+fi
+rm -f "$PROBE"
+
+log INFO "done; install with: GLIFF_CODESIGN_IDENTITY=$FP bin/install-macos"
+printf '%s\n' "$FP"

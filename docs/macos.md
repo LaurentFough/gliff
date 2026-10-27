@@ -11,12 +11,28 @@ installs `~/Applications/Gliff.app`, and creates `~/.local/bin/gliff` and
 `~/.local/bin/gliff-server`. Homebrew and rustup locations are included in the
 build PATH, so this also works from an SSH session.
 
-To retain permission grants across source updates, sign with a development
-certificate from your keychain. Find its SHA-1 fingerprint with
-`security find-identity -v -p codesigning`, then install with
-`GLIFF_CODESIGN_IDENTITY=<fingerprint> bin/install-macos`. The installer saves
-that choice in the app and reuses it on future updates. Without a certificate
-it uses ad-hoc signing, which can require renewed grants after each rebuild.
+To retain permission grants across source updates, sign with a stable
+identity instead of ad-hoc signing. No Apple Developer Program membership is
+needed for a build you run yourself:
+
+```
+bin/setup-macos-signing     # once: self-signed "gliff-local" identity, 10 years
+bin/install-macos           # picks it up automatically
+```
+
+`bin/setup-macos-signing` creates a code-signing certificate in your login
+keychain, marks it trusted for code signing (macOS asks for your password
+once), checks that `codesign` accepts it, and prints its SHA-1 fingerprint.
+Rerunning it reuses the identity. Without `GLIFF_CODESIGN_IDENTITY`, the
+installer reuses the identity saved in the installed app, else signs with
+`gliff-local`, else with an "Apple Development" certificate (a free Apple ID
+added in Xcode › Settings › Accounts provides one), else ad-hoc. To choose
+explicitly, find the fingerprint with `security find-identity -v -p codesigning`
+and install with `GLIFF_CODESIGN_IDENTITY=<fingerprint> bin/install-macos`.
+Ad-hoc signing, or switching identities, requires renewed grants once.
+
+Such builds run only on Macs that trust the certificate. Releases for other
+people need Developer ID signing and notarization, below.
 
 Open Gliff to show **Nearby Computers**. Select a computer to fill in its
 SSH username, hostname and port, then choose **Connect**. You can edit these
