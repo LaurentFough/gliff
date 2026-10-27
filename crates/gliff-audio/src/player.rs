@@ -45,8 +45,47 @@ impl Player {
                 note_output_error(&failed, &e);
             }
         };
-        let source = jitter.clone();
-        let stream = match supported.sample_format() {
+        let format = supported.sample_format();
+        let build = |config: cpal::StreamConfig| {
+            Self::build_stream(
+                &device,
+                format,
+                config,
+                jitter.clone(),
+                channels,
+                on_error.clone(),
+            )
+        };
+        // A device can report a buffer range it then refuses (ALSA under
+        // QEMU's HDA reports 1024..=1024 only at build time), so a size of
+        // our choosing falls back to the device's own.
+        let stream = match build(config) {
+            Ok(stream) => stream,
+            Err(e) if config.buffer_size != cpal::BufferSize::Default => {
+                tracing::warn!(error = %e, "audio output refused our buffer size; using the device default");
+                config.buffer_size = cpal::BufferSize::Default;
+                build(config)?
+            }
+            Err(e) => return Err(e),
+        };
+        stream.play()?;
+        tracing::info!(rate, channels, "audio output open");
+        Ok(Self {
+            jitter,
+            failed,
+            _stream: stream,
+        })
+    }
+
+    fn build_stream(
+        device: &cpal::Device,
+        format: cpal::SampleFormat,
+        config: cpal::StreamConfig,
+        source: Arc<Mutex<Jitter>>,
+        channels: usize,
+        on_error: impl FnMut(cpal::Error) + Send + 'static,
+    ) -> Result<cpal::Stream> {
+        Ok(match format {
             cpal::SampleFormat::F32 => device.build_output_stream::<f32, _, _>(
                 config,
                 move |out, _| match source.lock() {
@@ -93,13 +132,6 @@ impl Player {
                 )?
             }
             other => bail!("unsupported audio output format {other}"),
-        };
-        stream.play()?;
-        tracing::info!(rate, channels, "audio output open");
-        Ok(Self {
-            jitter,
-            failed,
-            _stream: stream,
         })
     }
 
