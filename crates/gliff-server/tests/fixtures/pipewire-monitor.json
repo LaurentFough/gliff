@@ -1,0 +1,1387 @@
+[
+  [
+    {
+      "id": 35,
+      "type": "PipeWire:Interface:Client",
+      "info": {
+        "props": {
+          "application.process.binary": "pw-cat",
+          "object.serial": 36
+        }
+      }
+    },
+    {
+      "id": 34,
+      "type": "PipeWire:Interface:Client",
+      "info": {
+        "props": {
+          "application.process.binary": "pw-cat",
+          "object.serial": 35
+        }
+      }
+    },
+    {
+      "id": 36,
+      "type": "PipeWire:Interface:Node",
+      "info": {
+        "state": "suspended",
+        "props": {
+          "client.id": 35,
+          "media.class": "Stream/Input/Audio",
+          "node.name": "gliff-audio-1113218-0",
+          "object.serial": 37
+        }
+      }
+    },
+    {
+      "id": 37,
+      "type": "PipeWire:Interface:Node",
+      "info": {
+        "state": "suspended",
+        "props": {
+          "client.id": 34,
+          "media.class": "Stream/Output/Audio",
+          "node.name": "gliff-review-tone",
+          "object.serial": 38
+        }
+      }
+    }
+  ],
+  [
+    {
+      "id": 37,
+      "info": null
+    }
+  ],
+  [
+    {
+      "id": 34,
+      "info": null
+    }
+  ],
+  [
+    {
+      "id": 36,
+      "info": null
+    }
+  ],
+  [
+    {
+      "id": 35,
+      "info": null
+    }
+  ],
+  [
+    {
+      "id": 35,
+      "type": "PipeWire:Interface:Client",
+      "info": {
+        "props": {
+          "application.process.binary": "wireplumber",
+          "object.serial": 39
+        }
+      }
+    }
+  ],
+  [
+    {
+      "id": 36,
+      "type": "PipeWire:Interface:Metadata",
+      "info": null
+    }
+  ],
+  [
+    {
+      "id": 34,
+      "type": "PipeWire:Interface:Metadata",
+      "info": null
+    }
+  ],
+  [
+    {
+      "id": 35,
+      "type": "PipeWire:Interface:Client",
+      "info": {
+        "props": {
+          "application.process.binary": "wireplumber",
+          "object.serial": 39
+        }
+      }
+    }
+  ],
+  [
+    {
+      "id": 35,
+      "type": "PipeWire:Interface:Client",
+      "info": {
+        "props": {
+          "application.process.binary": "wireplumber",
+          "object.serial": 39
+        }
+      }
+    }
+  ],
+  [
+    {
+      "id": 35,
+      "type": "PipeWire:Interface:Client",
+      "info": {
+        "props": {
+          "application.process.binary": "wireplumber",
+          "object.serial": 39
+        }
+      }
+    }
+  ],
+  [
+    {
+      "id": 43,
+      "type": "PipeWire:Interface:Client",
+      "info": {
+        "props": {
+          "application.process.binary": "pw-cat",
+          "object.serial": 49
+        }
+      }
+    },
+    {
+      "id": 44,
+      "type": "PipeWire:Interface:Client",
+      "info": {
+        "props": {
+          "application.process.binary": "pw-cat",
+          "object.serial": 50
+        }
+      }
+    },
+    {
+      "id": 45,
+      "type": "PipeWire:Interface:Node",
+      "info": {
+        "state": "suspended",
+        "props": {
+          "client.id": 43,
+          "media.class": "Stream/Input/Audio",
+          "node.name": "gliff-audio-1116820-0",
+          "object.serial": 51
+        }
+      }
+    },
+    {
+      "id": 46,
+      "type": "PipeWire:Interface:Node",
+      "info": {
+        "state": "suspended",
+        "props": {
+          "client.id": 44,
+          "media.class": "Stream/Output/Audio",
+          "node.name": "gliff-review-tone",
+          "object.serial": 52
+        }
+      }
+    }
+  ],
+  [
+    {
+      "id": 43,
+      "type": "PipeWire:Interface:Client",
+      "info": {
+        "props": {
+          "application.process.binary": "pw-cat",
+          "object.serial": 49
+        }
+      }
+    }
+  ],
+  [
+    {
+      "id": 44,
+      "type": "PipeWire:Interface:Client",
+      "info": {
+        "props": {
+          "application.process.binary": "pw-cat",
+          "object.serial": 50
+        }
+      }
+    }
+  ],
+  [
+    {
+      "id": 45,
+      "type": "PipeWire:Interface:Node",
+      "info": {
+        "state": "suspended",
+        "props": {
+          "client.id": 43,
+          "media.class": "Stream/Input/Audio",
+          "node.name": "gliff-audio-1116820-0",
+          "object.serial": 51
+        }
+      }
+    },
+    {
+      "id": 47,
+      "type": "PipeWire:Interface:Port",
+      "info": {
+        "direction": "input",
+        "props": {
+          "audio.channel": "FL",
+          "node.id": 45,
+          "object.serial": 53
+        }
+      }
+    },
+    {
+      "id": 48,
+      "type": "PipeWire:Interface:Port",
+      "info": {
+        "direction": "input",
+        "props": {
+          "audio.channel": "FR",
+          "node.id": 45,
+          "object.serial": 54
+        }
+      }
+    },
+    {
+      "id": 49,
+      "type": "PipeWire:Interface:Port",
+      "info": {
+        "direction": "output",
+        "props": {
+          "audio.channel": "FL",
+          "node.id": 45,
+          "object.serial": 55
+        }
+      }
+    },
+    {
+      "id": 50,
+      "type": "PipeWire:Interface:Port",
+      "info": {
+        "direction": "output",
+        "props": {
+          "audio.channel": "FR",
+          "node.id": 45,
+          "object.serial": 56
+        }
+      }
+    }
+  ],
+  [
+    {
+      "id": 45,
+      "type": "PipeWire:Interface:Node",
+      "info": {
+        "state": "suspended",
+        "props": {
+          "client.id": 43,
+          "media.class": "Stream/Input/Audio",
+          "node.name": "gliff-audio-1116820-0",
+          "object.serial": 51
+        }
+      }
+    }
+  ],
+  [
+    {
+      "id": 46,
+      "type": "PipeWire:Interface:Node",
+      "info": {
+        "state": "suspended",
+        "props": {
+          "client.id": 44,
+          "media.class": "Stream/Output/Audio",
+          "node.name": "gliff-review-tone",
+          "object.serial": 52
+        }
+      }
+    },
+    {
+      "id": 51,
+      "type": "PipeWire:Interface:Port",
+      "info": {
+        "direction": "output",
+        "props": {
+          "audio.channel": "FL",
+          "node.id": 46,
+          "object.serial": 57
+        }
+      }
+    },
+    {
+      "id": 52,
+      "type": "PipeWire:Interface:Port",
+      "info": {
+        "direction": "output",
+        "props": {
+          "audio.channel": "FR",
+          "node.id": 46,
+          "object.serial": 58
+        }
+      }
+    }
+  ],
+  [
+    {
+      "id": 46,
+      "type": "PipeWire:Interface:Node",
+      "info": {
+        "state": "running",
+        "props": {
+          "client.id": 44,
+          "media.class": "Stream/Output/Audio",
+          "node.name": "gliff-review-tone",
+          "object.serial": 52
+        }
+      }
+    }
+  ],
+  [
+    {
+      "id": 46,
+      "type": "PipeWire:Interface:Node",
+      "info": {
+        "state": "running",
+        "props": {
+          "client.id": 44,
+          "media.class": "Stream/Output/Audio",
+          "node.name": "gliff-review-tone",
+          "object.serial": 52
+        }
+      }
+    }
+  ],
+  [
+    {
+      "id": 53,
+      "type": "PipeWire:Interface:Client",
+      "info": {
+        "props": {
+          "application.process.binary": "pw-link",
+          "object.serial": 59
+        }
+      }
+    }
+  ],
+  [
+    {
+      "id": 53,
+      "info": null
+    }
+  ],
+  [
+    {
+      "id": 46,
+      "type": "PipeWire:Interface:Node",
+      "info": {
+        "state": "running",
+        "props": {
+          "client.id": 44,
+          "media.class": "Stream/Output/Audio",
+          "node.name": "gliff-review-tone",
+          "object.serial": 52
+        }
+      }
+    },
+    {
+      "id": 51,
+      "type": "PipeWire:Interface:Port",
+      "info": {
+        "direction": "output",
+        "props": {
+          "audio.channel": "FL",
+          "node.id": 46,
+          "object.serial": 57
+        }
+      }
+    }
+  ],
+  [
+    {
+      "id": 45,
+      "type": "PipeWire:Interface:Node",
+      "info": {
+        "state": "suspended",
+        "props": {
+          "client.id": 43,
+          "media.class": "Stream/Input/Audio",
+          "node.name": "gliff-audio-1116820-0",
+          "object.serial": 51
+        }
+      }
+    },
+    {
+      "id": 47,
+      "type": "PipeWire:Interface:Port",
+      "info": {
+        "direction": "input",
+        "props": {
+          "audio.channel": "FL",
+          "node.id": 45,
+          "object.serial": 53
+        }
+      }
+    },
+    {
+      "id": 49,
+      "type": "PipeWire:Interface:Port",
+      "info": {
+        "direction": "output",
+        "props": {
+          "audio.channel": "FL",
+          "node.id": 45,
+          "object.serial": 55
+        }
+      }
+    },
+    {
+      "id": 50,
+      "type": "PipeWire:Interface:Port",
+      "info": {
+        "direction": "output",
+        "props": {
+          "audio.channel": "FR",
+          "node.id": 45,
+          "object.serial": 56
+        }
+      }
+    }
+  ],
+  [
+    {
+      "id": 45,
+      "type": "PipeWire:Interface:Node",
+      "info": {
+        "state": "running",
+        "props": {
+          "client.id": 43,
+          "media.class": "Stream/Input/Audio",
+          "node.name": "gliff-audio-1116820-0",
+          "object.serial": 51
+        }
+      }
+    }
+  ],
+  [
+    {
+      "id": 53,
+      "type": "PipeWire:Interface:Client",
+      "info": {
+        "props": {
+          "application.process.binary": "pw-link",
+          "object.serial": 61
+        }
+      }
+    }
+  ],
+  [
+    {
+      "id": 55,
+      "type": "PipeWire:Interface:Link",
+      "info": {
+        "state": "negotiating",
+        "props": {
+          "object.serial": 62
+        }
+      }
+    }
+  ],
+  [
+    {
+      "id": 53,
+      "info": null
+    }
+  ],
+  [
+    {
+      "id": 48,
+      "type": "PipeWire:Interface:Port",
+      "info": {
+        "direction": "input",
+        "props": {
+          "audio.channel": "FR",
+          "node.id": 45,
+          "object.serial": 54
+        }
+      }
+    },
+    {
+      "id": 52,
+      "type": "PipeWire:Interface:Port",
+      "info": {
+        "direction": "output",
+        "props": {
+          "audio.channel": "FR",
+          "node.id": 46,
+          "object.serial": 58
+        }
+      }
+    }
+  ],
+  [
+    {
+      "id": 55,
+      "type": "PipeWire:Interface:Link",
+      "info": {
+        "state": "active",
+        "props": {
+          "object.serial": 62
+        }
+      }
+    }
+  ],
+  [
+    {
+      "id": 51,
+      "info": null
+    }
+  ],
+  [
+    {
+      "id": 55,
+      "info": null
+    }
+  ],
+  [
+    {
+      "id": 52,
+      "info": null
+    }
+  ],
+  [
+    {
+      "id": 46,
+      "info": null
+    }
+  ],
+  [
+    {
+      "id": 44,
+      "info": null
+    }
+  ],
+  [
+    {
+      "id": 45,
+      "type": "PipeWire:Interface:Node",
+      "info": {
+        "state": "idle",
+        "props": {
+          "client.id": 43,
+          "media.class": "Stream/Input/Audio",
+          "node.name": "gliff-audio-1116820-0",
+          "object.serial": 51
+        }
+      }
+    },
+    {
+      "id": 47,
+      "type": "PipeWire:Interface:Port",
+      "info": {
+        "direction": "input",
+        "props": {
+          "audio.channel": "FL",
+          "node.id": 45,
+          "object.serial": 53
+        }
+      }
+    },
+    {
+      "id": 48,
+      "type": "PipeWire:Interface:Port",
+      "info": {
+        "direction": "input",
+        "props": {
+          "audio.channel": "FR",
+          "node.id": 45,
+          "object.serial": 54
+        }
+      }
+    },
+    {
+      "id": 49,
+      "type": "PipeWire:Interface:Port",
+      "info": {
+        "direction": "output",
+        "props": {
+          "audio.channel": "FL",
+          "node.id": 45,
+          "object.serial": 55
+        }
+      }
+    },
+    {
+      "id": 50,
+      "type": "PipeWire:Interface:Port",
+      "info": {
+        "direction": "output",
+        "props": {
+          "audio.channel": "FR",
+          "node.id": 45,
+          "object.serial": 56
+        }
+      }
+    }
+  ],
+  [
+    {
+      "id": 44,
+      "type": "PipeWire:Interface:Client",
+      "info": {
+        "props": {
+          "application.process.binary": "pw-link",
+          "object.serial": 63
+        }
+      }
+    }
+  ],
+  [
+    {
+      "id": 44,
+      "info": null
+    }
+  ],
+  [
+    {
+      "id": 44,
+      "type": "PipeWire:Interface:Client",
+      "info": {
+        "props": {
+          "application.process.binary": "pw-link",
+          "object.serial": 64
+        }
+      }
+    }
+  ],
+  [
+    {
+      "id": 44,
+      "info": null
+    }
+  ],
+  [
+    {
+      "id": 44,
+      "type": "PipeWire:Interface:Client",
+      "info": {
+        "props": {
+          "application.process.binary": "pw-cat",
+          "object.serial": 65
+        }
+      }
+    },
+    {
+      "id": 46,
+      "type": "PipeWire:Interface:Node",
+      "info": {
+        "state": "suspended",
+        "props": {
+          "client.id": 44,
+          "media.class": "Stream/Output/Audio",
+          "node.name": "gliff-review-tone",
+          "object.serial": 66
+        }
+      }
+    }
+  ],
+  [
+    {
+      "id": 44,
+      "type": "PipeWire:Interface:Client",
+      "info": {
+        "props": {
+          "application.process.binary": "pw-cat",
+          "object.serial": 65
+        }
+      }
+    }
+  ],
+  [
+    {
+      "id": 46,
+      "type": "PipeWire:Interface:Node",
+      "info": {
+        "state": "suspended",
+        "props": {
+          "client.id": 44,
+          "media.class": "Stream/Output/Audio",
+          "node.name": "gliff-review-tone",
+          "object.serial": 66
+        }
+      }
+    },
+    {
+      "id": 52,
+      "type": "PipeWire:Interface:Port",
+      "info": {
+        "direction": "output",
+        "props": {
+          "audio.channel": "FL",
+          "node.id": 46,
+          "object.serial": 67
+        }
+      }
+    },
+    {
+      "id": 55,
+      "type": "PipeWire:Interface:Port",
+      "info": {
+        "direction": "output",
+        "props": {
+          "audio.channel": "FR",
+          "node.id": 46,
+          "object.serial": 68
+        }
+      }
+    }
+  ],
+  [
+    {
+      "id": 46,
+      "type": "PipeWire:Interface:Node",
+      "info": {
+        "state": "running",
+        "props": {
+          "client.id": 44,
+          "media.class": "Stream/Output/Audio",
+          "node.name": "gliff-review-tone",
+          "object.serial": 66
+        }
+      }
+    }
+  ],
+  [
+    {
+      "id": 46,
+      "type": "PipeWire:Interface:Node",
+      "info": {
+        "state": "running",
+        "props": {
+          "client.id": 44,
+          "media.class": "Stream/Output/Audio",
+          "node.name": "gliff-review-tone",
+          "object.serial": 66
+        }
+      }
+    }
+  ],
+  [
+    {
+      "id": 51,
+      "type": "PipeWire:Interface:Client",
+      "info": {
+        "props": {
+          "application.process.binary": "pw-link",
+          "object.serial": 69
+        }
+      }
+    }
+  ],
+  [
+    {
+      "id": 51,
+      "info": null
+    }
+  ],
+  [
+    {
+      "id": 46,
+      "type": "PipeWire:Interface:Node",
+      "info": {
+        "state": "running",
+        "props": {
+          "client.id": 44,
+          "media.class": "Stream/Output/Audio",
+          "node.name": "gliff-review-tone",
+          "object.serial": 66
+        }
+      }
+    },
+    {
+      "id": 52,
+      "type": "PipeWire:Interface:Port",
+      "info": {
+        "direction": "output",
+        "props": {
+          "audio.channel": "FL",
+          "node.id": 46,
+          "object.serial": 67
+        }
+      }
+    }
+  ],
+  [
+    {
+      "id": 45,
+      "type": "PipeWire:Interface:Node",
+      "info": {
+        "state": "idle",
+        "props": {
+          "client.id": 43,
+          "media.class": "Stream/Input/Audio",
+          "node.name": "gliff-audio-1116820-0",
+          "object.serial": 51
+        }
+      }
+    },
+    {
+      "id": 47,
+      "type": "PipeWire:Interface:Port",
+      "info": {
+        "direction": "input",
+        "props": {
+          "audio.channel": "FL",
+          "node.id": 45,
+          "object.serial": 53
+        }
+      }
+    },
+    {
+      "id": 49,
+      "type": "PipeWire:Interface:Port",
+      "info": {
+        "direction": "output",
+        "props": {
+          "audio.channel": "FL",
+          "node.id": 45,
+          "object.serial": 55
+        }
+      }
+    },
+    {
+      "id": 50,
+      "type": "PipeWire:Interface:Port",
+      "info": {
+        "direction": "output",
+        "props": {
+          "audio.channel": "FR",
+          "node.id": 45,
+          "object.serial": 56
+        }
+      }
+    }
+  ],
+  [
+    {
+      "id": 45,
+      "type": "PipeWire:Interface:Node",
+      "info": {
+        "state": "running",
+        "props": {
+          "client.id": 43,
+          "media.class": "Stream/Input/Audio",
+          "node.name": "gliff-audio-1116820-0",
+          "object.serial": 51
+        }
+      }
+    }
+  ],
+  [
+    {
+      "id": 51,
+      "type": "PipeWire:Interface:Client",
+      "info": {
+        "props": {
+          "application.process.binary": "pw-link",
+          "object.serial": 71
+        }
+      }
+    }
+  ],
+  [
+    {
+      "id": 53,
+      "type": "PipeWire:Interface:Link",
+      "info": {
+        "state": "negotiating",
+        "props": {
+          "object.serial": 72
+        }
+      }
+    }
+  ],
+  [
+    {
+      "id": 51,
+      "info": null
+    }
+  ],
+  [
+    {
+      "id": 55,
+      "type": "PipeWire:Interface:Port",
+      "info": {
+        "direction": "output",
+        "props": {
+          "audio.channel": "FR",
+          "node.id": 46,
+          "object.serial": 68
+        }
+      }
+    }
+  ],
+  [
+    {
+      "id": 48,
+      "type": "PipeWire:Interface:Port",
+      "info": {
+        "direction": "input",
+        "props": {
+          "audio.channel": "FR",
+          "node.id": 45,
+          "object.serial": 54
+        }
+      }
+    }
+  ],
+  [
+    {
+      "id": 53,
+      "type": "PipeWire:Interface:Link",
+      "info": {
+        "state": "active",
+        "props": {
+          "object.serial": 72
+        }
+      }
+    }
+  ],
+  [
+    {
+      "id": 47,
+      "info": null
+    }
+  ],
+  [
+    {
+      "id": 53,
+      "info": null
+    }
+  ],
+  [
+    {
+      "id": 48,
+      "info": null
+    }
+  ],
+  [
+    {
+      "id": 49,
+      "info": null
+    }
+  ],
+  [
+    {
+      "id": 50,
+      "info": null
+    }
+  ],
+  [
+    {
+      "id": 45,
+      "info": null
+    }
+  ],
+  [
+    {
+      "id": 43,
+      "info": null
+    }
+  ],
+  [
+    {
+      "id": 46,
+      "type": "PipeWire:Interface:Node",
+      "info": {
+        "state": "running",
+        "props": {
+          "client.id": 44,
+          "media.class": "Stream/Output/Audio",
+          "node.name": "gliff-review-tone",
+          "object.serial": 66
+        }
+      }
+    },
+    {
+      "id": 52,
+      "type": "PipeWire:Interface:Port",
+      "info": {
+        "direction": "output",
+        "props": {
+          "audio.channel": "FL",
+          "node.id": 46,
+          "object.serial": 67
+        }
+      }
+    },
+    {
+      "id": 55,
+      "type": "PipeWire:Interface:Port",
+      "info": {
+        "direction": "output",
+        "props": {
+          "audio.channel": "FR",
+          "node.id": 46,
+          "object.serial": 68
+        }
+      }
+    }
+  ],
+  [
+    {
+      "id": 43,
+      "type": "PipeWire:Interface:Client",
+      "info": {
+        "props": {
+          "application.process.binary": "pw-dump",
+          "object.serial": 73
+        }
+      }
+    }
+  ],
+  [
+    {
+      "id": 43,
+      "type": "PipeWire:Interface:Client",
+      "info": {
+        "props": {
+          "application.process.binary": "pw-dump",
+          "object.serial": 73
+        }
+      }
+    }
+  ],
+  [
+    {
+      "id": 45,
+      "type": "PipeWire:Interface:Client",
+      "info": {
+        "props": {
+          "application.process.binary": "pw-cat",
+          "object.serial": 74
+        }
+      }
+    },
+    {
+      "id": 50,
+      "type": "PipeWire:Interface:Node",
+      "info": {
+        "state": "suspended",
+        "props": {
+          "client.id": 45,
+          "media.class": "Stream/Input/Audio",
+          "node.name": "gliff-audio-1116820-1",
+          "object.serial": 75
+        }
+      }
+    }
+  ],
+  [
+    {
+      "id": 45,
+      "type": "PipeWire:Interface:Client",
+      "info": {
+        "props": {
+          "application.process.binary": "pw-cat",
+          "object.serial": 74
+        }
+      }
+    }
+  ],
+  [
+    {
+      "id": 50,
+      "type": "PipeWire:Interface:Node",
+      "info": {
+        "state": "suspended",
+        "props": {
+          "client.id": 45,
+          "media.class": "Stream/Input/Audio",
+          "node.name": "gliff-audio-1116820-1",
+          "object.serial": 75
+        }
+      }
+    },
+    {
+      "id": 49,
+      "type": "PipeWire:Interface:Port",
+      "info": {
+        "direction": "input",
+        "props": {
+          "audio.channel": "FL",
+          "node.id": 50,
+          "object.serial": 76
+        }
+      }
+    },
+    {
+      "id": 48,
+      "type": "PipeWire:Interface:Port",
+      "info": {
+        "direction": "input",
+        "props": {
+          "audio.channel": "FR",
+          "node.id": 50,
+          "object.serial": 77
+        }
+      }
+    },
+    {
+      "id": 53,
+      "type": "PipeWire:Interface:Port",
+      "info": {
+        "direction": "output",
+        "props": {
+          "audio.channel": "FL",
+          "node.id": 50,
+          "object.serial": 78
+        }
+      }
+    },
+    {
+      "id": 47,
+      "type": "PipeWire:Interface:Port",
+      "info": {
+        "direction": "output",
+        "props": {
+          "audio.channel": "FR",
+          "node.id": 50,
+          "object.serial": 79
+        }
+      }
+    }
+  ],
+  [
+    {
+      "id": 50,
+      "type": "PipeWire:Interface:Node",
+      "info": {
+        "state": "suspended",
+        "props": {
+          "client.id": 45,
+          "media.class": "Stream/Input/Audio",
+          "node.name": "gliff-audio-1116820-1",
+          "object.serial": 75
+        }
+      }
+    }
+  ],
+  [
+    {
+      "id": 46,
+      "type": "PipeWire:Interface:Node",
+      "info": {
+        "state": "running",
+        "props": {
+          "client.id": 44,
+          "media.class": "Stream/Output/Audio",
+          "node.name": "gliff-review-tone",
+          "object.serial": 66
+        }
+      }
+    },
+    {
+      "id": 52,
+      "type": "PipeWire:Interface:Port",
+      "info": {
+        "direction": "output",
+        "props": {
+          "audio.channel": "FL",
+          "node.id": 46,
+          "object.serial": 67
+        }
+      }
+    }
+  ],
+  [
+    {
+      "id": 50,
+      "type": "PipeWire:Interface:Node",
+      "info": {
+        "state": "suspended",
+        "props": {
+          "client.id": 45,
+          "media.class": "Stream/Input/Audio",
+          "node.name": "gliff-audio-1116820-1",
+          "object.serial": 75
+        }
+      }
+    },
+    {
+      "id": 49,
+      "type": "PipeWire:Interface:Port",
+      "info": {
+        "direction": "input",
+        "props": {
+          "audio.channel": "FL",
+          "node.id": 50,
+          "object.serial": 76
+        }
+      }
+    },
+    {
+      "id": 53,
+      "type": "PipeWire:Interface:Port",
+      "info": {
+        "direction": "output",
+        "props": {
+          "audio.channel": "FL",
+          "node.id": 50,
+          "object.serial": 78
+        }
+      }
+    },
+    {
+      "id": 47,
+      "type": "PipeWire:Interface:Port",
+      "info": {
+        "direction": "output",
+        "props": {
+          "audio.channel": "FR",
+          "node.id": 50,
+          "object.serial": 79
+        }
+      }
+    }
+  ],
+  [
+    {
+      "id": 50,
+      "type": "PipeWire:Interface:Node",
+      "info": {
+        "state": "running",
+        "props": {
+          "client.id": 45,
+          "media.class": "Stream/Input/Audio",
+          "node.name": "gliff-audio-1116820-1",
+          "object.serial": 75
+        }
+      }
+    }
+  ],
+  [
+    {
+      "id": 51,
+      "type": "PipeWire:Interface:Link",
+      "info": {
+        "state": "negotiating",
+        "props": {
+          "object.serial": 83
+        }
+      }
+    }
+  ],
+  [
+    {
+      "id": 55,
+      "type": "PipeWire:Interface:Port",
+      "info": {
+        "direction": "output",
+        "props": {
+          "audio.channel": "FR",
+          "node.id": 46,
+          "object.serial": 68
+        }
+      }
+    }
+  ],
+  [
+    {
+      "id": 48,
+      "type": "PipeWire:Interface:Port",
+      "info": {
+        "direction": "input",
+        "props": {
+          "audio.channel": "FR",
+          "node.id": 50,
+          "object.serial": 77
+        }
+      }
+    }
+  ],
+  [
+    {
+      "id": 51,
+      "type": "PipeWire:Interface:Link",
+      "info": {
+        "state": "active",
+        "props": {
+          "object.serial": 83
+        }
+      }
+    }
+  ],
+  [
+    {
+      "id": 43,
+      "info": null
+    }
+  ],
+  [
+    {
+      "id": 49,
+      "info": null
+    }
+  ],
+  [
+    {
+      "id": 51,
+      "info": null
+    }
+  ],
+  [
+    {
+      "id": 48,
+      "info": null
+    }
+  ],
+  [
+    {
+      "id": 53,
+      "info": null
+    }
+  ],
+  [
+    {
+      "id": 47,
+      "info": null
+    }
+  ],
+  [
+    {
+      "id": 50,
+      "info": null
+    }
+  ],
+  [
+    {
+      "id": 45,
+      "info": null
+    }
+  ],
+  [
+    {
+      "id": 52,
+      "info": null
+    }
+  ],
+  [
+    {
+      "id": 55,
+      "info": null
+    }
+  ],
+  [
+    {
+      "id": 46,
+      "info": null
+    }
+  ],
+  [
+    {
+      "id": 44,
+      "info": null
+    }
+  ]
+]

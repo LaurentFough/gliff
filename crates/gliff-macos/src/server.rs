@@ -258,6 +258,8 @@ where
             }],
             features: features()
                 .into_iter()
+                //= Sound is Linux-only so far: do not offer it from a Mac.
+                .filter(|f| f != gliff_proto::FEATURE_AUDIO)
                 .chain([FEATURE_CURSOR_IN_VIDEO.to_string()])
                 .collect(),
         })

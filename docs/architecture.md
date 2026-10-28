@@ -89,6 +89,8 @@ path continues to capture dmabufs.
 | `gliff-va` | libva display, H.264 encode/decode contexts on driver-owned surfaces, dmabuf export, the H.264 header parser and writer | yes, libva calls through committed bindgen output |
 | `gliff-vk` | Vulkan device, dmabuf import/export, split/recombine compute, the pipeline that hands surfaces to `gliff-va` | yes, Vulkan API calls |
 | `gliff-macos` | native AppKit client, ScreenCaptureKit host and CoreGraphics input bridge | no Rust unsafe; native APIs live in Swift |
+| `gliff-audio` | Opus encode/decode, the client's playout buffer and resampler, and its output device (cpal over ALSA) | none |
+| `gliff-settings` | per-machine client options and the shared `config.toml` store, used by the Linux and macOS clients | none |
 | `gliff-sw` | CPU fallback with OpenH264 encode/decode, fused BGRA<->I420 conversion | the encoder trace level through the raw API, and the AVX2 row kernels (pointer loads and stores) |
 | `gliff-server` | ties capture+input+encoder to the protocol; `--stdio`/`--listen` | none |
 | `gliff` | GTK4/libadwaita UI, decode worker | one block: hands GTK a dmabuf fd |
@@ -292,6 +294,33 @@ Every crate with `unsafe` documents the safety requirements at each block.
   notification with a progress bar and a Cancel action over
   `org.freedesktop.Notifications`. Cancel drops the fetch, which sends
   `Abort`. A failed paste is always reported, however short.
+
+- **Sound.** A client that wants sound sends `ClientMsg::Audio` to a
+  server that listed the `audio` feature; the Linux client asks only for
+  the tab it shows, so background sessions record nothing. The server
+  answers with `AudioStart` and then one `AudioFrame` per 10 ms Opus packet
+  (48 kHz stereo, restricted low-delay, 128 kbit/s). Packets share the TCP
+  stream with video: the Linux writer normally queues them ahead of a waiting
+  video frame, keeping audio order and at most half a second of packets. Pending
+  Pings/Pongs limit that priority so heartbeats still make progress; cursor and
+  clipboard updates do not. At most 50 audio messages can overtake any one
+  waiting video frame, so video and control messages also progress on slow links
+  without heartbeat support. Audio restarts do not reset this budget. The client
+  conceals short gaps in sequence numbers.
+  The client plays through a buffer read by a cubic resampler (`gliff-audio`
+  `Jitter`): the ratio converts 48 kHz to the device rate and leans by at
+  most 0.5% toward the target fill, which absorbs clock drift without
+  dropping samples. The target starts at 100 ms, grows by 20 ms after a
+  short packet gap and shrinks after 30 s of calm, between 40 and 250 ms; a burst
+  more than 150 ms past it (after a stall) is cut back at once.
+  With PipeWire, hosts record what applications play, except Gliff, so two
+  machines that show each other do not echo. The server runs `pw-record`
+  unconnected and links every application's output stream into it except
+  the `gliff` client's, following `pw-dump --monitor` and adding links with
+  `pw-link`. Without `pw-dump` it records the default output's monitor, and
+  without `pw-record` the same monitor through `parec`; both hold what a
+  local Gliff client plays, so two such hosts that show each other echo.
+  The recorders run as children so the server links no audio library.
 
 ## Measurements
 
