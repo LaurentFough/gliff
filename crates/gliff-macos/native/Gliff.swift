@@ -5,6 +5,8 @@ import CoreVideo
 import ApplicationServices
 import VideoToolbox
 import Carbon
+import Metal
+import QuartzCore
 
 // stdout belongs exclusively to the bridge. Diagnostics go to stderr.
 let outputLock = NSLock()
@@ -400,10 +402,552 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 }
 
+// MARK: - GPU video
+//
+// Hardware decode for the viewer: VideoToolbox decodes each H.264 stream into
+// IOSurface-backed NV12 buffers, a Metal kernel recombines AVC444 (Dual420)
+// or spreads 4:2:0 chroma (Single420) into a BGRA texture, and a CAMetalLayer
+// shows it. No pixel touches the CPU; the client only forwards coded bytes.
+//
+// Ported from omacom/gliff#5 (macos/Sources/GliffVideo, David Heinemeier
+// Hansson), MIT. Changes: one file, macOS 13 (plain NSLock instead of
+// withLock), GPU-prefixed names, and a viewer-side GPUVideo/GPUPresenter.
+
+enum NalType: UInt8 {
+    case slice = 1
+    case idr = 5
+    case sei = 6
+    case sps = 7
+    case pps = 8
+    case accessUnitDelimiter = 9
+}
+
+/// One NAL unit, from its header byte on (no start code).
+struct Nal {
+    let data: Data
+    var type: UInt8 { data[data.startIndex] & 0x1f }
+}
+
+/// Split an Annex B stream at its start codes. Trailing zero bytes belong to
+/// the next 4-byte start code or to trailing_zero_8bits, never to a NAL.
+func nalUnits(_ data: Data) -> [Nal] {
+    let bytes = [UInt8](data)
+    var starts: [Int] = []
+    var i = 0
+    while i + 3 <= bytes.count {
+        if bytes[i] == 0 && bytes[i + 1] == 0 && bytes[i + 2] == 1 {
+            starts.append(i + 3)
+            i += 3
+        } else {
+            i += 1
+        }
+    }
+    var units: [Nal] = []
+    for (n, body) in starts.enumerated() {
+        var end = n + 1 < starts.count ? starts[n + 1] - 3 : bytes.count
+        while end > body && bytes[end - 1] == 0 { end -= 1 }
+        if end > body { units.append(Nal(data: Data(bytes[body..<end]))) }
+    }
+    return units
+}
+
+/// An access unit as VideoToolbox wants it: parameter sets apart, and the
+/// other NAL units length-prefixed (AVCC, 4-byte big-endian lengths).
+struct AccessUnit {
+    var sps: Data?
+    var pps: Data?
+    var avcc = Data()
+
+    init(annexB: Data) {
+        for nal in nalUnits(annexB) {
+            switch nal.type {
+            case NalType.sps.rawValue: sps = nal.data
+            case NalType.pps.rawValue: pps = nal.data
+            case NalType.accessUnitDelimiter.rawValue: break
+            default:
+                var length = UInt32(nal.data.count).bigEndian
+                avcc.append(Data(bytes: &length, count: 4))
+                avcc.append(nal.data)
+            }
+        }
+    }
+}
+
+enum GPUVideoError: Error, CustomStringConvertible {
+    case noParameterSets
+    case status(String, OSStatus)
+    case noDevice
+    case texture(String)
+    case sizeMismatch
+    case malformed(String)
+
+    var description: String {
+        switch self {
+        case .noParameterSets: return "no SPS/PPS before the first slice"
+        case .status(let what, let code): return "\(what) failed: OSStatus \(code)"
+        case .noDevice: return "no Metal device"
+        case .texture(let what): return "cannot wrap \(what) as a Metal texture"
+        case .sizeMismatch: return "main and auxiliary pictures differ in size"
+        case .malformed(let what): return "malformed video packet: \(what)"
+        }
+    }
+}
+
+/// One H.264 stream. Decoding is synchronous (no asynchronous flag), and
+/// gliff's streams never reorder, so each access unit gives at most one
+/// picture before DecodeFrame returns.
+final class H264Decoder {
+    private var format: CMVideoFormatDescription?
+    private var session: VTDecompressionSession?
+    private var sps: Data?
+    private var pps: Data?
+
+    deinit {
+        if let session = session { VTDecompressionSessionInvalidate(session) }
+    }
+
+    /// Decode one Annex B access unit; nil when it produced no picture.
+    func decode(_ annexB: Data) throws -> CVPixelBuffer? {
+        let unit = AccessUnit(annexB: annexB)
+        if let sps = unit.sps, let pps = unit.pps, sps != self.sps || pps != self.pps {
+            try configure(sps: sps, pps: pps)
+        }
+        guard let session = session, let format = format else { throw GPUVideoError.noParameterSets }
+        if unit.avcc.isEmpty { return nil }
+        let sample = try sampleBuffer(unit.avcc, format: format)
+        var image: CVPixelBuffer?
+        var decodeStatus = noErr
+        let status = VTDecompressionSessionDecodeFrame(session, sampleBuffer: sample, flags: [], infoFlagsOut: nil) { status, _, imageBuffer, _, _ in
+            decodeStatus = status
+            image = imageBuffer
+        }
+        guard status == noErr else { throw GPUVideoError.status("DecodeFrame", status) }
+        guard decodeStatus == noErr else { throw GPUVideoError.status("decode", decodeStatus) }
+        return image
+    }
+
+    /// (Re)create the session for new parameter sets; the size comes from
+    /// the SPS, cropping included.
+    private func configure(sps: Data, pps: Data) throws {
+        var newFormat: CMVideoFormatDescription?
+        let status = sps.withUnsafeBytes { spsBytes in
+            pps.withUnsafeBytes { ppsBytes -> OSStatus in
+                let pointers = [
+                    spsBytes.bindMemory(to: UInt8.self).baseAddress!,
+                    ppsBytes.bindMemory(to: UInt8.self).baseAddress!,
+                ]
+                let sizes = [sps.count, pps.count]
+                return CMVideoFormatDescriptionCreateFromH264ParameterSets(
+                    allocator: kCFAllocatorDefault, parameterSetCount: 2,
+                    parameterSetPointers: pointers, parameterSetSizes: sizes,
+                    nalUnitHeaderLength: 4, formatDescriptionOut: &newFormat)
+            }
+        }
+        guard status == noErr, let newFormat = newFormat else { throw GPUVideoError.status("format description", status) }
+        if let session = session, VTDecompressionSessionCanAcceptFormatDescription(session, formatDescription: newFormat) {
+            format = newFormat
+        } else {
+            if let session = session { VTDecompressionSessionInvalidate(session); self.session = nil }
+            let spec: [CFString: Any] = [kVTVideoDecoderSpecification_RequireHardwareAcceleratedVideoDecoder: true]
+            let attributes: [CFString: Any] = [
+                kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+                kCVPixelBufferMetalCompatibilityKey: true,
+                kCVPixelBufferIOSurfacePropertiesKey: [CFString: Any](),
+            ]
+            var newSession: VTDecompressionSession?
+            let created = VTDecompressionSessionCreate(
+                allocator: kCFAllocatorDefault, formatDescription: newFormat,
+                decoderSpecification: spec as CFDictionary, imageBufferAttributes: attributes as CFDictionary,
+                outputCallback: nil, decompressionSessionOut: &newSession)
+            guard created == noErr, let newSession = newSession else { throw GPUVideoError.status("session create", created) }
+            VTSessionSetProperty(newSession, key: kVTDecompressionPropertyKey_RealTime, value: kCFBooleanTrue)
+            session = newSession
+            format = newFormat
+        }
+        self.sps = sps
+        self.pps = pps
+    }
+
+    private func sampleBuffer(_ avcc: Data, format: CMVideoFormatDescription) throws -> CMSampleBuffer {
+        var block: CMBlockBuffer?
+        var status = CMBlockBufferCreateWithMemoryBlock(
+            allocator: kCFAllocatorDefault, memoryBlock: nil, blockLength: avcc.count,
+            blockAllocator: kCFAllocatorDefault, customBlockSource: nil, offsetToData: 0,
+            dataLength: avcc.count, flags: kCMBlockBufferAssureMemoryNowFlag, blockBufferOut: &block)
+        guard status == noErr, let block = block else { throw GPUVideoError.status("block buffer", status) }
+        status = avcc.withUnsafeBytes { bytes in
+            CMBlockBufferReplaceDataBytes(with: bytes.baseAddress!, blockBuffer: block, offsetIntoDestination: 0, dataLength: avcc.count)
+        }
+        guard status == noErr else { throw GPUVideoError.status("block copy", status) }
+        var sample: CMSampleBuffer?
+        var size = avcc.count
+        status = CMSampleBufferCreateReady(
+            allocator: kCFAllocatorDefault, dataBuffer: block, formatDescription: format,
+            sampleCount: 1, sampleTimingEntryCount: 0, sampleTimingArray: nil,
+            sampleSizeEntryCount: 1, sampleSizeArray: &size, sampleBufferOut: &sample)
+        guard status == noErr, let sample = sample else { throw GPUVideoError.status("sample buffer", status) }
+        return sample
+    }
+}
+
+/// AVC444 recombine on the GPU, a port of crates/gliff-vk/shaders/recombine.comp:
+/// the main and auxiliary NV12 pictures become one full-chroma BGRA texture.
+/// With no auxiliary picture the main chroma covers each 2x2 block (Single420).
+final class Recombiner {
+    let device: MTLDevice
+    private let queue: MTLCommandQueue
+    private let pipeline: MTLComputePipelineState
+    private let cache: CVMetalTextureCache
+
+    init(device: MTLDevice) throws {
+        guard let queue = device.makeCommandQueue() else { throw GPUVideoError.noDevice }
+        let options = MTLCompileOptions()
+        // The constants must round exactly as the Vulkan shader's do.
+        if #available(macOS 15.0, *) { options.mathMode = .safe } else { options.fastMathEnabled = false }
+        let library = try device.makeLibrary(source: Recombiner.source, options: options)
+        guard let function = library.makeFunction(name: "recombine") else { throw GPUVideoError.noDevice }
+        self.device = device
+        self.queue = queue
+        self.pipeline = try device.makeComputePipelineState(function: function)
+        var cache: CVMetalTextureCache?
+        CVMetalTextureCacheCreate(kCFAllocatorDefault, nil, device, nil, &cache)
+        guard let made = cache else { throw GPUVideoError.noDevice }
+        self.cache = made
+    }
+
+    /// A texture the recombine writes and a renderer samples.
+    func makeOutput(width: Int, height: Int) throws -> MTLTexture {
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm, width: width, height: height, mipmapped: false)
+        descriptor.usage = [.shaderWrite, .shaderRead]
+        descriptor.storageMode = .private
+        guard let output = device.makeTexture(descriptor: descriptor) else { throw GPUVideoError.texture("output") }
+        return output
+    }
+
+    /// Recombine one frame into `output` and wait for the GPU, so the frame
+    /// is complete when the client acknowledges it.
+    func recombine(main: CVPixelBuffer, aux: CVPixelBuffer?, into output: MTLTexture) throws {
+        let width = CVPixelBufferGetWidth(main), height = CVPixelBufferGetHeight(main)
+        if let aux = aux, CVPixelBufferGetWidth(aux) != width || CVPixelBufferGetHeight(aux) != height { throw GPUVideoError.sizeMismatch }
+        guard output.width == width, output.height == height else { throw GPUVideoError.sizeMismatch }
+        let planes = [
+            try plane(main, 0, .r8Unorm, "main luma"),
+            try plane(main, 1, .rg8Unorm, "main chroma"),
+            try plane(aux ?? main, 0, .r8Unorm, "aux luma"),
+            try plane(aux ?? main, 1, .rg8Unorm, "aux chroma"),
+        ]
+        guard let commands = queue.makeCommandBuffer(), let encoder = commands.makeComputeCommandEncoder() else {
+            throw GPUVideoError.texture("command buffer")
+        }
+        var params: [Int32] = [Int32(width), Int32(height), aux == nil ? 0 : 1]
+        encoder.setComputePipelineState(pipeline)
+        for (index, texture) in planes.enumerated() { encoder.setTexture(CVMetalTextureGetTexture(texture), index: index) }
+        encoder.setTexture(output, index: 4)
+        encoder.setBytes(&params, length: MemoryLayout<Int32>.stride * params.count, index: 0)
+        // One thread per 2x2 block, as in the Vulkan shader.
+        let grid = MTLSize(width: (width + 1) / 2, height: (height + 1) / 2, depth: 1)
+        encoder.dispatchThreads(grid, threadsPerThreadgroup: MTLSize(width: 16, height: 16, depth: 1))
+        encoder.endEncoding()
+        commands.addCompletedHandler { _ in _ = planes }
+        commands.commit()
+        commands.waitUntilCompleted()
+        if let error = commands.error { throw error }
+    }
+
+    private func plane(_ buffer: CVPixelBuffer, _ index: Int, _ format: MTLPixelFormat, _ what: String) throws -> CVMetalTexture {
+        var texture: CVMetalTexture?
+        let status = CVMetalTextureCacheCreateTextureFromImage(
+            kCFAllocatorDefault, cache, buffer, nil, format,
+            CVPixelBufferGetWidthOfPlane(buffer, index), CVPixelBufferGetHeightOfPlane(buffer, index), index, &texture)
+        guard status == kCVReturnSuccess, let made = texture else { throw GPUVideoError.texture(what) }
+        return made
+    }
+
+    // BT.709 limited range, matching gliff-proto::color. The output is
+    // bgra8Unorm, so the kernel writes logical RGBA and Metal stores B,G,R,A.
+    static let source = """
+    #include <metal_stdlib>
+    using namespace metal;
+
+    struct Params { int width; int height; int has_aux; };
+
+    static float3 to_rgb(float y8, float u8, float v8) {
+        float y = y8 * 255.0 - 16.0;
+        float cb = u8 * 255.0 - 128.0;
+        float cr = v8 * 255.0 - 128.0;
+        return clamp(float3(1.1644 * y + 1.7927 * cr,
+                            1.1644 * y - 0.2132 * cb - 0.5329 * cr,
+                            1.1644 * y + 2.1124 * cb) / 255.0, 0.0, 1.0);
+    }
+
+    kernel void recombine(texture2d<float, access::read> main_y [[texture(0)]],
+                          texture2d<float, access::read> main_uv [[texture(1)]],
+                          texture2d<float, access::read> aux_y [[texture(2)]],
+                          texture2d<float, access::read> aux_uv [[texture(3)]],
+                          texture2d<float, access::write> dst [[texture(4)]],
+                          constant Params &p [[buffer(0)]],
+                          uint2 gid [[thread_position_in_grid]]) {
+        int bx = int(gid.x), by = int(gid.y);
+        int x = 2 * bx, y = 2 * by;
+        if (x >= p.width || y >= p.height) return;
+        float y00 = main_y.read(uint2(x, y)).r;
+        float y10 = main_y.read(uint2(x + 1, y)).r;
+        float y01 = main_y.read(uint2(x, y + 1)).r;
+        float y11 = main_y.read(uint2(x + 1, y + 1)).r;
+        float2 c00 = main_uv.read(uint2(bx, by)).rg;
+        float2 c10 = c00, c01 = c00, c11 = c00;
+        if (p.has_aux != 0) {
+            int half_h = p.height / 2;
+            c10 = aux_uv.read(uint2(bx, by)).rg;
+            c01 = float2(aux_y.read(uint2(x, by)).r, aux_y.read(uint2(x, half_h + by)).r);
+            c11 = float2(aux_y.read(uint2(x + 1, by)).r, aux_y.read(uint2(x + 1, half_h + by)).r);
+        }
+        dst.write(float4(to_rgb(y00, c00.r, c00.g), 1.0), uint2(x, y));
+        dst.write(float4(to_rgb(y10, c10.r, c10.g), 1.0), uint2(x + 1, y));
+        dst.write(float4(to_rgb(y01, c01.r, c01.g), 1.0), uint2(x, y + 1));
+        dst.write(float4(to_rgb(y11, c11.r, c11.g), 1.0), uint2(x + 1, y + 1));
+    }
+    """
+}
+
+/// Output textures reused across frames.
+final class TexturePool {
+    private let lock = NSLock()
+    private var free: [MTLTexture]
+    init(_ textures: [MTLTexture]) { free = textures }
+    func take() -> MTLTexture? { lock.lock(); defer { lock.unlock() }; return free.popLast() }
+    func give(back texture: MTLTexture) { lock.lock(); free.append(texture); lock.unlock() }
+}
+
+/// A decoded frame; its texture returns to the pool when the last reference
+/// goes, so the display keeps it exactly as long as the GPU still reads it.
+final class GPUFrame {
+    let texture: MTLTexture
+    private let pool: TexturePool
+    init(texture: MTLTexture, pool: TexturePool) { self.texture = texture; self.pool = pool }
+    deinit { pool.give(back: texture) }
+}
+
+private final class DecodeResults: @unchecked Sendable {
+    private let lock = NSLock()
+    private(set) var pictures: [CVPixelBuffer?] = [nil, nil]
+    private(set) var failure: Error?
+    func set(_ stream: Int, _ picture: CVPixelBuffer?) { lock.lock(); pictures[stream] = picture; lock.unlock() }
+    func fail(_ error: Error) { lock.lock(); failure = error; lock.unlock() }
+}
+
+/// One stream's client-side video: two decoders (one for Single420) and the
+/// recombine, into a small pool of output textures.
+final class FramePipeline {
+    let width: Int
+    let height: Int
+    let dual: Bool
+    private let recombiner: Recombiner
+    private let main = H264Decoder()
+    private let aux: H264Decoder?
+    private let pool: TexturePool
+    /// On screen, waiting to be drawn, being decoded, and a spare.
+    static let poolSize = 4
+
+    init(recombiner: Recombiner, width: Int, height: Int, dual: Bool) throws {
+        self.recombiner = recombiner
+        self.width = width
+        self.height = height
+        self.dual = dual
+        aux = dual ? H264Decoder() : nil
+        pool = TexturePool(try (0..<FramePipeline.poolSize).map { _ in try recombiner.makeOutput(width: width, height: height) })
+    }
+
+    /// Decode one frame. nil when the access units gave no picture, or when
+    /// every texture is still on its way to the screen (latest wins: the
+    /// display is behind, so this picture is dropped, not waited for).
+    func decode(main mainUnit: Data, aux auxUnit: Data) throws -> GPUFrame? {
+        let results = DecodeResults()
+        let main = self.main, aux = self.aux
+        // The two streams are independent: decode them at the same time.
+        DispatchQueue.concurrentPerform(iterations: aux == nil ? 1 : 2) { stream in
+            do {
+                let picture = stream == 0 ? try main.decode(mainUnit) : try aux!.decode(auxUnit)
+                results.set(stream, picture)
+            } catch {
+                results.fail(error)
+            }
+        }
+        if let failure = results.failure { throw failure }
+        guard let mainPicture = results.pictures[0], !dual || results.pictures[1] != nil else { return nil }
+        guard let texture = pool.take() else { return nil }
+        let frame = GPUFrame(texture: texture, pool: pool)
+        try recombiner.recombine(main: mainPicture, aux: results.pictures[1], into: texture)
+        return frame
+    }
+}
+
+/// Draws the latest GPUFrame into a CAMetalLayer that covers the picture.
+final class GPUPresenter {
+    let layer = CAMetalLayer()
+    private let queue: MTLCommandQueue
+    private let pipeline: MTLRenderPipelineState
+    private let nearest: MTLSamplerState
+    private let linear: MTLSamplerState
+    var current: GPUFrame?
+
+    init(device: MTLDevice) throws {
+        guard let queue = device.makeCommandQueue() else { throw GPUVideoError.noDevice }
+        self.queue = queue
+        let library = try device.makeLibrary(source: GPUPresenter.shader, options: nil)
+        let descriptor = MTLRenderPipelineDescriptor()
+        descriptor.vertexFunction = library.makeFunction(name: "frame_vertex")
+        descriptor.fragmentFunction = library.makeFunction(name: "frame_fragment")
+        descriptor.colorAttachments[0].pixelFormat = .bgra8Unorm
+        pipeline = try device.makeRenderPipelineState(descriptor: descriptor)
+        func sampler(_ filter: MTLSamplerMinMagFilter) -> MTLSamplerState? {
+            let d = MTLSamplerDescriptor(); d.minFilter = filter; d.magFilter = filter
+            return device.makeSamplerState(descriptor: d)
+        }
+        guard let n = sampler(.nearest), let l = sampler(.linear) else { throw GPUVideoError.noDevice }
+        nearest = n; linear = l
+        layer.device = device
+        layer.pixelFormat = .bgra8Unorm
+        layer.framebufferOnly = true
+        layer.isOpaque = true
+        layer.isHidden = true
+        layer.actions = ["bounds": NSNull(), "position": NSNull(), "contents": NSNull(), "hidden": NSNull()]
+    }
+
+    /// Draw the current frame, stretched over the whole layer: 1:1 pixels
+    /// sample texel centres exactly (nearest); a scaled picture is filtered.
+    func draw() {
+        guard let frame = current, !layer.isHidden, let drawable = layer.nextDrawable(),
+              let commands = queue.makeCommandBuffer() else { return }
+        let pass = MTLRenderPassDescriptor()
+        pass.colorAttachments[0].texture = drawable.texture
+        pass.colorAttachments[0].loadAction = .clear
+        pass.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
+        pass.colorAttachments[0].storeAction = .store
+        guard let encoder = commands.makeRenderCommandEncoder(descriptor: pass) else { return }
+        let exact = drawable.texture.width == frame.texture.width && drawable.texture.height == frame.texture.height
+        encoder.setRenderPipelineState(pipeline)
+        encoder.setFragmentTexture(frame.texture, index: 0)
+        encoder.setFragmentSamplerState(exact ? nearest : linear, index: 0)
+        encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+        encoder.endEncoding()
+        commands.present(drawable)
+        // The texture goes back to the pool only once the GPU has read it.
+        commands.addCompletedHandler { _ in _ = frame }
+        commands.commit()
+    }
+
+    static let shader = """
+    #include <metal_stdlib>
+    using namespace metal;
+    struct Out { float4 position [[position]]; float2 uv; };
+    vertex Out frame_vertex(uint id [[vertex_id]]) {
+        float2 uv = float2(id & 1, id >> 1);
+        Out out;
+        out.position = float4(uv.x * 2 - 1, 1 - uv.y * 2, 0, 1);
+        out.uv = uv;
+        return out;
+    }
+    fragment float4 frame_fragment(Out in [[stage_in]], texture2d<float> tex [[texture(0)]],
+                                   sampler s [[sampler(0)]]) {
+        return tex.sample(s, in.uv);
+    }
+    """
+}
+
+/// The viewer's decode side. `decode` runs on the command-reader thread, so a
+/// slow decode slows the pipe and, through it, the client's reads: the
+/// connection itself is the backpressure. Finished frames go to the main
+/// thread latest-wins; each packet is answered with `decoded` (the client
+/// acknowledges the frame to the server) or `decode_error`.
+final class GPUVideo {
+    let device: MTLDevice
+    private let recombiner: Recombiner
+    private var pipeline: FramePipeline?
+    private let lock = NSLock()
+    private var pending: GPUFrame?
+    private var scheduled = false
+    /// Called on the main thread when a frame is waiting.
+    var onFrame: ((GPUFrame) -> Void)?
+
+    /// Hardware decode needs a Metal device and a hardware H.264 decoder
+    /// (absent in some virtual machines).
+    static func make() -> GPUVideo? {
+        guard VTIsHardwareDecodeSupported(kCMVideoCodecType_H264), let device = MTLCreateSystemDefaultDevice() else { return nil }
+        do { return try GPUVideo(device: device) } catch { diagnostic("GPU video unavailable: \(error)"); return nil }
+    }
+
+    private init(device: MTLDevice) throws {
+        self.device = device
+        recombiner = try Recombiner(device: device)
+    }
+
+    func configure(width: Int, height: Int, dual: Bool) throws {
+        guard width > 0, height > 0, width <= 8192, height <= 8192 else { throw GPUVideoError.malformed("size \(width)x\(height)") }
+        pipeline = try FramePipeline(recombiner: recombiner, width: width, height: height, dual: dual)
+    }
+
+    /// Packet: frame_id u64 LE, main_len u32 LE, aux_len u32 LE, main, aux.
+    func decode(packet data: Data) {
+        guard data.count >= 16 else { event(["type": "decode_error", "message": "short packet"]); return }
+        let id = UInt64(number(data, 0)) | UInt64(number(data, 4)) << 32
+        let mainLen = Int(number(data, 8)), auxLen = Int(number(data, 12))
+        guard 16 + mainLen + auxLen == data.count else {
+            event(["type": "decode_error", "frame_id": id, "message": "packet lengths disagree"]); return
+        }
+        guard let pipeline = pipeline else {
+            event(["type": "decode_error", "frame_id": id, "message": "video before configuration"]); return
+        }
+        let base = data.startIndex
+        let main = data.subdata(in: (base + 16)..<(base + 16 + mainLen))
+        let aux = data.subdata(in: (base + 16 + mainLen)..<(base + 16 + mainLen + auxLen))
+        let started = DispatchTime.now().uptimeNanoseconds
+        do {
+            if let frame = try pipeline.decode(main: main, aux: aux) { post(frame) }
+            let ms = Double(DispatchTime.now().uptimeNanoseconds - started) / 1_000_000
+            event(["type": "decoded", "frame_id": id, "ms": ms])
+        } catch {
+            event(["type": "decode_error", "frame_id": id, "message": "\(error)"])
+        }
+    }
+
+    private func post(_ frame: GPUFrame) {
+        lock.lock()
+        pending = frame
+        let schedule = !scheduled
+        scheduled = true
+        lock.unlock()
+        if schedule {
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self else { return }
+                self.lock.lock(); let frame = self.pending; self.pending = nil; self.scheduled = false; self.lock.unlock()
+                if let frame = frame { self.onFrame?(frame) }
+            }
+        }
+    }
+}
+
 final class RemoteView: NSView {
+    // The picture comes from the CPU path (image, drawn below) or the GPU
+    // path (gpuSize, drawn by `presenter`'s CAMetalLayer over this view).
     var image: CGImage? {
         didSet { window?.invalidateCursorRects(for: self) }
     }
+    var gpuSize: CGSize? {
+        didSet { if gpuSize != oldValue { window?.invalidateCursorRects(for: self); placeGPU() } }
+    }
+    var presenter: GPUPresenter? {
+        didSet {
+            oldValue?.layer.removeFromSuperlayer()
+            if let presenter = presenter { wantsLayer = true; layer?.addSublayer(presenter.layer); placeGPU() }
+        }
+    }
+    /// The picture's size in stream pixels, from whichever path shows it.
+    var pictureSize: CGSize? {
+        if let image = image { return CGSize(width: image.width, height: image.height) }
+        return gpuSize
+    }
+    var hasPicture: Bool { pictureSize != nil }
     private let invisibleCursor = NSCursor(image: NSImage(size: NSSize(width: 1, height: 1), flipped: false, drawingHandler: { _ in true }), hotSpot: .zero)
     var cursorInVideo = false {
         didSet { window?.invalidateCursorRects(for: self) }
@@ -425,14 +969,33 @@ final class RemoteView: NSView {
     }
     override func resetCursorRects() {
         super.resetCursorRects()
-        if image != nil && cursorInVideo { addCursorRect(pictureRect, cursor: invisibleCursor) }
+        if hasPicture && cursorInVideo { addCursorRect(pictureRect, cursor: invisibleCursor) }
     }
     var pictureRect: NSRect {
-        guard let image = image else { return .zero }
-        let ratio = min(bounds.width / Double(image.width), bounds.height / Double(image.height))
-        let w = Double(image.width) * ratio, h = Double(image.height) * ratio
+        guard let size = pictureSize, size.width > 0, size.height > 0 else { return .zero }
+        let ratio = min(bounds.width / Double(size.width), bounds.height / Double(size.height))
+        let w = Double(size.width) * ratio, h = Double(size.height) * ratio
         return NSRect(x: (bounds.width - w)/2, y: (bounds.height - h)/2, width: w, height: h)
     }
+    /// Keep the Metal layer over the picture, sized in device pixels. The
+    /// picture is centred, so the rect is the same in flipped or unflipped
+    /// layer coordinates.
+    func placeGPU() {
+        guard let presenter = presenter else { return }
+        CATransaction.begin(); CATransaction.setDisableActions(true)
+        let show = gpuSize != nil && image == nil
+        presenter.layer.isHidden = !show
+        if show {
+            let rect = pictureRect, factor = window?.backingScaleFactor ?? 1
+            presenter.layer.frame = rect
+            presenter.layer.contentsScale = factor
+            presenter.layer.drawableSize = CGSize(width: max(1, (rect.width * factor).rounded()), height: max(1, (rect.height * factor).rounded()))
+        }
+        CATransaction.commit()
+        if show { presenter.draw() }
+    }
+    override func layout() { super.layout(); placeGPU() }
+    override func viewDidChangeBackingProperties() { super.viewDidChangeBackingProperties(); placeGPU() }
     override func draw(_ dirty: NSRect) {
         NSColor.black.setFill(); bounds.fill()
         if let image = image, let cg = NSGraphicsContext.current?.cgContext {
@@ -440,7 +1003,7 @@ final class RemoteView: NSView {
             let r = pictureRect
             cg.translateBy(x: r.minX, y: r.maxY); cg.scaleBy(x: 1, y: -1)
             cg.draw(image, in: CGRect(x: 0, y: 0, width: r.width, height: r.height)); cg.restoreGState()
-        } else {
+        } else if gpuSize == nil {
             let attrs: [NSAttributedString.Key: Any] = [.foregroundColor: NSColor.white, .font: NSFont.systemFont(ofSize: 16)]
             let text = message as NSString
             let size = text.size(withAttributes: attrs)
@@ -483,13 +1046,13 @@ final class RemoteView: NSView {
     }
     func motion(_ e: NSEvent) {
         let p = convert(e.locationInWindow, from: nil), r = pictureRect
-        guard let image = image, r.contains(p) else {
+        guard let size = pictureSize, r.contains(p) else {
             if hovering { release() }
             hovering = false
             return
         }
         hovering = true
-        event(["type": "motion", "x": (p.x-r.minX)/r.width*Double(image.width)/scale, "y": (p.y-r.minY)/r.height*Double(image.height)/scale])
+        event(["type": "motion", "x": (p.x-r.minX)/r.width*Double(size.width)/scale, "y": (p.y-r.minY)/r.height*Double(size.height)/scale])
     }
     override func mouseMoved(with e: NSEvent) { motion(e) }
     override func mouseDragged(with e: NSEvent) { motion(e) }
@@ -524,11 +1087,23 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
     let privateItem = NSMenuItem(title: "Private Screen", action: #selector(App.privateScreen), keyEquivalent: "")
     let clipboardItem = NSMenuItem(title: "Share Clipboard", action: #selector(App.toggleClipboard), keyEquivalent: "")
     var shareClipboard = true
+    // Hardware decode (VideoToolbox + Metal) when this Mac has it; the
+    // client then sends coded video (kind 5) instead of BGRA pixels (kind 1).
+    let gpu = GPUVideo.make()
     var pending: Data?
     let pendingLock = NSLock()
     var drawing = false
     var painted = false
     func applicationDidFinishLaunching(_ note: Notification) {
+        // The client reads this first, before it says Hello (it decides the
+        // chroma it asks for and how it sends frames).
+        if let gpu = gpu, let presenter = try? GPUPresenter(device: gpu.device) {
+            view.presenter = presenter
+            gpu.onFrame = { [weak self] frame in self?.showGPU(frame) }
+            event(["type": "video_caps", "hardware": true])
+        } else {
+            event(["type": "video_caps", "hardware": false])
+        }
         let menu = NSMenu(); let appItem = NSMenuItem(); menu.addItem(appItem)
         let appMenu = NSMenu(); appItem.submenu = appMenu
         let hosting = appMenu.addItem(withTitle: "Enable Remote Control…", action: #selector(App.requestHostPermissions), keyEquivalent: "")
@@ -558,11 +1133,16 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
         DistributedNotificationCenter.default().addObserver(self, selector: #selector(keyboardLayoutChanged(_:)), name: Notification.Name(kTISNotifySelectedKeyboardInputSourceChanged as String), object: nil)
         resizeEvent()
         NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .keyUp]) { [weak self] e in
-            guard let self = self, self.window?.isKeyWindow == true, !self.view.released, self.view.hovering, self.view.image != nil else { return e }
+            guard let self = self, self.window?.isKeyWindow == true, !self.view.released, self.view.hovering, self.view.hasPicture else { return e }
             self.view.key(e, e.type == .keyDown); return nil
         }
         readCommands { [weak self] kind, data in
             guard let self = self else { return }
+            if kind == 5 {
+                // Coded video: decode here, on the reader thread, in order.
+                if let gpu = self.gpu { gpu.decode(packet: data) } else { event(["type": "gpu_failed", "message": "no hardware decoder"]) }
+                return
+            }
             if kind == 1 {
                 self.pendingLock.lock(); self.pending = data
                 let schedule = !self.drawing; self.drawing = true; self.pendingLock.unlock()
@@ -570,16 +1150,45 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
             } else {
                 let cmd = json(data)
                 if clipboard.receive(cmd) { return }
+                if cmd["type"] as? String == "video_config" { self.configureVideo(cmd); return }
                 DispatchQueue.main.async {
                     clipboard.command(cmd)
                     if cmd["type"] as? String == "cursor_mode" { self.view.cursorInVideo = cmd["embedded"] as? Bool == true }
+                    // Pointer scale for the GPU path (the CPU path gets it with each frame).
+                    if cmd["type"] as? String == "video_scale", let milli = cmd["scale_milli"] as? Int, milli > 0 { self.view.scale = Double(milli) / 1000 }
                     if cmd["type"] as? String == "machine_state" { self.applyMachineState(cmd) }
                     if cmd["type"] as? String == "report_size" { self.resizeEvent() }
-                    if let message = cmd["message"] as? String { self.view.message = message; self.view.image = nil; self.view.needsDisplay = true }
+                    if let message = cmd["message"] as? String {
+                        self.view.message = message; self.view.image = nil
+                        self.view.presenter?.current = nil; self.view.gpuSize = nil; self.view.needsDisplay = true
+                    }
                     if let text = cmd["clipboard"] as? String { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(text, forType: .string) }
                 }
             }
         }
+    }
+    /// A new coded stream: size and whether an auxiliary (Dual420) stream
+    /// comes with it. Runs on the reader thread, ahead of that stream's frames.
+    func configureVideo(_ cmd: [String: Any]) {
+        guard let gpu = gpu else { event(["type": "gpu_failed", "message": "no hardware decoder"]); return }
+        let width = cmd["width"] as? Int ?? 0, height = cmd["height"] as? Int ?? 0
+        let dual = cmd["dual"] as? Bool == true
+        let scale = Double(cmd["scale_milli"] as? Int ?? 1000) / 1000
+        do {
+            try gpu.configure(width: width, height: height, dual: dual)
+            DispatchQueue.main.async { self.view.scale = scale }
+            let chroma = dual ? "4:4:4" : "4:2:0"
+            diagnostic("Gliff video: VideoToolbox + Metal, \(width)x\(height) \(chroma)")
+        } catch {
+            event(["type": "gpu_failed", "message": "\(error)"])
+        }
+    }
+    func showGPU(_ frame: GPUFrame) {
+        if view.image != nil { view.image = nil }
+        view.presenter?.current = frame
+        let size = CGSize(width: frame.texture.width, height: frame.texture.height)
+        if view.gpuSize != size { view.gpuSize = size; view.needsDisplay = true } else { view.presenter?.draw() }
+        if !painted { painted = true; diagnostic("Gliff displayed first frame: \(frame.texture.width)x\(frame.texture.height) (GPU)") }
     }
     func applyMachineState(_ cmd: [String: Any]) {
         let privateScreen = cmd["screen"] as? String == "private"
@@ -608,6 +1217,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
         guard w > 0, h > 0, s > 0, w * h * 4 == data.count - 12, let provider = CGDataProvider(data: data.subdata(in: 12..<data.count) as CFData) else { return }
         view.image = CGImage(width: w, height: h, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: w * 4, space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipFirst.rawValue).union(.byteOrder32Little), provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent)
         view.scale = Double(s)/1000; view.needsDisplay = true
+        if view.gpuSize != nil { view.presenter?.current = nil; view.gpuSize = nil }
         if !painted { painted = true; diagnostic("Gliff displayed first frame: \(w)x\(h)") }
     }
     func resizeEvent() {
