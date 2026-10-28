@@ -82,6 +82,26 @@ Timer.scheduledTimer(withTimeInterval:0.4,repeats:false) { _ in
     picker.screen.selectItem(at:1);picker.screenChanged(nil)
     precondition(!picker.screenDetail.stringValue.isEmpty)
     diagnostic("SCREEN PASS: mirror default, private selection and independent per-host/port preferences")
+    // Saved settings from the client (machine_settings): a machine that sets
+    // its screen beats an old UserDefaults choice; one that does not offers
+    // the old choice for migration; a new address follows the defaults.
+    preferences.set("private",forKey:"screen.legacy.example:22")
+    preferences.set("mirror",forKey:"screen.pinned.example:22")
+    picker.configScreens=["pinned.example":"private","plain.example":"private"]
+    picker.pinned=["pinned.example"]
+    picker.defaultScreen="mirror"
+    picker.port.stringValue="22"
+    picker.address.stringValue="pinned.example";picker.restoreScreenPreference()
+    precondition(picker.screenMode=="private" && !picker.legacyUsed,"A saved machine setting lost to an old preference")
+    picker.address.stringValue="legacy.example";picker.restoreScreenPreference()
+    precondition(picker.screenMode=="private" && picker.legacyUsed,"An old preference was not offered for migration")
+    picker.address.stringValue="plain.example";picker.restoreScreenPreference()
+    precondition(picker.screenMode=="private" && !picker.legacyUsed,"The machine's saved screen was not used")
+    picker.address.stringValue="new.example";picker.restoreScreenPreference()
+    precondition(picker.screenMode=="mirror","A new address did not follow the defaults")
+    picker.address.stringValue="tester@keyboard.example";picker.port.stringValue="2222";picker.restoreScreenPreference()
+    precondition(picker.screenMode=="private","A choice made in the window was lost")
+    diagnostic("SETTINGS PASS: saved screens, defaults, UserDefaults migration and in-window choices")
     window.makeFirstResponder(picker.address)
     let tab=NSEvent.keyEvent(with:.keyDown,location:.zero,modifierFlags:[],timestamp:0,windowNumber:window.windowNumber,context:nil,characters:"\\t",charactersIgnoringModifiers:"\\t",isARepeat:false,keyCode:48)!
     window.sendEvent(tab)
@@ -136,6 +156,7 @@ withExtendedLifetime(picker) { app.run() }
                 if mode == "connect":
                     assert event["host"] == "tester@keyboard.example" and event["port"] == 2222, event
                     assert event["screen"] == "private", event
+                    assert event.get("screen_explicit") is True, event
                 if mode.startswith("default-"):
                     print(f"PICKER DEFAULT PREFERENCES PASS: {mode}; opens and cancels")
                 else:

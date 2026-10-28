@@ -741,9 +741,11 @@ final class ComputerPicker: NSObject, NSApplicationDelegate, NSWindowDelegate, N
     var configScreens: [String: String] = [:]
     var pinned: Set<String> = []
     var defaultScreen = "mirror"
-    // The user changed the menu here, or it shows a pre-settings
-    // UserDefaults choice; either is saved for the machine on Connect.
-    var explicitScreen = false
+    // Choices made in this window, per SSH address and port, so switching
+    // between addresses keeps them; the one connected to is saved for the
+    // machine. legacyUsed: the menu shows a pre-settings UserDefaults choice,
+    // which is also saved (moved) on Connect.
+    var sessionScreens: [String: String] = [:]
     var legacyUsed = false
     init(screenOverride: String? = nil, preferences: UserDefaults? = nil) {
         self.screenOverride = screenOverride
@@ -883,8 +885,8 @@ final class ComputerPicker: NSObject, NSApplicationDelegate, NSWindowDelegate, N
                     self.configScreens = cmd["screens"] as? [String: String] ?? [:]
                     self.pinned = Set(cmd["pinned"] as? [String] ?? [])
                     self.defaultScreen = cmd["default_screen"] as? String ?? "mirror"
-                    // Keep a choice the user just made in this window.
-                    if !self.explicitScreen { self.preferenceTarget = nil; self.restoreScreenPreference() }
+                    // Choices made in this window still win (sessionScreens).
+                    self.preferenceTarget = nil; self.restoreScreenPreference()
                 }
                 if cmd["type"] as? String == "select", let index = cmd["index"] as? Int, self.rows.indices.contains(index) {
                     self.table.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false)
@@ -967,14 +969,14 @@ final class ComputerPicker: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         guard key != preferenceTarget || preferenceTarget == nil else { return }
         preferenceTarget = key
         let host = address.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        // Order: the command line, the machine's saved setting, a choice from
-        // before settings existed (UserDefaults, moved to the config on
-        // Connect), then the defaults.
+        // Order: the command line, a choice made in this window, the machine's
+        // saved setting, a choice from before settings existed (UserDefaults,
+        // moved to the config on Connect), then the defaults.
         var mode = configScreens[host] ?? defaultScreen
         legacyUsed = false
         if let forced = screenOverride { mode = forced }
+        else if let key = key, let chosen = sessionScreens[key] { mode = chosen }
         else if !pinned.contains(host), let key = key, let old = preferences.string(forKey: key) { mode = old; legacyUsed = true }
-        explicitScreen = false
         screen.selectItem(at: mode == "private" ? 1 : 0)
         updateScreenDetail()
     }
@@ -983,7 +985,7 @@ final class ComputerPicker: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         fitWindow()
     }
     @objc func screenChanged(_ sender: Any?) {
-        explicitScreen = true
+        if let key = screenPreferenceKey { sessionScreens[key] = screenMode }
         updateScreenDetail()
     }
     @objc func openSettings(_ sender: Any?) { event(["type": "open_settings"]) }
@@ -1002,8 +1004,9 @@ final class ComputerPicker: NSObject, NSApplicationDelegate, NSWindowDelegate, N
             status.stringValue = "Enter an SSH address and a port between 1 and 65535."; fitWindow(); return
         }
         // The client saves the choice in the settings; the old copy can go.
-        let explicit = screenOverride == nil && (explicitScreen || legacyUsed)
-        if legacyUsed, let key = screenPreferenceKey { preferences.removeObject(forKey: key) }
+        let chosenHere = screenPreferenceKey.flatMap { sessionScreens[$0] } != nil
+        let explicit = screenOverride == nil && (chosenHere || legacyUsed)
+        if explicit, let key = screenPreferenceKey { preferences.removeObject(forKey: key) }
         complete(["type": "connect", "host": host, "port": number, "screen": screenMode, "screen_explicit": explicit])
     }
     @objc func cancel(_ sender: Any?) { complete(["type": "cancel"]) }
