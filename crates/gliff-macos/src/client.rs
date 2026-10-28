@@ -354,7 +354,7 @@ where
             (tx, Some(rx))
         }
     };
-    let (mut events, ctx) = match live {
+    let (mut events, mut ctx) = match live {
         Some(Live {
             viewer,
             shared,
