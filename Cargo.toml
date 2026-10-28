@@ -10,6 +10,7 @@ members = [
     "crates/gliff-va",
     "crates/gliff-vk",
     "crates/gliff-sw",
+    "crates/gliff-settings",
     "crates/gliff-macos",
     "crates/gliff",
     "crates/gliff-server",
@@ -39,6 +40,7 @@ gliff-va = { path = "crates/gliff-va" }
 gliff-vk = { path = "crates/gliff-vk" }
 gliff-sw = { path = "crates/gliff-sw" }
 gliff-macos = { path = "crates/gliff-macos" }
+gliff-settings = { path = "crates/gliff-settings" }
 openh264 = { version = "0.9", features = ["source"] }
 openh264-sys2 = "0.9"
 

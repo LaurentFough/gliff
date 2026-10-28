@@ -518,6 +518,12 @@ final class RemoteView: NSView {
 final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
     let view = RemoteView()
     var window: NSWindow?
+    // The Machine menu: the everyday per-machine choices, saved through the
+    // client like the settings window (see crates/gliff-macos/src/settings.rs).
+    let mirrorItem = NSMenuItem(title: "Mirror Screen", action: #selector(App.mirrorScreen), keyEquivalent: "")
+    let privateItem = NSMenuItem(title: "Private Screen", action: #selector(App.privateScreen), keyEquivalent: "")
+    let clipboardItem = NSMenuItem(title: "Share Clipboard", action: #selector(App.toggleClipboard), keyEquivalent: "")
+    var shareClipboard = true
     var pending: Data?
     let pendingLock = NSLock()
     var drawing = false
@@ -527,8 +533,20 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let appMenu = NSMenu(); appItem.submenu = appMenu
         let hosting = appMenu.addItem(withTitle: "Enable Remote Control…", action: #selector(App.requestHostPermissions), keyEquivalent: "")
         hosting.target = self
+        let settings = appMenu.addItem(withTitle: "Settings…", action: #selector(App.openSettings), keyEquivalent: ",")
+        settings.target = self
         appMenu.addItem(NSMenuItem.separator())
         appMenu.addItem(withTitle: "Quit Gliff", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        let machineItem = NSMenuItem(); menu.addItem(machineItem)
+        let machineMenu = NSMenu(title: "Machine"); machineItem.submenu = machineMenu
+        // Enabled state is set from machine_state (screen_locked), not validation.
+        machineMenu.autoenablesItems = false
+        for item in [mirrorItem, privateItem] { item.target = self; machineMenu.addItem(item) }
+        machineMenu.addItem(NSMenuItem.separator())
+        clipboardItem.target = self; machineMenu.addItem(clipboardItem)
+        machineMenu.addItem(NSMenuItem.separator())
+        let reconnect = machineMenu.addItem(withTitle: "Reconnect", action: #selector(App.reconnect), keyEquivalent: "")
+        reconnect.target = self
         NSApplication.shared.mainMenu = menu
         let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1100, height: 720), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
         w.title = CommandLine.arguments.dropFirst(2).first ?? "Gliff"
@@ -555,12 +573,29 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 DispatchQueue.main.async {
                     clipboard.command(cmd)
                     if cmd["type"] as? String == "cursor_mode" { self.view.cursorInVideo = cmd["embedded"] as? Bool == true }
+                    if cmd["type"] as? String == "machine_state" { self.applyMachineState(cmd) }
+                    if cmd["type"] as? String == "report_size" { self.resizeEvent() }
                     if let message = cmd["message"] as? String { self.view.message = message; self.view.image = nil; self.view.needsDisplay = true }
                     if let text = cmd["clipboard"] as? String { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(text, forType: .string) }
                 }
             }
         }
     }
+    func applyMachineState(_ cmd: [String: Any]) {
+        let privateScreen = cmd["screen"] as? String == "private"
+        let locked = cmd["screen_locked"] as? Bool == true
+        mirrorItem.state = privateScreen ? .off : .on
+        privateItem.state = privateScreen ? .on : .off
+        mirrorItem.isEnabled = !locked; privateItem.isEnabled = !locked
+        if locked { mirrorItem.toolTip = "--output names the screen for this connection"; privateItem.toolTip = mirrorItem.toolTip }
+        shareClipboard = cmd["clipboard"] as? Bool != false
+        clipboardItem.state = shareClipboard ? .on : .off
+    }
+    @objc func openSettings() { event(["type": "open_settings"]) }
+    @objc func mirrorScreen() { event(["type": "setting", "field": "screen", "value": "mirror"]) }
+    @objc func privateScreen() { event(["type": "setting", "field": "screen", "value": "private"]) }
+    @objc func toggleClipboard() { event(["type": "setting", "field": "clipboard", "value": !shareClipboard]) }
+    @objc func reconnect() { event(["type": "reconnect"]) }
     @objc func requestHostPermissions() {
         _ = CGRequestScreenCaptureAccess()
         _ = AXIsProcessTrustedWithOptions([kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary)
@@ -700,6 +735,16 @@ final class ComputerPicker: NSObject, NSApplicationDelegate, NSWindowDelegate, N
     var updating = false
     var finished = false
     var selectedID: String?
+    // Saved settings from the client (machine_settings): the resolved screen
+    // per known machine, which machines set one themselves, and the mode for
+    // an address with no settings yet.
+    var configScreens: [String: String] = [:]
+    var pinned: Set<String> = []
+    var defaultScreen = "mirror"
+    // The user changed the menu here, or it shows a pre-settings
+    // UserDefaults choice; either is saved for the machine on Connect.
+    var explicitScreen = false
+    var legacyUsed = false
     init(screenOverride: String? = nil, preferences: UserDefaults? = nil) {
         self.screenOverride = screenOverride
         if let preferences = preferences { self.preferences = preferences }
@@ -723,6 +768,8 @@ final class ComputerPicker: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         let appMenu = NSMenu(); item.submenu = appMenu
         let permission = appMenu.addItem(withTitle: "Enable Remote Control…", action: #selector(hostPermissions), keyEquivalent: "")
         permission.target = self
+        let settingsItem = appMenu.addItem(withTitle: "Settings…", action: #selector(openSettings), keyEquivalent: ",")
+        settingsItem.target = self
         appMenu.addItem(NSMenuItem.separator())
         appMenu.addItem(withTitle: "Quit Gliff", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         NSApplication.shared.mainMenu = menu
@@ -784,7 +831,10 @@ final class ComputerPicker: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         cancel.bezelStyle = .rounded; cancel.controlSize = .large; cancel.keyEquivalent = "\u{1b}"
         let connect = NSButton(title: "Connect", target: self, action: #selector(connect))
         connect.bezelStyle = .rounded; connect.controlSize = .large; connect.keyEquivalent = "\r"
-        let actions = stack([NSView(), cancel, connect], .horizontal, 8)
+        let settingsButton = NSButton(title: "Settings…", target: self, action: #selector(openSettings))
+        settingsButton.bezelStyle = .rounded; settingsButton.controlSize = .large
+        settingsButton.setAccessibilityLabel("Settings")
+        let actions = stack([settingsButton, NSView(), cancel, connect], .horizontal, 8)
         let content = stack([heading, list, statusRow, fields, screenRow, actions], .vertical, 12)
         view.addSubview(content)
         for row in [heading, list, statusRow, fields, screenRow, actions] { row.translatesAutoresizingMaskIntoConstraints = false }
@@ -829,6 +879,13 @@ final class ComputerPicker: NSObject, NSApplicationDelegate, NSWindowDelegate, N
             DispatchQueue.main.async {
                 guard let self = self else { return }
                 if cmd["type"] as? String == "cancel" { self.cancel(nil) }
+                if cmd["type"] as? String == "machine_settings" {
+                    self.configScreens = cmd["screens"] as? [String: String] ?? [:]
+                    self.pinned = Set(cmd["pinned"] as? [String] ?? [])
+                    self.defaultScreen = cmd["default_screen"] as? String ?? "mirror"
+                    // Keep a choice the user just made in this window.
+                    if !self.explicitScreen { self.preferenceTarget = nil; self.restoreScreenPreference() }
+                }
                 if cmd["type"] as? String == "select", let index = cmd["index"] as? Int, self.rows.indices.contains(index) {
                     self.table.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false)
                     self.window?.makeFirstResponder(self.table)
@@ -909,7 +966,15 @@ final class ComputerPicker: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         let key = screenPreferenceKey
         guard key != preferenceTarget || preferenceTarget == nil else { return }
         preferenceTarget = key
-        let mode = screenOverride ?? key.flatMap { preferences.string(forKey: $0) } ?? "mirror"
+        let host = address.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Order: the command line, the machine's saved setting, a choice from
+        // before settings existed (UserDefaults, moved to the config on
+        // Connect), then the defaults.
+        var mode = configScreens[host] ?? defaultScreen
+        legacyUsed = false
+        if let forced = screenOverride { mode = forced }
+        else if !pinned.contains(host), let key = key, let old = preferences.string(forKey: key) { mode = old; legacyUsed = true }
+        explicitScreen = false
         screen.selectItem(at: mode == "private" ? 1 : 0)
         updateScreenDetail()
     }
@@ -918,9 +983,10 @@ final class ComputerPicker: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         fitWindow()
     }
     @objc func screenChanged(_ sender: Any?) {
-        if let key = screenPreferenceKey { preferences.set(screenMode, forKey: key) }
+        explicitScreen = true
         updateScreenDetail()
     }
+    @objc func openSettings(_ sender: Any?) { event(["type": "open_settings"]) }
     func controlTextDidChange(_ note: Notification) { restoreScreenPreference() }
     @objc func refresh(_ sender: Any?) { nearby.start() }
     func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
@@ -935,8 +1001,10 @@ final class ComputerPicker: NSObject, NSApplicationDelegate, NSWindowDelegate, N
               let number = Int(port.stringValue), (1...65535).contains(number) else {
             status.stringValue = "Enter an SSH address and a port between 1 and 65535."; fitWindow(); return
         }
-        if let key = screenPreferenceKey { preferences.set(screenMode, forKey: key) }
-        complete(["type": "connect", "host": host, "port": number, "screen": screenMode])
+        // The client saves the choice in the settings; the old copy can go.
+        let explicit = screenOverride == nil && (explicitScreen || legacyUsed)
+        if legacyUsed, let key = screenPreferenceKey { preferences.removeObject(forKey: key) }
+        complete(["type": "connect", "host": host, "port": number, "screen": screenMode, "screen_explicit": explicit])
     }
     @objc func cancel(_ sender: Any?) { complete(["type": "cancel"]) }
     func complete(_ value: [String: Any]) {
@@ -953,6 +1021,256 @@ final class ComputerPicker: NSObject, NSApplicationDelegate, NSWindowDelegate, N
     func applicationWillTerminate(_ note: Notification) {
         if !finished { finished = true; nearby.stop(); event(["type": "cancel"]) }
     }
+}
+
+// The settings window: the Mac counterpart of the Linux client's
+// settings_ui.rs. "All Machines" is the [defaults] table; each machine is its
+// [overrides."user@host"] table. The client owns config.toml: this window
+// gets settings_state, sends settings_edit (a null value clears a field), and
+// shows every change as soon as the client has saved it.
+final class SettingsWindow: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTableViewDataSource, NSTableViewDelegate, NSSearchFieldDelegate {
+    var window: NSWindow?
+    let search = NSSearchField()
+    let table = NSTableView()
+    let heading = NSTextField(labelWithString: "All Machines")
+    let scopeNote = NSTextField(wrappingLabelWithString: "")
+    let screen = NSPopUpButton()
+    let clipboardBox = NSButton(checkboxWithTitle: "Share the clipboard", target: nil, action: nil)
+    let serverBin = NSTextField(string: "")
+    let screenOrigin = NSTextField(labelWithString: "")
+    let clipboardOrigin = NSTextField(labelWithString: "")
+    let serverOrigin = NSTextField(labelWithString: "")
+    let screenReset = NSButton(title: "Reset", target: nil, action: nil)
+    let clipboardReset = NSButton(title: "Reset", target: nil, action: nil)
+    let serverReset = NSButton(title: "Reset", target: nil, action: nil)
+    let pathLabel = NSTextField(wrappingLabelWithString: "")
+    let errorLabel = NSTextField(wrappingLabelWithString: "")
+    var state: [String: Any] = [:]
+    // "" is All Machines; then the machines that match the search.
+    var scopes: [String] = [""]
+    var selected = ""
+    var updating = false
+
+    func label(_ text: String, secondary: Bool = false) -> NSTextField {
+        let l = NSTextField(labelWithString: text)
+        l.font = NSFont.systemFont(ofSize: secondary ? 11 : 13)
+        if secondary { l.textColor = .secondaryLabelColor }
+        return l
+    }
+    func row(_ title: String, _ control: NSView, _ origin: NSTextField, _ reset: NSButton, _ help: String) -> NSStackView {
+        let name = label(title)
+        name.alignment = .right
+        name.widthAnchor.constraint(equalToConstant: 120).isActive = true
+        origin.font = NSFont.systemFont(ofSize: 11); origin.textColor = .secondaryLabelColor
+        reset.bezelStyle = .inline; reset.controlSize = .small; reset.target = self; reset.action = #selector(resetField(_:))
+        control.toolTip = help
+        let top = NSStackView(views: [name, control, origin, reset])
+        top.orientation = .horizontal; top.spacing = 8; top.alignment = .centerY
+        let detail = label(help, secondary: true)
+        detail.lineBreakMode = .byWordWrapping; detail.maximumNumberOfLines = 2
+        detail.preferredMaxLayoutWidth = 380
+        let spacer = NSView(); spacer.widthAnchor.constraint(equalToConstant: 128).isActive = true
+        let bottom = NSStackView(views: [spacer, detail])
+        bottom.orientation = .horizontal; bottom.spacing = 0
+        let both = NSStackView(views: [top, bottom])
+        both.orientation = .vertical; both.alignment = .leading; both.spacing = 2
+        return both
+    }
+    func applicationDidFinishLaunching(_ note: Notification) {
+        let menu = NSMenu()
+        let appItem = NSMenuItem(); menu.addItem(appItem)
+        let appMenu = NSMenu(); appItem.submenu = appMenu
+        appMenu.addItem(withTitle: "Close Settings", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
+        appMenu.addItem(withTitle: "Quit Gliff", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        // An Edit menu, so Cut/Copy/Paste work in the server command field.
+        let editItem = NSMenuItem(); menu.addItem(editItem)
+        let editMenu = NSMenu(title: "Edit"); editItem.submenu = editMenu
+        editMenu.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+        editMenu.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        editMenu.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        editMenu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        NSApplication.shared.mainMenu = menu
+
+        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 780, height: 420), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
+        w.title = "Gliff Settings"; w.delegate = self
+        w.contentMinSize = NSSize(width: 700, height: 360)
+        let view = w.contentView!
+
+        search.placeholderString = "Search machines"; search.delegate = self
+        search.setAccessibilityLabel("Search machines")
+        let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("scope")); column.title = "Machine"
+        table.addTableColumn(column); table.headerView = nil
+        table.delegate = self; table.dataSource = self; table.rowHeight = 24; table.style = .sourceList
+        table.setAccessibilityLabel("Machines")
+        let scroll = NSScrollView(); scroll.documentView = table; scroll.hasVerticalScroller = true
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+        let sidebar = NSStackView(views: [search, scroll])
+        sidebar.orientation = .vertical; sidebar.spacing = 8; sidebar.alignment = .leading
+        sidebar.translatesAutoresizingMaskIntoConstraints = false
+
+        heading.font = NSFont.systemFont(ofSize: 17, weight: .semibold)
+        heading.lineBreakMode = .byTruncatingMiddle
+        scopeNote.font = NSFont.systemFont(ofSize: 12); scopeNote.textColor = .secondaryLabelColor
+        scopeNote.preferredMaxLayoutWidth = 480
+        screen.addItems(withTitles: ["Mirror screen", "Private screen"])
+        screen.target = self; screen.action = #selector(screenChanged)
+        screen.setAccessibilityLabel("Screen")
+        clipboardBox.target = self; clipboardBox.action = #selector(clipboardChanged)
+        serverBin.target = self; serverBin.action = #selector(serverChanged)
+        serverBin.cell?.sendsActionOnEndEditing = true
+        serverBin.setAccessibilityLabel("Server command")
+        serverBin.widthAnchor.constraint(greaterThanOrEqualToConstant: 240).isActive = true
+        screenReset.identifier = NSUserInterfaceItemIdentifier("screen")
+        clipboardReset.identifier = NSUserInterfaceItemIdentifier("clipboard")
+        serverReset.identifier = NSUserInterfaceItemIdentifier("server_bin")
+        let display = row("Screen", screen, screenOrigin, screenReset, "Mirror shows the machine's screen; Private makes a separate Linux screen that follows this window.")
+        let clip = row("Clipboard", clipboardBox, clipboardOrigin, clipboardReset, "Copy on one machine and paste on the other. Turn off for machines you do not trust.")
+        let server = row("Server command", serverBin, serverOrigin, serverReset, "Starts the server over SSH, e.g. gliff-server --low-bandwidth. Blank uses the inherited command.")
+        let rule = label("A screen or server command change reconnects the machine; the clipboard changes at once. Changes are saved as you make them.", secondary: true)
+        rule.preferredMaxLayoutWidth = 480; rule.lineBreakMode = .byWordWrapping; rule.maximumNumberOfLines = 3
+        pathLabel.font = NSFont.systemFont(ofSize: 11); pathLabel.textColor = .tertiaryLabelColor
+        pathLabel.preferredMaxLayoutWidth = 480
+        errorLabel.font = NSFont.systemFont(ofSize: 12); errorLabel.textColor = .systemRed
+        errorLabel.preferredMaxLayoutWidth = 480
+        let form = NSStackView(views: [heading, scopeNote, display, clip, server, rule, errorLabel, NSView(), pathLabel])
+        form.orientation = .vertical; form.alignment = .leading; form.spacing = 14
+        form.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(sidebar); view.addSubview(form)
+        NSLayoutConstraint.activate([
+            sidebar.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 16),
+            sidebar.topAnchor.constraint(equalTo: view.topAnchor, constant: 16),
+            sidebar.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -16),
+            sidebar.widthAnchor.constraint(equalToConstant: 220),
+            search.widthAnchor.constraint(equalTo: sidebar.widthAnchor),
+            scroll.widthAnchor.constraint(equalTo: sidebar.widthAnchor),
+            form.leadingAnchor.constraint(equalTo: sidebar.trailingAnchor, constant: 20),
+            form.trailingAnchor.constraint(lessThanOrEqualTo: view.trailingAnchor, constant: -20),
+            form.topAnchor.constraint(equalTo: view.topAnchor, constant: 16),
+            form.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -16),
+        ])
+        window = w
+        reloadScopes()
+        w.center(); w.makeKeyAndOrderFront(nil)
+        NSApplication.shared.activate(ignoringOtherApps: true)
+        readCommands { [weak self] _, data in
+            let cmd = json(data)
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                switch cmd["type"] as? String ?? "" {
+                case "settings_state":
+                    self.state = cmd
+                    let path = cmd["path"] as? String ?? ""
+                    self.pathLabel.stringValue = path.isEmpty ? "Settings are not saved (no home folder)." : "Saved in \(path)"
+                    self.reloadScopes()
+                case "settings_error":
+                    self.errorLabel.stringValue = cmd["message"] as? String ?? "That change was not saved."
+                default: break
+                }
+            }
+        }
+    }
+
+    // Data from settings_state.
+    func layer(_ scope: String) -> [String: Any] {
+        if scope.isEmpty { return state["defaults"] as? [String: Any] ?? [:] }
+        let machines = state["machines"] as? [[String: Any]] ?? []
+        return machines.first(where: { $0["name"] as? String == scope })?["settings"] as? [String: Any] ?? [:]
+    }
+    // What the selected scope inherits for a field, and from where.
+    func inherited(_ field: String) -> (Any?, String) {
+        if !selected.isEmpty, let v = layer("")[field] { return (v, "Default") }
+        return ((state["builtin"] as? [String: Any])?[field], "Built-in")
+    }
+    // The value in force for the selected scope; `here` when this scope sets it.
+    func effective(_ field: String) -> (value: Any?, origin: String, here: Bool) {
+        if let v = layer(selected)[field] { return (v, selected.isEmpty ? "Set for all machines" : "Set for this machine", true) }
+        let (v, origin) = inherited(field)
+        return (v, origin, false)
+    }
+
+    func reloadScopes() {
+        let query = search.stringValue.trimmingCharacters(in: .whitespaces).lowercased()
+        let names = (state["machines"] as? [[String: Any]] ?? []).compactMap { $0["name"] as? String }
+        scopes = [""] + names.filter { query.isEmpty || $0.lowercased().contains(query) }
+        if !scopes.contains(selected) { selected = "" }
+        updating = true
+        table.reloadData()
+        if let index = scopes.firstIndex(of: selected) { table.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false) }
+        updating = false
+        refreshForm()
+    }
+    func refreshForm() {
+        updating = true
+        heading.stringValue = selected.isEmpty ? "All Machines" : selected
+        scopeNote.stringValue = selected.isEmpty
+            ? "Used by every machine that does not set its own value."
+            : "Only this machine. Reset hands an option back to All Machines."
+        let s = effective("screen")
+        screen.selectItem(at: s.value as? String == "private" ? 1 : 0)
+        screenOrigin.stringValue = s.origin; screenReset.isHidden = !s.here
+        let c = effective("clipboard")
+        clipboardBox.state = c.value as? Bool == false ? .off : .on
+        clipboardOrigin.stringValue = c.origin; clipboardReset.isHidden = !c.here
+        let b = effective("server_bin")
+        serverBin.placeholderString = inherited("server_bin").0 as? String ?? "gliff-server"
+        // Do not replace text the user is typing.
+        let editing = window?.firstResponder === serverBin.currentEditor()
+        if !editing { serverBin.stringValue = b.here ? (b.value as? String ?? "") : "" }
+        serverOrigin.stringValue = b.origin; serverReset.isHidden = !b.here
+        updating = false
+    }
+
+    func edit(_ field: String, _ value: Any) {
+        errorLabel.stringValue = ""
+        event(["type": "settings_edit", "scope": selected.isEmpty ? "defaults" : "machine", "machine": selected, "field": field, "value": value])
+    }
+    @objc func screenChanged(_ sender: Any?) { if !updating { edit("screen", screen.indexOfSelectedItem == 1 ? "private" : "mirror") } }
+    @objc func clipboardChanged(_ sender: Any?) { if !updating { edit("clipboard", clipboardBox.state == .on) } }
+    @objc func serverChanged(_ sender: Any?) {
+        guard !updating else { return }
+        let text = serverBin.stringValue.trimmingCharacters(in: .whitespaces)
+        let current = effective("server_bin")
+        // Blank on a scope that sets nothing is no edit; blank otherwise clears.
+        if text.isEmpty && !current.here { return }
+        if current.here, current.value as? String == text { return }
+        edit("server_bin", text.isEmpty ? NSNull() : text)
+    }
+    @objc func resetField(_ sender: NSButton) {
+        guard let field = sender.identifier?.rawValue else { return }
+        edit(field, NSNull())
+    }
+
+    func numberOfRows(in tableView: NSTableView) -> Int { scopes.count }
+    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+        guard scopes.indices.contains(row) else { return nil }
+        let name = scopes[row]
+        let cell = NSTableCellView()
+        let text = NSTextField(labelWithString: name.isEmpty ? "All Machines" : name)
+        text.lineBreakMode = .byTruncatingMiddle; text.translatesAutoresizingMaskIntoConstraints = false
+        if name.isEmpty { text.font = NSFont.systemFont(ofSize: 13, weight: .semibold) }
+        cell.textField = text; cell.addSubview(text)
+        NSLayoutConstraint.activate([
+            text.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 6),
+            text.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -6),
+            text.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
+        ])
+        return cell
+    }
+    func tableViewSelectionDidChange(_ notification: Notification) {
+        guard !updating, scopes.indices.contains(table.selectedRow) else { return }
+        // Commit a half-typed server command to the scope it was typed for.
+        if window?.firstResponder === serverBin.currentEditor() { serverChanged(nil); window?.makeFirstResponder(nil) }
+        selected = scopes[table.selectedRow]; errorLabel.stringValue = ""
+        refreshForm()
+    }
+    func controlTextDidChange(_ note: Notification) {
+        if (note.object as AnyObject?) === search { reloadScopes() }
+    }
+    func windowWillClose(_ note: Notification) {
+        if window?.firstResponder === serverBin.currentEditor() { serverChanged(nil) }
+        event(["type": "settings_close"])
+    }
+    func applicationShouldTerminateAfterLastWindowClosed(_ app: NSApplication) -> Bool { true }
 }
 
 let mode = ProcessInfo.processInfo.environment["GLIFF_ASKPASS"] == "1" ? "askpass" : (CommandLine.arguments.dropFirst().first ?? "permissions")
@@ -992,6 +1310,10 @@ if mode == "encode" {
     app.setActivationPolicy(.regular)
     let picker = ComputerPicker(screenOverride: CommandLine.arguments.dropFirst(2).first); app.delegate = picker
     withExtendedLifetime(picker) { app.run() }
+} else if mode == "settings" {
+    app.setActivationPolicy(.regular)
+    let settings = SettingsWindow(); app.delegate = settings
+    withExtendedLifetime(settings) { app.run() }
 } else if mode == "keyboard-layout" {
     guard let layout = keyboardLayout(CommandLine.arguments.dropFirst(2).first) else { fail("Cannot read the Mac Unicode keyboard layout") }
     event(layout)

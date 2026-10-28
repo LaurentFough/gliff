@@ -277,6 +277,14 @@ This branch builds on
   longer breaks `scripts/check.sh`.
 - **Makefile** (`6ba1339`, `2bfb7b8`): the targets above, including the
   `make macos` pipeline and `make verify`.
+- **Upstream PR #98** (settings window and per-machine tab menu), merged
+  onto this branch's Linux client, which lives in `crates/gliff/src/linux.rs`.
+- **Settings on macOS**: #98's settings model moved into a shared
+  `gliff-settings` crate, so the macOS client reads and writes the same
+  `config.toml`. The Mac gets a settings window (⌘,), a Machine menu in the
+  viewer, `--no-clipboard`, live clipboard changes and in-window reconnects;
+  see [macOS support](docs/macos.md#settings) and
+  [docs/settings.md](docs/settings.md).
 
 ## More
 

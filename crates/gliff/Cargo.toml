@@ -19,6 +19,7 @@ tracing-subscriber.workspace = true
 gliff-proto.workspace = true
 gliff-transport.workspace = true
 gliff-sw.workspace = true
+gliff-settings.workspace = true
 bytes.workspace = true
 serde.workspace = true
 

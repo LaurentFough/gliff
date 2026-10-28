@@ -5,6 +5,7 @@ pub mod discovery;
 pub mod keymap;
 pub mod keys;
 pub mod native;
+pub mod settings;
 
 #[cfg(any(target_os = "macos", test))]
 mod encoder;

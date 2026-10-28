@@ -39,8 +39,8 @@ SSH username, hostname and port, then choose **Connect**. You can edit these
 fields or enter a manual address. Cancel closes the picker without connecting.
 Choose **Mirror screen** to see the host's existing desktop, or **Private
 screen** for a separate desktop on a Linux host that follows the Mac window.
-Mirror is the initial default; Gliff remembers the choice for each SSH address
-and port. Mirroring keeps the host screen's proportions, so screens with a
+Mirror is the initial default; Gliff saves the choice for the machine in its
+settings (see below). Mirroring keeps the host screen's proportions, so screens with a
 different aspect ratio can have empty bands. Private mode follows the window
 and fullscreen aspect ratio, within the viewer's 3840×2160 video limit.
 The standalone connection window follows the Mac's appearance and accent color. Tab moves
@@ -60,6 +60,36 @@ Or run:
 
 The Linux host needs Gliff installed and a running Hyprland session. The
 `--headless` option creates a private screen there and follows the Mac window.
+
+## Settings
+
+Gliff keeps per-machine options in `~/.config/gliff/config.toml`
+(`$XDG_CONFIG_HOME/gliff/config.toml` when set), the same file and format as
+the Linux client: `[defaults]` for every machine, `[overrides."user@host"]`
+for one. Open **Settings…** (⌘,) from the connection window or the viewer.
+
+| Option | What it does | When it changes |
+|---|---|---|
+| Screen | Mirror the machine's screen, or a private Linux screen that follows the window | reconnects the machine |
+| Clipboard | Share the clipboard in both directions | at once |
+| Server command | The command started over SSH, e.g. `gliff-server --low-bandwidth` | reconnects the machine |
+
+**All Machines** sets the defaults; selecting a machine sets only that
+machine, and **Reset** hands an option back to the defaults. Each row says
+where its value comes from (Built-in, Default, or set here). Changes are
+saved as you make them.
+
+While connected, the **Machine** menu has the everyday choices: Mirror
+Screen / Private Screen, Share Clipboard, and Reconnect. A screen or server
+command change reconnects in the same window.
+
+The command line sits below a machine's saved settings, as on Linux:
+`--headless`, `--no-clipboard` and `--server-bin` apply unless the machine
+sets that option itself. `--output` names a screen for this connection and
+always wins; the Machine menu's screen items are disabled while it is in use.
+
+Choices the connection window saved before settings existed (in macOS
+preferences) move to the config the next time you connect to that machine.
 
 ## Mac packages and release signing
 
@@ -169,7 +199,9 @@ logical display coordinates. macOS hosts mirror physical screens and reject
 
 - Native AppKit window with one connection per window. The Linux client's
   recent-host tabs, Omarchy theme and automatic reconnection are not yet in
-  the macOS client.
+  the macOS client. Settings changes that need a new session do reconnect.
+- The decode setting (GPU/CPU) is Linux-only: the Mac viewer decodes on the
+  CPU, so the Mac settings window does not offer it.
 - The Mac viewer requests cursor pixels inside the video. Updated Linux
   hosts use this mode without opening a separate cursor capture session,
   avoiding Hyprland 0.56's cursor-session crash on display disconnection.

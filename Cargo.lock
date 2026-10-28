@@ -696,6 +696,7 @@ dependencies = [
  "drm-fourcc",
  "gliff-macos",
  "gliff-proto",
+ "gliff-settings",
  "gliff-sw",
  "gliff-transport",
  "gliff-vk",
@@ -720,6 +721,7 @@ dependencies = [
  "bytes",
  "clap",
  "gliff-proto",
+ "gliff-settings",
  "gliff-sw",
  "gliff-transport",
  "serde",
@@ -785,6 +787,15 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "gliff-settings"
+version = "0.4.1"
+dependencies = [
+ "serde",
+ "toml",
+ "tracing",
 ]
 
 [[package]]

@@ -1,0 +1,15 @@
+[package]
+name = "gliff-settings"
+description = "Per-machine client options shared by the Linux and macOS clients"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+serde.workspace = true
+toml = "1"
+tracing.workspace = true
