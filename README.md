@@ -272,37 +272,49 @@ gliff --server-bin 'gliff-server --low-bandwidth' user@host
 
 ## Changes in this fork
 
-This branch builds on
-[acrogenesis/gliff `acrogenesis/macos-client-host`](https://github.com/acrogenesis/gliff/tree/acrogenesis/macos-client-host)
-(the macOS client and host) and adds:
+This fork builds on
+[acrogenesis/gliff `acrogenesis/macos-client-host`](https://github.com/acrogenesis/gliff/tree/acrogenesis/macos-client-host),
+the macOS client and host (upstream PR #47), and adds the following.
 
-- **Local signing without a paid developer account** (`35fde42`):
-  `bin/setup-macos-signing` creates, trusts and tests a self-signed
-  `gliff-local` identity, and `bin/install-macos` picks it, or an Apple
-  Development certificate, when no fingerprint is given or saved.
-- **First-install fix** (`b9e2bdb`): the installer reads the saved signing
-  identity with `plutil`, and only from an existing app. `PlistBuddy` prints
-  its errors on stdout, so a first install read them as the identity and
-  failed with `GLIFF_CODESIGN_IDENTITY must be a certificate SHA-1
-  fingerprint`. A malformed value is now shown in the error.
-- **Cargo output location** (`e259d5d`): `bin/build-macos-app` takes the
-  `gliff` and `gliff-server` paths from cargo's build messages instead of
-  assuming `target/release`, which failed with `cp: target/release/gliff: No
-  such file or directory` when cargo's output was moved.
-- **Hermetic ssh test** (`328badd`): the login-shell fallback test in
-  `gliff-transport` runs each shell with an empty environment plus `HOME` and
-  `PATH`, so a developer's `ZDOTDIR`, `BASH_ENV` or `XDG_CONFIG_HOME` no
-  longer breaks `scripts/check.sh`.
-- **Makefile** (`6ba1339`, `2bfb7b8`): the targets above, including the
-  `make macos` pipeline and `make verify`.
-- **Upstream PR #98** (settings window and per-machine tab menu), merged
-  onto this branch's Linux client, which lives in `crates/gliff/src/linux.rs`.
-- **Settings on macOS**: #98's settings model moved into a shared
-  `gliff-settings` crate, so the macOS client reads and writes the same
-  `config.toml`. The Mac gets a settings window (⌘,), a Machine menu in the
-  viewer, `--no-clipboard`, live clipboard changes and in-window reconnects;
-  see [macOS support](docs/macos.md#settings) and
-  [docs/settings.md](docs/settings.md).
+### Upstream pull requests merged
+
+- **#98, settings window and per-machine tab menu** (Linux client). Applied
+  to this branch's Linux client, which lives in `crates/gliff/src/linux.rs`.
+- **#80, sound from Linux hosts.** Opus over the existing connection, played
+  through ALSA on Linux viewers. Its dependencies are Linux-only, and Mac
+  clients and hosts do not advertise sound, so the Mac build is unchanged.
+
+Not merged: #5 (dhh's macOS client, an alternative to #47's, with
+VideoToolbox and Metal decoding) and #26 (HEVC for screens larger than
+H.264 allows, which predates gliff 0.4.1).
+
+### macOS
+
+- **Per-machine settings.** #98's settings model is a shared
+  `gliff-settings` crate, so both clients read and write the same
+  `~/.config/gliff/config.toml`. The Mac has a settings window (⌘,), a
+  Machine menu in the viewer, `--no-clipboard`, clipboard changes that apply
+  at once, and screen or server-command changes that reconnect in the same
+  window. The connection window follows each machine's saved screen. See
+  [macOS support](docs/macos.md#settings) and [docs/settings.md](docs/settings.md).
+- **Signing without a paid developer account.** `bin/setup-macos-signing`
+  creates, trusts and tests a self-signed `gliff-local` identity once, and
+  `bin/install-macos` uses it (or an Apple Development certificate) so
+  Screen Recording and Accessibility grants survive rebuilds.
+- **Install fixes.** The installer reads the saved signing identity with
+  `plutil` (a first install used to fail with `GLIFF_CODESIGN_IDENTITY must
+  be a certificate SHA-1 fingerprint`), and the app build asks cargo where
+  the binaries are (a moved target directory used to fail with
+  `cp: target/release/gliff: No such file or directory`).
+
+### Build and checks
+
+- **Makefile**: one front end for `bin/` and `scripts/`, including the
+  `make macos` pipeline and `make verify`; see [Make targets](#make-targets).
+- **Hermetic tests**: the ssh login-shell test runs each shell with an empty
+  environment, so a developer's `ZDOTDIR`, `BASH_ENV` or `XDG_CONFIG_HOME`
+  no longer breaks `scripts/check.sh`. The picker check also covers saved
+  per-machine screens and the move of old picker preferences into the config.
 
 ## More
 
