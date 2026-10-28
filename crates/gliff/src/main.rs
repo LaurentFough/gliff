@@ -15,6 +15,10 @@ mod paintable;
 #[cfg(target_os = "linux")]
 mod recent;
 #[cfg(target_os = "linux")]
+mod settings;
+#[cfg(target_os = "linux")]
+mod settings_ui;
+#[cfg(target_os = "linux")]
 mod theme;
 
 #[cfg(target_os = "linux")]

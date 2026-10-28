@@ -335,6 +335,23 @@ pub fn set_remote_offer(
     }
 }
 
+/// Take the server's offer off the local clipboard when it came through
+/// `tx`'s session, so a later paste cannot fetch from that host. A selection
+/// from anywhere else is left alone.
+pub fn clear_remote_offer(tx: &UnboundedSender<ToWorker>) {
+    let Some(cb) = clipboard() else {
+        return;
+    };
+    let ours = cb
+        .content()
+        .and_then(|p| p.downcast::<RemoteProvider>().ok())
+        .and_then(|p| p.imp().tx.borrow().as_ref().and_then(|w| w.upgrade()))
+        .is_some_and(|t| t.same_channel(tx));
+    if ours {
+        let _ = cb.set_content(gdk::ContentProvider::NONE);
+    }
+}
+
 glib::wrapper! {
     /// A content provider for the server's offer; each paste fetches the
     /// item from the server through the worker.
@@ -707,6 +724,41 @@ mod tests {
             }
         }
         assert!(!revoke_for_change(&[], false));
+    }
+
+    #[test]
+    #[ignore = "requires an isolated Wayland session; run by scripts/e2e.sh"]
+    fn clearing_a_sessions_offer_leaves_other_clipboard_content() {
+        gtk::init().unwrap();
+        let context = glib::MainContext::default();
+        let _owner = context.acquire().unwrap();
+        let cb = clipboard().unwrap();
+        let (a_tx, _a_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (b_tx, _b_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        // The host's selection, held through session a.
+        set_remote_offer(&a_tx, 1, vec!["text/plain".into()], Vec::new());
+        assert!(holds_remote_offer(&cb));
+        // Another session turning sharing off must not take it away.
+        clear_remote_offer(&b_tx);
+        assert!(holds_remote_offer(&cb), "another session cleared the offer");
+        // Session a turning it off removes it, so no paste can reach the host.
+        clear_remote_offer(&a_tx);
+        assert!(
+            !holds_remote_offer(&cb),
+            "the offer outlived its session's sharing"
+        );
+
+        // Whatever else the user copied stays.
+        let bytes = glib::Bytes::from_static(b"mine");
+        cb.set_content(Some(&gdk::ContentProvider::for_bytes("text/plain", &bytes)))
+            .unwrap();
+        clear_remote_offer(&a_tx);
+        assert!(
+            cb.content().is_some(),
+            "a selection that is not the host's was cleared"
+        );
+        cb.set_content(gdk::ContentProvider::NONE).unwrap();
     }
 
     #[test]

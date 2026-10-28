@@ -7,6 +7,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::settings::Settings;
+
 #[derive(Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct Config {
     #[serde(default, alias = "recent_machines")]
@@ -17,6 +19,13 @@ pub struct Config {
     /// The machine the window showed last.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shown: Option<String>,
+    /// The options for every machine, where they differ from the built-in
+    /// values.
+    #[serde(default, skip_serializing_if = "Settings::is_empty")]
+    pub defaults: Settings,
+    /// What one machine changes from the defaults.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub overrides: std::collections::BTreeMap<String, Settings>,
 }
 
 impl Config {
@@ -58,6 +67,11 @@ impl Config {
 
     fn parse(text: &str) -> Result<Self, toml::de::Error> {
         let mut config: Self = toml::from_str(text)?;
+        config.defaults.tidy();
+        for o in config.overrides.values_mut() {
+            o.tidy();
+        }
+        config.overrides.retain(|_, o| !o.is_empty());
         config.machines.retain(|m| !m.trim().is_empty());
         let mut seen = std::collections::HashSet::new();
         config.machines.retain(|m| seen.insert(m.clone()));
@@ -79,7 +93,35 @@ impl Config {
         self.machines.push(machine.to_string());
     }
 
+    /// What `machine` changes from the defaults; nothing when it has no
+    /// override.
+    pub fn machine(&self, machine: &str) -> Option<&Settings> {
+        self.overrides.get(machine)
+    }
+
+    /// Replace a machine's override, dropping the entry when it changes
+    /// nothing.
+    pub fn set_machine(&mut self, machine: &str, mut settings: Settings) {
+        settings.tidy();
+        if settings.is_empty() {
+            self.overrides.remove(machine);
+        } else {
+            self.overrides.insert(machine.to_string(), settings);
+        }
+    }
+
+    /// The options `machine` runs with, with `cli` standing in for the
+    /// defaults the command line gives.
+    pub fn settings_for(&self, cli: &Settings, machine: &str) -> Settings {
+        let base = cli.over(&self.defaults);
+        match self.overrides.get(machine) {
+            Some(o) => o.over(&base),
+            None => base,
+        }
+    }
+
     pub fn forget(&mut self, machine: &str) {
+        self.overrides.remove(machine);
         self.machines.retain(|m| m != machine);
         self.set_open(machine, false);
         if self.shown.as_deref() == Some(machine) {
@@ -117,6 +159,7 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::settings::{Field, Screen};
 
     #[test]
     fn remember_appends_new_machines_once() {
@@ -143,6 +186,51 @@ mod tests {
         c.forget("a");
         c.forget("missing");
         assert_eq!(c.machines, vec!["b"]);
+    }
+
+    #[test]
+    fn settings_layer_defaults_then_the_command_line_then_the_machine() {
+        let mut c = Config::default();
+        c.defaults.screen = Some(Screen::Own);
+        c.defaults.clipboard = Some(false);
+        let cli = Settings {
+            screen: Some(Screen::Mirror),
+            ..Settings::default()
+        };
+        assert_eq!(c.settings_for(&cli, "a").resolve().screen, Screen::Mirror);
+        c.set_machine(
+            "a",
+            Settings {
+                screen: Some(Screen::Own),
+                ..Settings::default()
+            },
+        );
+        let r = c.settings_for(&cli, "a").resolve();
+        assert_eq!(r.screen, Screen::Own);
+        assert!(!r.clipboard);
+        let mut o = c.machine("a").cloned().unwrap();
+        o.clear(Field::Screen);
+        c.set_machine("a", o);
+        assert!(c.machine("a").is_none());
+        assert_eq!(c.settings_for(&cli, "a").resolve().screen, Screen::Mirror);
+    }
+
+    #[test]
+    fn overrides_and_defaults_round_trip_and_go_with_the_machine() {
+        let mut c = Config::default();
+        c.remember("a");
+        c.defaults.clipboard = Some(false);
+        c.set_machine(
+            "a",
+            Settings {
+                server_bin: Some("env X=1 gliff-server".into()),
+                ..Settings::default()
+            },
+        );
+        assert_eq!(Config::parse(&toml::to_string(&c).unwrap()).unwrap(), c);
+        c.forget("a");
+        assert!(c.overrides.is_empty());
+        assert_eq!(c.defaults.clipboard, Some(false));
     }
 
     #[test]
