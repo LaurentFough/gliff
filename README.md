@@ -9,7 +9,8 @@ ssh: no open ports, no accounts, no relay.
 On Linux, full-resolution colour (4:4:4) keeps coloured text sharp, with
 GPU video where supported and a CPU fallback. Mac hosts prefer hardware
 H.264 through VideoToolbox; full-colour mode uses the CPU. Mac viewers
-currently decode on the CPU.
+decode in hardware (VideoToolbox, with the 4:4:4 recombine in Metal) and fall
+back to the CPU where that is unavailable.
 
 ![A gliff window showing a terminal on a remote machine](.github/assets/screenshot.png)
 

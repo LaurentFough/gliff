@@ -22,7 +22,7 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use anyhow::{bail, ensure, Context, Result};
-use gliff_settings::{Field, Resolved, Screen, Settings, Store, DEFAULT_SERVER_BIN};
+use gliff_settings::{Field, Resolved, Screen, Settings, Store, Video, DEFAULT_SERVER_BIN};
 use serde_json::{json, Map, Value};
 use tokio::sync::watch;
 
@@ -110,11 +110,22 @@ impl Shared {
 
 /// The command line's layer. `--output` is not here: naming a screen is a
 /// concrete request, handled where the server arguments are built.
-pub fn cli_layer(headless: bool, no_clipboard: bool, server_bin: &str) -> Settings {
+/// `video` is `--video`: `gpu` (VideoToolbox + Metal when the Mac has it)
+/// or `cpu` (OpenH264).
+pub fn cli_layer(
+    headless: bool,
+    no_clipboard: bool,
+    server_bin: &str,
+    video: Option<&str>,
+) -> Settings {
     Settings {
         screen: headless.then_some(Screen::Own),
         clipboard: no_clipboard.then_some(false),
-        decode: None,
+        decode: match video {
+            Some("gpu") => Some(Video::Gpu),
+            Some("cpu") => Some(Video::Cpu),
+            _ => None,
+        },
         server_bin: (server_bin.trim() != DEFAULT_SERVER_BIN && !server_bin.trim().is_empty())
             .then(|| server_bin.trim().to_string()),
     }
@@ -280,7 +291,8 @@ pub enum Change {
 /// reconnects). `screen_locked` ignores screen changes under `--output`.
 pub fn change(old: &Resolved, new: &Resolved, screen_locked: bool) -> Change {
     let screen = !screen_locked && old.screen != new.screen;
-    if screen || old.server_bin != new.server_bin {
+    //= The decode path is chosen when the session starts.
+    if screen || old.server_bin != new.server_bin || old.decode != new.decode {
         Change::Reconnect
     } else if old.clipboard != new.clipboard {
         Change::Clipboard(new.clipboard)
@@ -364,8 +376,16 @@ mod tests {
 
     #[test]
     fn the_command_line_layer_sets_only_what_was_given() {
-        assert_eq!(cli_layer(false, false, "gliff-server"), Settings::default());
-        let s = cli_layer(true, true, " env X=1 gliff-server ");
+        assert_eq!(
+            cli_layer(false, false, "gliff-server", None),
+            Settings::default()
+        );
+        assert_eq!(
+            cli_layer(false, false, "gliff-server", Some("cpu")).decode,
+            Some(Video::Cpu)
+        );
+        let s = cli_layer(true, true, " env X=1 gliff-server ", Some("gpu"));
+        assert_eq!(s.decode, Some(Video::Gpu));
         assert_eq!(s.screen, Some(Screen::Own));
         assert_eq!(s.clipboard, Some(false));
         assert_eq!(s.server_bin.as_deref(), Some("env X=1 gliff-server"));
@@ -442,6 +462,9 @@ mod tests {
         r.screen = Screen::Own;
         assert_eq!(change(&base, &r, false), Change::Reconnect);
         assert_eq!(change(&base, &r, true), Change::None);
+        let mut r = base.clone();
+        r.decode = Video::Cpu;
+        assert_eq!(change(&base, &r, false), Change::Reconnect);
         let mut r = base.clone();
         r.server_bin = "other".into();
         assert_eq!(change(&base, &r, true), Change::Reconnect);
