@@ -80,8 +80,18 @@ where its value comes from (Built-in, Default, or set here). Changes are
 saved as you make them.
 
 While connected, the **Machine** menu has the everyday choices: Mirror
-Screen / Private Screen, Share Clipboard, and Reconnect. A screen or server
-command change reconnects in the same window.
+Screen / Private Screen, Share Clipboard, Play Sound, and Reconnect. A screen
+or server command change reconnects in the same window.
+
+**Sound.** The viewer plays the sound of a Linux host running a gliff with
+sound (upstream PR #80), through the Mac's default output. **Machine ▸ Play
+Sound** switches it, at once and without reconnecting; the choice is the
+top-level `muted` key in `config.toml`, the same switch as the Linux client's
+speaker button, so it applies to every machine on both clients.
+`gliff --no-audio` starts muted without saving that. The item is disabled
+when the host does not send sound (Mac hosts, and Linux hosts without sound
+support). Sound is Opus at 128 kbit/s through the same jitter buffer as on
+Linux, and the output device is opened only while sound plays.
 
 The command line sits below a machine's saved settings, as on Linux:
 `--headless`, `--no-clipboard` and `--server-bin` apply unless the machine
@@ -229,6 +239,7 @@ logical display coordinates. macOS hosts mirror physical screens and reject
   when the window loses focus or disconnects.
 - Shared text clipboard uses lazy paste requests, chunking and a 1 MiB cap.
   Image and copied-file clipboard transfers are not yet supported on macOS.
+- Mac viewers play sound from Linux hosts; Mac hosts do not send sound yet.
 
 ## Verify
 

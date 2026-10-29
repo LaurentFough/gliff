@@ -31,7 +31,7 @@ The log is newest first, and each entry names the commit.
 
 | | |
 |---|---|
-| Working branch | `acrogenesis/macos-client-host` at `354e80d` |
+| Working branch | `acrogenesis/macos-client-host` at `708a44a` |
 | Pushed to | `LaurentFough/gliff` only (never acrogenesis or omacom) |
 | Ahead of acrogenesis' branch | 21 commits |
 | Last updated | 2026-10-29 |
@@ -40,8 +40,9 @@ The log is newest first, and each entry names the commit.
 
 | Branch | Commit | Contents | Status |
 |---|---|---|---|
-| `acrogenesis/macos-client-host` | `354e80d` | #47 base, signing and install fixes, Makefile, #98, Mac settings, GPU video | working branch |
-| `merge/pr-80` | see Log | #80 (sound) + README notes, merged with the working branch | awaiting tests |
+| `acrogenesis/macos-client-host` | `708a44a` | #47 base, signing and install fixes, Makefile, #98, Mac settings, GPU video, ToDone.md | working branch |
+| `merge/pr-80` | `5185c1b` | #80 (sound) + README notes, merged with the working branch | awaiting tests |
+| `feature/macos-audio` | see Log | Mac viewer plays Linux hosts' sound (on `merge/pr-80`) | awaiting build and test |
 | `feature/macos-gpu-video` | `f4803db` | GPU video port | merged; can be deleted |
 | `macos-settings` | `7d15374` | Mac settings | merged; can be deleted |
 | `merge/pr-98` | `9bd7870` | #98 | merged; can be deleted |
@@ -114,7 +115,8 @@ Sound support today:
 | Host → client | Sound |
 |---|---|
 | Linux → Linux | Yes |
-| Mac on either end | No: the Mac client and host turn the feature off for now |
+| Linux → Mac | On `feature/macos-audio`: awaiting a build and test |
+| Mac → any | No: the Mac host does not send sound yet |
 
 ### Deferred testing
 
@@ -123,7 +125,8 @@ Sound support today:
 ### Follow-ups
 
 - [ ] A decode (GPU/CPU) option in the Mac settings window (config-only for now).
-- [ ] Sound on the Mac, as client or host.
+- [ ] Sound on the Mac client (`feature/macos-audio`): build, `make check`, listen to a Linux host, then merge after #80.
+- [ ] Sound from a Mac host (ScreenCaptureKit audio capture + #80's Opus encoder).
 - [ ] A warning when "Private screen" is chosen with a Mac host.
 - [ ] Viewer and client CPU use and frame rate in a live GPU session (Activity Monitor).
 
@@ -144,7 +147,10 @@ Sound support today:
 
 Newest first. Format: `### YYYY-MM-DD — summary (commit)`, then a line or two.
 
-### 2026-10-29 — Working branch merged into `merge/pr-80`
+### 2026-10-29 — Mac viewer plays Linux hosts' sound (`feature/macos-audio`)
+Branched from `merge/pr-80`. The Mac client offers `audio`, asks a server that offers it, and plays through #80's `gliff-audio` `Sink` (Opus, jitter buffer, cpal on CoreAudio). New `sound.rs` with tests; Machine ▸ Play Sound; `--no-audio`; the switch is the top-level `muted` key shared with the Linux client (`Store::muted`/`set_muted`, with a test); audio packets over 4000 bytes are refused. Docs: `docs/macos.md`, `docs/settings.md`, README. Not built here.
+
+### 2026-10-29 — Working branch merged into `merge/pr-80` (`5185c1b`)
 Clean merge, so the #80 test build includes GPU video and settings. The Mac client now reads past `AudioFrame` payloads (`server_payload`), so a host that sends sound anyway cannot break the stream; with a test. README: #5 listed as ported, GPU video and `make video-check` notes, ToDone.md.
 
 ### 2026-10-29 — ToDone.md added

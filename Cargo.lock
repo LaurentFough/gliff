@@ -847,6 +847,7 @@ dependencies = [
  "anyhow",
  "bytes",
  "clap",
+ "gliff-audio",
  "gliff-proto",
  "gliff-settings",
  "gliff-sw",

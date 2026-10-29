@@ -1,8 +1,9 @@
 //! The config file both clients share: `$XDG_CONFIG_HOME/gliff/config.toml`,
 //! else `~/.config/gliff/config.toml`.
 //!
-//! [`Store`] owns three keys: `machines` (the machines this client has
-//! connected to, oldest first), `[defaults]` and `[overrides."user@host"]`.
+//! [`Store`] owns four keys: `machines` (the machines this client has
+//! connected to, oldest first), `[defaults]`, `[overrides."user@host"]` and
+//! `muted` (the sound switch, shared with the Linux client's header button).
 //! Everything else in the file (the Linux client's `open` and `shown`, or
 //! keys from a newer build) is read and written back untouched, so either
 //! client can save without losing the other's state.
@@ -23,6 +24,9 @@ const MACHINES: &str = "machines";
 const LEGACY_MACHINES: &str = "recent_machines";
 const DEFAULTS: &str = "defaults";
 const OVERRIDES: &str = "overrides";
+/// Top-level, as the Linux client writes it: present and true only when
+/// sound is off.
+const MUTED: &str = "muted";
 
 /// The parsed config file and where it lives.
 #[derive(Debug, Clone)]
@@ -211,6 +215,23 @@ impl Store {
         }
     }
 
+    /// Sound is switched off for every machine (`muted = true`).
+    pub fn muted(&self) -> bool {
+        self.doc
+            .get(MUTED)
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    }
+
+    /// Switch sound off or on; "on" removes the key, as the Linux client does.
+    pub fn set_muted(&mut self, muted: bool) {
+        if muted {
+            self.doc.insert(MUTED.into(), Value::Boolean(true));
+        } else {
+            self.doc.remove(MUTED);
+        }
+    }
+
     /// What a session with `name` runs with, given the command line's layer:
     /// built-in, then `[defaults]`, then `cli`, then the machine's override.
     pub fn resolve(&self, name: &str, cli: &Settings) -> Resolved {
@@ -369,6 +390,27 @@ mod tests {
         assert_eq!(s.defaults(), Settings::default());
         assert_eq!(s.machine("m@h"), Settings::default());
         assert!(Store::parse("not toml [").is_err());
+    }
+
+    #[test]
+    fn muted_is_the_linux_clients_top_level_key() {
+        let mut s = store("muted = true\nshown = \"a@b\"\n");
+        assert!(s.muted());
+        s.set_muted(false);
+        assert!(!s.doc.contains_key(MUTED), "sound on leaves no key behind");
+        assert_eq!(s.doc.get("shown").and_then(Value::as_str), Some("a@b"));
+        s.set_muted(true);
+        assert_eq!(
+            toml::to_string(&s.doc)
+                .unwrap()
+                .matches("muted = true")
+                .count(),
+            1
+        );
+        assert!(
+            !store("muted = \"yes\"\n").muted(),
+            "a malformed value means sound on"
+        );
     }
 
     #[test]

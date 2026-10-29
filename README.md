@@ -22,9 +22,9 @@ back to the CPU where that is unavailable.
   keyboard layout to Hyprland hosts. Mac hosts use their active local layout.
 - Shared text clipboard in both directions. Linux-to-Linux sessions also
   transfer images and copied files.
-- Sound from Linux hosts to Linux viewers, in both directions at once
-  without echo, so two machines can show each other. Mac clients and hosts
-  do not carry sound yet.
+- Sound from Linux hosts to Linux and Mac viewers, in both directions at
+  once without echo, so two machines can show each other. Mac hosts do not
+  send sound yet.
 - Linux hosts adapt quality to the link, giving up frame rate before sharpness.
 - Linux viewers provide tabs, reconnection, and your Omarchy theme. Mac
   viewers use a native window with one connection.
@@ -283,8 +283,8 @@ the macOS client and host (upstream PR #47), and adds the following.
 - **#98, settings window and per-machine tab menu** (Linux client). Applied
   to this branch's Linux client, which lives in `crates/gliff/src/linux.rs`.
 - **#80, sound from Linux hosts.** Opus over the existing connection, played
-  through ALSA on Linux viewers. Its dependencies are Linux-only, and Mac
-  clients and hosts do not advertise sound, so the Mac build is unchanged.
+  through ALSA on Linux viewers. Mac hosts do not advertise sound; Mac
+  viewers play it (see Sound on the Mac below).
 
 Ported, not merged: #5 (dhh's macOS client, an alternative to #47's). Only
 its VideoToolbox and Metal video path is taken; see GPU video below. Not
@@ -307,6 +307,11 @@ gliff 0.4.1).
   it. `make video-check` checks the output and compares decode times (4K
   4:4:4: 6.9 ms GPU against 18.8 ms CPU). See
   [macOS support](docs/macos.md).
+- **Sound on the Mac.** The viewer plays a Linux host's sound with #80's
+  `gliff-audio` (Opus, the jitter buffer, and a cpal player on CoreAudio).
+  **Machine ▸ Play Sound** is the same `muted` switch as the Linux client's
+  speaker button; `--no-audio` starts muted. See
+  [macOS support](docs/macos.md#settings).
 - **Signing without a paid developer account.** `bin/setup-macos-signing`
   creates, trusts and tests a self-signed `gliff-local` identity once, and
   `bin/install-macos` uses it (or an Apple Development certificate) so
