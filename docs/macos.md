@@ -200,8 +200,15 @@ logical display coordinates. macOS hosts mirror physical screens and reject
 - Native AppKit window with one connection per window. The Linux client's
   recent-host tabs, Omarchy theme and automatic reconnection are not yet in
   the macOS client. Settings changes that need a new session do reconnect.
-- The decode setting (GPU/CPU) is Linux-only: the Mac viewer decodes on the
-  CPU, so the Mac settings window does not offer it.
+- The Mac viewer decodes in hardware: VideoToolbox decodes the main and
+  auxiliary H.264 streams at the same time, a Metal kernel recombines them into
+  full 4:4:4 colour (a port of the Vulkan recombine, from upstream PR #5), and
+  a Metal layer shows the result, so no pixels cross the CPU. With hardware
+  decode it asks hosts for 4:4:4 first. Without it (some virtual machines), or
+  with `--video cpu` or a saved CPU decode setting, it decodes with OpenH264
+  on the CPU as before, and it switches to the CPU mid-session if the
+  hardware decoder fails. The settings window does not offer the decode
+  option yet; set `decode = "cpu"` in `config.toml` to force the CPU.
 - The Mac viewer requests cursor pixels inside the video. Updated Linux
   hosts use this mode without opening a separate cursor capture session,
   avoiding Hyprland 0.56's cursor-session crash on display disconnection.
@@ -209,8 +216,7 @@ logical display coordinates. macOS hosts mirror physical screens and reject
   single 4:2:0 stream, and verify that the session actually uses hardware.
   OpenH264 is the fallback if hardware creation or encoding fails. Host
   `--video cpu` forces software; `--full-chroma` uses the software dual-stream
-  4:4:4 path. Capture is capped at 1920×1200 and 30 fps. The Mac viewer still
-  decodes with OpenH264 on the CPU. A Linux viewer's `--video cpu` setting
+  4:4:4 path. Capture is capped at 1920×1200 and 30 fps. A Linux viewer's `--video cpu` setting
   controls its own decoding, and does not disable hardware on the Mac host.
 - Command maps to Super; Option maps to Alt. Hardware key positions are
   translated between macOS and evdev. Mac clients export their active Unicode
@@ -235,11 +241,24 @@ Native keyboard checks read real German and US layouts without selecting them;
 Linux tests compile the captured German symbols with the host's XKB library.
 Picker checks cover screen preferences independently for each host and port.
 
-The opt-in viewer regression feeds240 Retina-size frames to a temporary
+The opt-in viewer regression feeds 240 Retina-size frames to a temporary
 window, bounds memory and cleans up without SSH or capture:
 
 ```
 python3 scripts/macos-viewer-check.py
+```
+
+That check feeds decoded BGRA frames, so it covers the CPU path only. The
+hardware path has its own opt-in check. It encodes a moving test pattern with
+gliff's encoder at 1080p and 4K, in 4:2:0 and 4:4:4, sends the coded frames
+to the installed viewer as the client does, and reads pixels back from the
+Metal texture (`GLIFF_VIDEO_PROBE=1`). It checks the colours against the
+pattern and the CPU decoder, checks that 4:4:4 keeps one-pixel colour
+detail, and prints GPU and CPU decode times side by side:
+
+```
+python3 scripts/macos-video-check.py            # or: make video-check
+python3 scripts/macos-video-check.py --cases 1080p-444 --frames 60
 ```
 
 With a nearby host advertising Gliff, the optional integration check exercises

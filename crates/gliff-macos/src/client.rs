@@ -93,7 +93,12 @@ pub fn client_main() -> Result<()> {
             gliff_settings::Store::open()
         };
         let shared = crate::settings::Shared::new(store);
-        let cli_layer = crate::settings::cli_layer(cli.headless, cli.no_clipboard, &cli.server_bin);
+        let cli_layer = crate::settings::cli_layer(
+            cli.headless,
+            cli.no_clipboard,
+            &cli.server_bin,
+            cli.video.as_deref(),
+        );
         let selected = match cli.host.as_deref() {
             Some(h) => crate::discovery::Selection {
                 host: h.into(),
@@ -137,9 +142,9 @@ pub fn client_main() -> Result<()> {
         }
         let screen_locked = cli.output.is_some();
         let mut viewer = match cli.check_frames {
-            None => Some(Viewer::open(&format!(
-                "Gliff — {host} · Shift+Esc releases keyboard"
-            ))?),
+            None => {
+                Some(Viewer::open(&format!("Gliff — {host} · Shift+Esc releases keyboard")).await?)
+            }
             Some(_) => None,
         };
         //= One window for the whole visit: a settings change that needs a new
@@ -147,6 +152,8 @@ pub fn client_main() -> Result<()> {
         let result = loop {
             let opts = shared.resolve(&machine, &cli_layer);
             let live = viewer.as_mut().map(|viewer| Live {
+                //= `--video cpu` or a saved CPU decode keeps the CPU path.
+                gpu: viewer.gpu && opts.decode != gliff_settings::Video::Cpu,
                 viewer,
                 shared: shared.clone(),
                 machine: machine.clone(),
@@ -220,13 +227,33 @@ enum Outcome {
 struct Viewer {
     child: Option<tokio::process::Child>,
     display: mpsc::Sender<(u8, Vec<u8>)>,
-    events: mpsc::Receiver<Result<Value>>,
+    events: Events,
+    /// The helper can decode in hardware (VideoToolbox + Metal).
+    gpu: bool,
+}
+
+/// The window's events, with any read ahead of time (while waiting for the
+/// helper's `video_caps`) delivered first.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+struct Events {
+    rx: mpsc::Receiver<Result<Value>>,
+    pending: std::collections::VecDeque<Result<Value>>,
+}
+
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+impl Events {
+    async fn recv(&mut self) -> Option<Result<Value>> {
+        match self.pending.pop_front() {
+            Some(ev) => Some(ev),
+            None => self.rx.recv().await,
+        }
+    }
 }
 
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 impl Viewer {
     #[cfg(target_os = "macos")]
-    fn open(title: &str) -> Result<Self> {
+    async fn open(title: &str) -> Result<Self> {
         let mut child = native::spawn("app", &[title.to_string()])?;
         let (display, mut display_rx) = mpsc::channel::<(u8, Vec<u8>)>(2);
         let (event_tx, events) = mpsc::channel::<Result<Value>>(64);
@@ -252,10 +279,26 @@ impl Viewer {
                 }
             }
         });
+        //= The helper's first event says whether it can decode in hardware.
+        //= An older helper sends none: anything else read here is kept.
+        let mut events = Events {
+            rx: events,
+            pending: Default::default(),
+        };
+        let mut gpu = false;
+        match tokio::time::timeout(Duration::from_secs(5), events.rx.recv()).await {
+            Ok(Some(Ok(ev))) if ev["type"] == "video_caps" => {
+                gpu = ev["hardware"].as_bool() == Some(true);
+            }
+            Ok(Some(other)) => events.pending.push_back(other),
+            Ok(None) | Err(_) => {}
+        }
+        tracing::info!(hardware = gpu, "viewer video decode");
         Ok(Self {
             child: Some(child),
             display,
             events,
+            gpu,
         })
     }
 
@@ -294,6 +337,8 @@ impl Viewer {
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 struct Live<'a> {
     viewer: &'a mut Viewer,
+    /// Decode in the viewer (VideoToolbox + Metal) instead of on the CPU.
+    gpu: bool,
     shared: crate::settings::SharedRef,
     machine: String,
     cli: gliff_settings::Settings,
@@ -324,6 +369,8 @@ where
 {
     let mut reader = Framed::new(rd);
     let mut writer = Framed::new(wr);
+    //= Hardware decode makes full colour cheap, so ask for it first.
+    let mut gpu = live.as_ref().is_some_and(|l| l.gpu);
     writer
         .write_msg(&ClientMsg::Hello {
             version: PROTOCOL_VERSION,
@@ -336,7 +383,11 @@ where
                 codecs: vec![Codec::H264],
                 max_width: 3840,
                 max_height: 2160,
-                chroma: vec![ChromaMode::Single420, ChromaMode::Dual420],
+                chroma: if gpu {
+                    vec![ChromaMode::Dual420, ChromaMode::Single420]
+                } else {
+                    vec![ChromaMode::Single420, ChromaMode::Dual420]
+                },
                 features: features()
                     .into_iter()
                     //= Sound is Linux-only so far: do not offer it from a Mac.
@@ -364,6 +415,7 @@ where
             cli,
             opts,
             screen_locked,
+            ..
         }) => (
             Some(&mut viewer.events),
             Some((shared, machine, cli, opts, screen_locked)),
@@ -417,6 +469,8 @@ where
     let mut heartbeat = tokio::time::interval(Duration::from_secs(5));
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut last_id = 0;
+    //= Consecutive hardware decode failures; past a few, use the CPU.
+    let mut gpu_errors = 0u32;
     let clipboard =
         crate::clipboard::Bridge::new(gliff_transport::clipboard::Side::Client, display_tx.clone());
     let mut clips = clipboard.take_outbound();
@@ -453,6 +507,40 @@ where
                             tracing::warn!(error = %e, "menu setting refused");
                         }
                     }
+                }
+                else if ev["type"] == "decoded" {
+                    //= The viewer finished this frame (decode + recombine):
+                    //= acknowledge it now, so the server paces on real decode time.
+                    if let Some(frame_id) = ev["frame_id"].as_u64() {
+                        gpu_errors = 0;
+                        frames += 1;
+                        out.send((ClientMsg::FrameAck { frame_id, decoded_at_ms: now_ms() }, Bytes::new())).await?;
+                    }
+                }
+                else if ev["type"] == "decode_error" || ev["type"] == "gpu_failed" {
+                    let message = ev["message"].as_str().unwrap_or("unknown");
+                    if !gpu {
+                        //= Frames still in the pipe after the switch to the CPU:
+                        //= acknowledge them; the keyframe is already requested.
+                        if let Some(frame_id) = ev["frame_id"].as_u64() {
+                            out.send((ClientMsg::FrameAck { frame_id, decoded_at_ms: now_ms() }, Bytes::new())).await?;
+                        }
+                        continue;
+                    }
+                    gpu_errors += 1;
+                    if ev["type"] == "gpu_failed" || gpu_errors >= 3 {
+                        tracing::warn!(%message, "hardware decode failed; using the CPU");
+                        gpu = false;
+                        if let Some((width, height, chroma)) = coded_stream {
+                            decoder = Some(gliff_sw::Decoder::new(chroma == ChromaMode::Dual420, width, height)?);
+                        }
+                    } else {
+                        tracing::warn!(%message, "hardware decode error; requesting keyframe");
+                    }
+                    if let Some(frame_id) = ev["frame_id"].as_u64() {
+                        out.send((ClientMsg::FrameAck { frame_id, decoded_at_ms: now_ms() }, Bytes::new())).await?;
+                    }
+                    out.send((ClientMsg::RequestKeyframe, Bytes::new())).await?;
                 }
                 else if ev["type"] == "reconnect" {
                     out.send((ClientMsg::Bye, Bytes::new())).await?;
@@ -516,11 +604,32 @@ where
                             // Pace, scale and pipeline metadata can change without
                             // a new coded stream or keyframe. Preserve references.
                             if coded_stream != Some((width, height, chroma)) {
-                                decoder = Some(gliff_sw::Decoder::new(chroma == ChromaMode::Dual420, width, height)?);
                                 coded_stream = Some((width, height, chroma));
+                                if gpu {
+                                    //= The viewer builds its decoders before this stream's frames.
+                                    let config = json!({"type": "video_config", "width": width, "height": height,
+                                        "dual": chroma == ChromaMode::Dual420, "scale_milli": scale_milli});
+                                    display_tx.send((native::EVENT, serde_json::to_vec(&config)?)).await?;
+                                    decoder = None;
+                                } else {
+                                    decoder = Some(gliff_sw::Decoder::new(chroma == ChromaMode::Dual420, width, height)?);
+                                }
+                            } else if gpu && scale != scale_milli {
+                                let command = json!({"type": "video_scale", "scale_milli": scale_milli});
+                                display_tx.send((native::EVENT, serde_json::to_vec(&command)?)).await?;
                             }
                             scale = scale_milli;
-                            tracing::info!(width, height, scale_milli, "connected using CPU video");
+                            tracing::info!(width, height, scale_milli, ?chroma, gpu, "stream configured");
+                        }
+                        ServerMsg::VideoFrame { frame_id, data_len, aux_len, .. } if gpu => {
+                            ensure!(payload.len() == data_len as usize + aux_len as usize, "invalid video payload");
+                            ensure!(coded_stream.is_some(), "video before configuration");
+                            last_id = frame_id;
+                            //= Coded frames are never dropped (a lost P-frame corrupts
+                            //= the next ones): wait for the window instead. The ack
+                            //= follows its `decoded` event.
+                            let packet = native::video_packet(frame_id, data_len, &payload)?;
+                            display_tx.send((native::VIDEO, packet)).await?;
                         }
                         ServerMsg::VideoFrame { frame_id, data_len, aux_len, .. } => {
                             ensure!(payload.len() == data_len as usize + aux_len as usize, "invalid video payload");
@@ -675,6 +784,9 @@ fn server_payload(m: &ServerMsg) -> u32 {
         } => data_len.saturating_add(*aux_len),
         ServerMsg::CursorShape { argb_len, .. } => *argb_len,
         ServerMsg::ClipboardData { data_len, .. } => *data_len,
+        //= The Mac does not ask for sound, but a server that sends it anyway
+        //= must not desynchronise the stream: read past the payload.
+        ServerMsg::AudioFrame { data_len, .. } => *data_len,
         _ => 0,
     }
 }
@@ -682,6 +794,15 @@ fn server_payload(m: &ServerMsg) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn audio_payloads_are_skipped_not_parsed() {
+        let frame = ServerMsg::AudioFrame {
+            seq: 7,
+            data_len: 960,
+        };
+        assert_eq!(server_payload(&frame), 960);
+    }
 
     #[cfg(unix)]
     #[test]

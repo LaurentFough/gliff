@@ -8,6 +8,8 @@ pub const PIXELS: u8 = 1;
 pub const EVENT: u8 = 2;
 pub const H264: u8 = 3;
 pub const ENCODE: u8 = 4;
+/// Coded video for the viewer's hardware decoder; see [`video_packet`].
+pub const VIDEO: u8 = 5;
 pub const MAX_PACKET: usize = 64 * 1024 * 1024;
 
 pub async fn read<R: AsyncRead + Unpin>(rd: &mut R) -> Result<(u8, Vec<u8>)> {
@@ -26,6 +28,29 @@ pub async fn write<W: AsyncWrite + Unpin>(wr: &mut W, kind: u8, bytes: &[u8]) ->
     wr.write_all(bytes).await?;
     wr.flush().await?;
     Ok(())
+}
+
+/// One frame for the viewer's VideoToolbox decoder: `frame_id` (u64 LE),
+/// the main and auxiliary stream lengths (u32 LE each), then both Annex B
+/// access units. `payload` is the VideoFrame payload: `main_len` bytes of the
+/// main stream followed by the auxiliary stream (empty for Single420).
+pub fn video_packet(frame_id: u64, main_len: u32, payload: &[u8]) -> Result<Vec<u8>> {
+    let main_len_usize = main_len as usize;
+    ensure!(
+        main_len_usize <= payload.len(),
+        "video payload shorter than its main stream"
+    );
+    let aux_len = u32::try_from(payload.len() - main_len_usize)?;
+    ensure!(
+        16 + payload.len() <= MAX_PACKET,
+        "video packet exceeds limit"
+    );
+    let mut out = Vec::with_capacity(16 + payload.len());
+    out.extend_from_slice(&frame_id.to_le_bytes());
+    out.extend_from_slice(&main_len.to_le_bytes());
+    out.extend_from_slice(&aux_len.to_le_bytes());
+    out.extend_from_slice(payload);
+    Ok(out)
 }
 
 pub fn geometry(bytes: &[u8]) -> Result<(u32, u32, u32)> {
@@ -119,6 +144,19 @@ mod tests {
         task.await.unwrap().unwrap();
         let header = [EVENT, 255, 255, 255, 255];
         assert!(read(&mut header.as_slice()).await.is_err());
+    }
+
+    #[test]
+    fn video_packets_carry_the_id_and_both_lengths() {
+        let p = video_packet(0x0102_0304_0506_0708, 3, b"mmmaa").unwrap();
+        assert_eq!(&p[..8], &0x0102_0304_0506_0708u64.to_le_bytes());
+        assert_eq!(&p[8..12], &3u32.to_le_bytes());
+        assert_eq!(&p[12..16], &2u32.to_le_bytes());
+        assert_eq!(&p[16..], b"mmmaa");
+        //= Single420: no auxiliary bytes.
+        let p = video_packet(1, 4, b"main").unwrap();
+        assert_eq!(&p[12..16], &0u32.to_le_bytes());
+        assert!(video_packet(1, 9, b"short").is_err());
     }
 
     #[test]

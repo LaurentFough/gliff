@@ -9,7 +9,8 @@ ssh: no open ports, no accounts, no relay.
 On Linux, full-resolution colour (4:4:4) keeps coloured text sharp, with
 GPU video where supported and a CPU fallback. Mac hosts prefer hardware
 H.264 through VideoToolbox; full-colour mode uses the CPU. Mac viewers
-currently decode on the CPU.
+decode in hardware (VideoToolbox, with the 4:4:4 recombine in Metal) and fall
+back to the CPU where that is unavailable.
 
 ![A gliff window showing a terminal on a remote machine](.github/assets/screenshot.png)
 
@@ -158,6 +159,7 @@ exit status.
 | `make signing` / `make signing-show` | `bin/setup-macos-signing` / its `--show` |
 | `make app` | `bin/build-macos-app` into `target/macos/Gliff.app` (`APP=`, `SIGN_MODE=`) |
 | `make verify` | checks the installed app's signature and `~/.local/bin` links |
+| `make video-check` | checks the viewer's GPU video and compares GPU and CPU decode times (`ARGS="--cases 1080p-444"`) |
 | `make package` | `bin/package-macos --development`: ad-hoc signed ZIP and checksum (`OUT=`) |
 | `make package-release` | `bin/package-macos`: Developer ID, notarized (`GLIFF_NOTARY_PROFILE`) |
 | `make icon` | `bin/export-macos-icon` |
@@ -284,9 +286,10 @@ the macOS client and host (upstream PR #47), and adds the following.
   through ALSA on Linux viewers. Its dependencies are Linux-only, and Mac
   clients and hosts do not advertise sound, so the Mac build is unchanged.
 
-Not merged: #5 (dhh's macOS client, an alternative to #47's, with
-VideoToolbox and Metal decoding) and #26 (HEVC for screens larger than
-H.264 allows, which predates gliff 0.4.1).
+Ported, not merged: #5 (dhh's macOS client, an alternative to #47's). Only
+its VideoToolbox and Metal video path is taken; see GPU video below. Not
+merged: #26 (HEVC for screens larger than H.264 allows, which predates
+gliff 0.4.1).
 
 ### macOS
 
@@ -297,6 +300,13 @@ H.264 allows, which predates gliff 0.4.1).
   at once, and screen or server-command changes that reconnect in the same
   window. The connection window follows each machine's saved screen. See
   [macOS support](docs/macos.md#settings) and [docs/settings.md](docs/settings.md).
+- **GPU video.** The viewer decodes in hardware with VideoToolbox,
+  recombines 4:4:4 in Metal and presents through a `CAMetalLayer`, and asks
+  hosts for 4:4:4 first. It falls back to OpenH264 without a hardware
+  decoder or after repeated errors; `--video cpu` or `decode = "cpu"` forces
+  it. `make video-check` checks the output and compares decode times (4K
+  4:4:4: 6.9 ms GPU against 18.8 ms CPU). See
+  [macOS support](docs/macos.md).
 - **Signing without a paid developer account.** `bin/setup-macos-signing`
   creates, trusts and tests a self-signed `gliff-local` identity once, and
   `bin/install-macos` uses it (or an Apple Development certificate) so
@@ -310,7 +320,10 @@ H.264 allows, which predates gliff 0.4.1).
 ### Build and checks
 
 - **Makefile**: one front end for `bin/` and `scripts/`, including the
-  `make macos` pipeline and `make verify`; see [Make targets](#make-targets).
+  `make macos` pipeline, `make verify` and `make video-check`; see
+  [Make targets](#make-targets).
+- **ToDone.md**: a running report of this fork's state, pending work and a
+  log of each commit or merge.
 - **Hermetic tests**: the ssh login-shell test runs each shell with an empty
   environment, so a developer's `ZDOTDIR`, `BASH_ENV` or `XDG_CONFIG_HOME`
   no longer breaks `scripts/check.sh`. The picker check also covers saved
