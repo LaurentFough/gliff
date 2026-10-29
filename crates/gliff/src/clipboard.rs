@@ -64,6 +64,9 @@ pub enum ToWorker {
     },
     /// The user pressed cancel on a transfer reported as `id`.
     CancelTransfer(u32),
+    /// Play the server's sound or not: on for the shown session while the
+    /// header's sound button is on.
+    Audio(bool),
 }
 
 #[derive(Default)]
@@ -200,7 +203,7 @@ impl Bridge {
     /// A clipboard command from the UI; `Send` is handled by the caller.
     pub fn on_ui(&self, cmd: ToWorker) {
         match cmd {
-            ToWorker::Send(_) | ToWorker::Zoom(_) => {}
+            ToWorker::Send(_) | ToWorker::Zoom(_) | ToWorker::Audio(_) => {}
             ToWorker::RevokeLocal => {
                 self.local_serial.set(None);
                 self.local_mimes.borrow_mut().clear();

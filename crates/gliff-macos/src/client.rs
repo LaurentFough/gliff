@@ -12,10 +12,13 @@ use gliff_transport::Framed;
 #[cfg(any(target_os = "macos", test))]
 use gliff_transport::SshTarget;
 use serde_json::{json, Value};
+use std::cell::Cell;
+use std::rc::Rc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc;
 
+use crate::sound::{Sound, MAX_AUDIO_PACKET};
 use crate::{keys, native};
 
 #[cfg(any(target_os = "macos", test))]
@@ -45,6 +48,10 @@ struct Cli {
     /// Settings still wins, as on Linux.
     #[arg(long)]
     no_clipboard: bool,
+    /// Start with sound off, without saving that (Machine ▸ Play Sound
+    /// turns it back on). Sound plays from hosts that send it (Linux).
+    #[arg(long)]
+    no_audio: bool,
     /// Decode a fixed number of frames without opening a window (integration test).
     #[arg(long)]
     check_frames: Option<u32>,
@@ -141,6 +148,9 @@ pub fn client_main() -> Result<()> {
             shared.remember(&machine);
         }
         let screen_locked = cli.output.is_some();
+        //= The sound switch for this visit: kept across reconnects, so a
+        //= `--no-audio` run the user unmutes stays unmuted.
+        let sound_wanted = Rc::new(Cell::new(!cli.no_audio && !shared.muted()));
         let mut viewer = match cli.check_frames {
             None => {
                 Some(Viewer::open(&format!("Gliff — {host} · Shift+Esc releases keyboard")).await?)
@@ -160,6 +170,7 @@ pub fn client_main() -> Result<()> {
                 cli: cli_layer.clone(),
                 opts: opts.clone(),
                 screen_locked,
+                sound: sound_wanted.clone(),
             });
             let outcome = if let Some(addr) = &cli.connect {
                 match tokio::net::TcpStream::connect(addr).await {
@@ -344,6 +355,8 @@ struct Live<'a> {
     cli: gliff_settings::Settings,
     opts: gliff_settings::Resolved,
     screen_locked: bool,
+    /// The Machine menu's sound switch, shared across reconnects.
+    sound: Rc<Cell<bool>>,
 }
 
 /// A session without a window (integration checks and tests).
@@ -371,6 +384,9 @@ where
     let mut writer = Framed::new(wr);
     //= Hardware decode makes full colour cheap, so ask for it first.
     let mut gpu = live.as_ref().is_some_and(|l| l.gpu);
+    //= Only a window plays sound; integration runs and tests do not offer it.
+    let sound_cell = live.as_ref().map(|l| l.sound.clone());
+    let mut sound = Sound::new(sound_cell.as_ref().is_some_and(|c| c.get()));
     writer
         .write_msg(&ClientMsg::Hello {
             version: PROTOCOL_VERSION,
@@ -390,6 +406,7 @@ where
                 },
                 features: features()
                     .into_iter()
+                    .filter(|f| sound_cell.is_some() || f != gliff_proto::FEATURE_AUDIO)
                     .chain([FEATURE_CURSOR_IN_VIDEO.to_string()])
                     .collect(),
             },
@@ -422,8 +439,11 @@ where
     };
     let mut changes = ctx.as_ref().map(|(shared, ..)| shared.subscribe());
     let mut share_clipboard = ctx.as_ref().is_none_or(|(.., opts, _)| opts.clipboard);
+    //= The saved switch as last seen, to notice a change from elsewhere.
+    let mut last_muted = ctx.as_ref().is_some_and(|(shared, ..)| shared.muted());
     if let Some((_, _, _, opts, locked)) = &ctx {
-        let state = crate::settings::machine_state(opts, *locked);
+        let mut state = crate::settings::machine_state(opts, *locked);
+        sound.annotate(&mut state);
         display_tx
             .send((native::EVENT, serde_json::to_vec(&state)?))
             .await?;
@@ -448,6 +468,12 @@ where
         loop {
             let msg = async {
                 let m = reader.read_msg::<ServerMsg>().await?;
+                if let ServerMsg::AudioFrame { data_len, .. } = &m {
+                    ensure!(
+                        *data_len <= MAX_AUDIO_PACKET,
+                        "audio packet of {data_len} bytes exceeds the limit"
+                    );
+                }
                 let p = reader.read_payload(server_payload(&m)).await?;
                 Ok((m, p))
             }
@@ -540,6 +566,19 @@ where
                     }
                     out.send((ClientMsg::RequestKeyframe, Bytes::new())).await?;
                 }
+                else if ev["type"] == "sound" {
+                    //= Machine ▸ Play Sound: apply now, then save it for both clients.
+                    let on = ev["on"].as_bool().context("sound event without on")?;
+                    if let Some(cell) = &sound_cell { cell.set(on); }
+                    if let Some(msg) = sound.want(on) { out.send((msg, Bytes::new())).await?; }
+                    if let Some((shared, _, _, opts, locked)) = &ctx {
+                        last_muted = !on;
+                        shared.set_muted(!on);
+                        let mut state = crate::settings::machine_state(opts, *locked);
+                        sound.annotate(&mut state);
+                        display_tx.send((native::EVENT, serde_json::to_vec(&state)?)).await?;
+                    }
+                }
                 else if ev["type"] == "reconnect" {
                     out.send((ClientMsg::Bye, Bytes::new())).await?;
                     return Ok(Outcome::Reconnect);
@@ -569,7 +608,15 @@ where
                     crate::settings::Change::None => {}
                 }
                 *opts = new;
-                let state = crate::settings::machine_state(opts, *locked);
+                //= The switch saved from elsewhere (the settings window, a hand edit).
+                let muted = shared.muted();
+                if muted != last_muted {
+                    last_muted = muted;
+                    if let Some(cell) = &sound_cell { cell.set(!muted); }
+                    if let Some(msg) = sound.want(!muted) { out.send((msg, Bytes::new())).await?; }
+                }
+                let mut state = crate::settings::machine_state(opts, *locked);
+                sound.annotate(&mut state);
                 display_tx.send((native::EVENT, serde_json::to_vec(&state)?)).await?;
             }
             _ = idle.tick(), if decoder.is_some() => {
@@ -594,6 +641,13 @@ where
                             if visible {
                                 let command = json!({"type":"cursor_mode", "embedded":cursor_in_video(session.headless, &features)});
                                 display_tx.send((native::EVENT, serde_json::to_vec(&command)?)).await?;
+                            }
+                            if let Some(msg) = sound.server_features(&features) { out.send((msg, Bytes::new())).await?; }
+                            if let Some((_, _, _, opts, locked)) = &ctx {
+                                //= The menu learns whether this server sends sound.
+                                let mut state = crate::settings::machine_state(opts, *locked);
+                                sound.annotate(&mut state);
+                                display_tx.send((native::EVENT, serde_json::to_vec(&state)?)).await?;
                             }
                         }
                         ServerMsg::StreamConfig { codec, chroma, width, height, scale_milli, .. } => {
@@ -641,6 +695,11 @@ where
                             out.send((ClientMsg::FrameAck { frame_id, decoded_at_ms: now_ms() }, Bytes::new())).await?;
                         }
                         ServerMsg::Ping { t } => { out.send((ClientMsg::Pong { t }, Bytes::new())).await?; }
+                        ServerMsg::AudioStart { codec, sample_rate, channels } => sound.start(codec, sample_rate, channels),
+                        ServerMsg::AudioFrame { seq, data_len } => {
+                            ensure!(payload.len() == data_len as usize, "invalid audio payload");
+                            sound.frame(seq, &payload);
+                        }
                         ServerMsg::Error { code, message, .. } => bail!("{}: {message}", if is_incompatible(code) { "incompatible server" } else { "server error" }),
                         _ => {}
                     }
@@ -782,6 +841,9 @@ fn server_payload(m: &ServerMsg) -> u32 {
         } => data_len.saturating_add(*aux_len),
         ServerMsg::CursorShape { argb_len, .. } => *argb_len,
         ServerMsg::ClipboardData { data_len, .. } => *data_len,
+        //= The Mac does not ask for sound, but a server that sends it anyway
+        //= must not desynchronise the stream: read past the payload.
+        ServerMsg::AudioFrame { data_len, .. } => *data_len,
         _ => 0,
     }
 }
@@ -789,6 +851,15 @@ fn server_payload(m: &ServerMsg) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn audio_payloads_are_skipped_not_parsed() {
+        let frame = ServerMsg::AudioFrame {
+            seq: 7,
+            data_len: 960,
+        };
+        assert_eq!(server_payload(&frame), 960);
+    }
 
     #[cfg(unix)]
     #[test]

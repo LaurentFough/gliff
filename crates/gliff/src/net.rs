@@ -14,7 +14,8 @@ use bytes::Bytes;
 use gliff_proto::clipboard::CHUNK;
 use gliff_proto::{
     features, is_incompatible, version_mismatch, ChromaMode, ClientCaps, ClientMsg, ClipboardFile,
-    ClipboardMsg, Codec, ServerMsg, VideoPipeline, FEATURE_CURSOR_IN_VIDEO, PROTOCOL_VERSION,
+    ClipboardMsg, Codec, ServerMsg, VideoPipeline, FEATURE_AUDIO, FEATURE_CURSOR_IN_VIDEO,
+    PROTOCOL_VERSION,
 };
 use gliff_sw::VideoMode;
 use gliff_transport::clipboard::progress::Progress;
@@ -32,6 +33,8 @@ use crate::keymap::{Keymap, FIRST_KEYMAP_WAIT};
 type Geometry = ((u32, u32), (u32, u32), u32);
 
 const MAX_STREAM: (u32, u32) = (3840, 2160);
+/// Far above any 10 ms Opus packet.
+const MAX_AUDIO_PACKET: u32 = 4000;
 // Older protocol-v1 GPU servers ignore the advertised limits on their first
 // stream. Accept their bounded encoder maximum so they can reach the resize.
 const MAX_DECODE: (u32, u32) = (4096, 4096);
@@ -80,6 +83,8 @@ pub enum Status {
         decode_ms: f32,
         /// "server tier→client tier", e.g. "GPU→CPU".
         video: String,
+        /// The sound's buffered delay in milliseconds, while it plays.
+        audio_ms: Option<f32>,
     },
     /// A new remote cursor image waits in this slot, for the client to set
     /// as its widget cursor.
@@ -491,6 +496,7 @@ where
     let mut got_ack = false;
     let mut cursor_in_video = false;
     let mut headless = false;
+    let mut server_audio = false;
     let (mut cfg, pipeline) = loop {
         match reader.read_msg::<ServerMsg>().await? {
             ServerMsg::HelloAck {
@@ -507,6 +513,7 @@ where
                 cursor_in_video = features.iter().any(|f| f == FEATURE_CURSOR_IN_VIDEO);
                 tracing::debug!(?features, "server features");
                 headless = session.headless;
+                server_audio = features.iter().any(|f| f == FEATURE_AUDIO);
                 got_ack = true;
             }
             ServerMsg::Ping { t } => writer.write_msg(&ClientMsg::Pong { t }).await?,
@@ -596,6 +603,8 @@ where
     let (ui_gone_tx, mut ui_gone) = tokio::sync::oneshot::channel::<()>();
     // Display pixels per stream pixel the UI wants; the main loop applies it.
     let (zoom_tx, mut zoom_rx) = unbounded_channel::<u32>();
+    // Whether the UI wants this session's sound; the main loop owns it.
+    let (audio_tx, mut audio_rx) = unbounded_channel::<bool>();
     {
         let out_tx = out_tx.clone();
         let clipboard = clipboard.clone();
@@ -617,6 +626,10 @@ where
                         Some(ToWorker::Send(m)) => m,
                         Some(ToWorker::Zoom(z)) => {
                             let _ = zoom_tx.send(z);
+                            continue;
+                        }
+                        Some(ToWorker::Audio(on)) => {
+                            let _ = audio_tx.send(on);
                             continue;
                         }
                         Some(other) => {
@@ -659,10 +672,25 @@ where
     // Geometry of the picture the GPU decoder holds, for a redraw: a
     // geometry-only StreamConfig may have moved `view` on since.
     let mut last_gpu_geometry: Option<Geometry> = None;
+    // Sound is asked for only from a server that offers it, and only while
+    // the UI wants it; the device opens when the stream starts.
+    let mut audio_on = false;
+    let mut sound = gliff_audio::Sink::default();
     loop {
         let read = tokio::select! {
             read = reader.read_msg::<ServerMsg>() => read,
             _ = &mut ui_gone => return Ok(()),
+            Some(on) = audio_rx.recv() => {
+                if server_audio && on != audio_on {
+                    audio_on = on;
+                    tracing::info!(on, "audio");
+                    let _ = out_tx.send((ClientMsg::Audio { enabled: on }, Bytes::new()));
+                    if !on {
+                        sound.stop();
+                    }
+                }
+                continue;
+            }
             Some(z) = zoom_rx.recv() => {
                 if !zoom.want(z) {
                     continue;
@@ -926,6 +954,29 @@ where
             ServerMsg::Ping { t } => {
                 let _ = out_tx.send((ClientMsg::Pong { t }, Bytes::new()));
             }
+            ServerMsg::AudioStart {
+                codec,
+                sample_rate,
+                channels,
+            } => {
+                if audio_on {
+                    sound.start(
+                        codec == gliff_proto::AudioCodec::Opus,
+                        sample_rate,
+                        channels,
+                    );
+                }
+            }
+            ServerMsg::AudioFrame { seq, data_len } => {
+                anyhow::ensure!(
+                    data_len <= MAX_AUDIO_PACKET,
+                    "audio packet of {data_len} bytes exceeds the limit"
+                );
+                let packet = reader.read_payload(data_len).await?;
+                if audio_on {
+                    sound.frame(seq, &packet);
+                }
+            }
             ServerMsg::CursorPos { .. } | ServerMsg::Pong { .. } => {}
             ServerMsg::Error { code, message, .. } if is_incompatible(code) => {
                 return Err(Incompatible(message).into())
@@ -962,6 +1013,7 @@ where
                     0.0
                 },
                 video: video_label.clone(),
+                audio_ms: sound.stats().map(|(buffered, ..)| buffered as f32),
             });
             frames_since = 0;
             bytes_since = 0;

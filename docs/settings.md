@@ -24,10 +24,11 @@ Layers, last wins:
 4. `[overrides."user@host"]`
 
 `crates/gliff-settings/src/store.rs` (`Store`) reads and writes the file for
-the macOS client. It owns `machines`, `[defaults]` and `[overrides]` and
-writes every other key back untouched, so the Linux client's `open` and
-`shown` survive a Mac save. The Linux client keeps its own `recent::Config`
-for the same file.
+the macOS client. It owns `machines`, `[defaults]`, `[overrides]` and the
+top-level `muted` (the sound switch: the Linux header's speaker button and the
+Mac's Machine ▸ Play Sound, written only when sound is off), and writes every
+other key back untouched, so the Linux client's `open` and `shown` survive a
+Mac save. The Linux client keeps its own `recent::Config` for the same file.
 
 The command line sits below the override on purpose: a choice made in the
 window beats the flags. A flag that names something concrete (`--output`)

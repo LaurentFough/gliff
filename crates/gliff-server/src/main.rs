@@ -2,11 +2,15 @@
 #![forbid(unsafe_code)]
 
 #[cfg(target_os = "linux")]
+mod audio;
+#[cfg(target_os = "linux")]
 mod clipboard;
 #[cfg(target_os = "linux")]
 mod discovery;
 #[cfg(target_os = "linux")]
 mod linux;
+#[cfg(target_os = "linux")]
+mod local_mute;
 #[cfg(target_os = "linux")]
 mod notify;
 #[cfg(target_os = "linux")]

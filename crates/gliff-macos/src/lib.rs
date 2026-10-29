@@ -18,6 +18,8 @@ mod client;
 mod clipboard;
 #[cfg(target_os = "macos")]
 mod server;
+#[cfg(any(target_os = "macos", test))]
+mod sound;
 #[cfg(target_os = "macos")]
 mod writer;
 

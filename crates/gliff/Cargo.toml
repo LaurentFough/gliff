@@ -28,6 +28,7 @@ gtk4.workspace = true
 libadwaita.workspace = true
 gliff-vk.workspace = true
 hypr-capture.workspace = true
+gliff-audio = { workspace = true, features = ["player"] }
 drm-fourcc.workspace = true
 hypr-ipc.workspace = true
 hypr-input.workspace = true

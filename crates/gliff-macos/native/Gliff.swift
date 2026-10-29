@@ -1122,6 +1122,9 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
     let privateItem = NSMenuItem(title: "Private Screen", action: #selector(App.privateScreen), keyEquivalent: "")
     let clipboardItem = NSMenuItem(title: "Share Clipboard", action: #selector(App.toggleClipboard), keyEquivalent: "")
     var shareClipboard = true
+    // Machine > Play Sound: the shared mute switch; enabled when the host sends sound.
+    let soundItem = NSMenuItem(title: "Play Sound", action: #selector(App.toggleSound), keyEquivalent: "")
+    var playSound = true
     // Hardware decode (VideoToolbox + Metal) when this Mac has it; the
     // client then sends coded video (kind 5) instead of BGRA pixels (kind 1).
     let gpu = GPUVideo.make()
@@ -1154,6 +1157,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
         for item in [mirrorItem, privateItem] { item.target = self; machineMenu.addItem(item) }
         machineMenu.addItem(NSMenuItem.separator())
         clipboardItem.target = self; machineMenu.addItem(clipboardItem)
+        soundItem.target = self; soundItem.isEnabled = false; machineMenu.addItem(soundItem)
         machineMenu.addItem(NSMenuItem.separator())
         let reconnect = machineMenu.addItem(withTitle: "Reconnect", action: #selector(App.reconnect), keyEquivalent: "")
         reconnect.target = self
@@ -1234,11 +1238,19 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if locked { mirrorItem.toolTip = "--output names the screen for this connection"; privateItem.toolTip = mirrorItem.toolTip }
         shareClipboard = cmd["clipboard"] as? Bool != false
         clipboardItem.state = shareClipboard ? .on : .off
+        if let sound = cmd["sound"] as? Bool {
+            playSound = sound
+            soundItem.state = sound ? .on : .off
+            let available = cmd["sound_available"] as? Bool == true
+            soundItem.isEnabled = available
+            soundItem.toolTip = available ? nil : "This computer does not send sound (sound comes from Linux hosts)"
+        }
     }
     @objc func openSettings() { event(["type": "open_settings"]) }
     @objc func mirrorScreen() { event(["type": "setting", "field": "screen", "value": "mirror"]) }
     @objc func privateScreen() { event(["type": "setting", "field": "screen", "value": "private"]) }
     @objc func toggleClipboard() { event(["type": "setting", "field": "clipboard", "value": !shareClipboard]) }
+    @objc func toggleSound() { event(["type": "sound", "on": !playSound]) }
     @objc func reconnect() { event(["type": "reconnect"]) }
     @objc func requestHostPermissions() {
         _ = CGRequestScreenCaptureAccess()

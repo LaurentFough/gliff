@@ -20,6 +20,8 @@ gliff-transport.workspace = true
 gliff-sw.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
+gliff-audio.workspace = true
+serde_json.workspace = true
 gliff-vk.workspace = true
 drm-fourcc.workspace = true
 hypr-capture.workspace = true
@@ -30,3 +32,6 @@ dbus = "0.9"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 gliff-macos.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }

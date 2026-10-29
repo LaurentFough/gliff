@@ -26,6 +26,9 @@ pub struct Config {
     /// What one machine changes from the defaults.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub overrides: std::collections::BTreeMap<String, Settings>,
+    /// The header's sound button is off: no tab plays its machine's sound.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub muted: bool,
 }
 
 impl Config {

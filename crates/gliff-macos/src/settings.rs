@@ -106,6 +106,20 @@ impl Shared {
     pub fn state(&self) -> Value {
         state_json(&self.store.borrow())
     }
+
+    /// The sound switch, shared with the Linux client (`muted` in the file).
+    pub fn muted(&self) -> bool {
+        self.store.borrow().muted()
+    }
+
+    /// Save the sound switch; announced like any other change.
+    pub fn set_muted(&self, muted: bool) {
+        if self.muted() == muted {
+            return;
+        }
+        self.store.borrow_mut().set_muted(muted);
+        self.save_and_announce();
+    }
 }
 
 /// The command line's layer. `--output` is not here: naming a screen is a

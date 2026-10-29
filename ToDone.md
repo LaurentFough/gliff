@@ -12,7 +12,7 @@ domain: remote-desktop
 url: https://github.com/LaurentFough/gliff/blob/acrogenesis/macos-client-host/ToDone.md
 draft: true
 tags: [gliff, macgliff, macos, report, changelog]
-keywords: [upstream PRs, VideoToolbox, Metal, settings, signing, Makefile, PR 80 sound]
+keywords: [upstream PRs, VideoToolbox, Metal, settings, signing, Makefile, PR 80 sound, CoreAudio, wpctl]
 ---
 
 # gliff for macOS: ToDone
@@ -31,21 +31,19 @@ The log is newest first, and each entry names the commit.
 
 | | |
 |---|---|
-| Working branch | `acrogenesis/macos-client-host` at `354e80d` |
+| Working branch | `acrogenesis/macos-client-host` (see Log for the latest commit) |
 | Pushed to | `LaurentFough/gliff` only (never acrogenesis or omacom) |
-| Ahead of acrogenesis' branch | 21 commits |
+| Ahead of acrogenesis' branch | see `git rev-list --count origin/acrogenesis/macos-client-host..HEAD` |
 | Last updated | 2026-10-29 |
 
 ### Branches on the fork
 
-| Branch | Commit | Contents | Status |
-|---|---|---|---|
-| `acrogenesis/macos-client-host` | `354e80d` | #47 base, signing and install fixes, Makefile, #98, Mac settings, GPU video | working branch |
-| `merge/pr-80` | `b1ab0d8` | #80 (sound) + README notes | awaiting tests |
-| `feature/macos-gpu-video` | `f4803db` | GPU video port | merged; can be deleted |
-| `macos-settings` | `7d15374` | Mac settings | merged; can be deleted |
-| `merge/pr-98` | `9bd7870` | #98 | merged; can be deleted |
-| `main` | `a2edd50` | upstream, untouched | — |
+| Branch | Contents | Status |
+|---|---|---|
+| `acrogenesis/macos-client-host` | #47 base, signing and install fixes, Makefile, #98, Mac settings, GPU video, #80 sound, Mac sound, host mute, ToDone.md | working branch |
+| `main` | upstream, untouched | — |
+
+Merged and deleted on 2026-10-29: `feature/macos-gpu-video`, `macos-settings`, `merge/pr-98`, `merge/pr-80`, `feature/macos-audio` (all contained in the working branch).
 
 ## Upstream PRs
 
@@ -54,7 +52,7 @@ The log is newest first, and each entry names the commit.
 | #47 | acrogenesis' macOS client and host | **Base** of the fork, not merged in |
 | #98 | Settings window, per-machine tab menu | **Merged** (`9bd7870`), then brought to the Mac client |
 | #5 | dhh's native macOS client (VideoToolbox + Metal) | **Ported, not merged**: only its GPU video path. **Merged** (`354e80d`) |
-| #80 | Sound from Linux hosts | **On a test branch**, `merge/pr-80` (`b1ab0d8`) |
+| #80 | Sound from Linux hosts | **Merged** (with the Mac sound work), tested Linux host → Mac |
 | #26 | — | **Deferred**; not looked at yet |
 
 ## Features added
@@ -95,6 +93,12 @@ The log is newest first, and each entry names the commit.
   | 4K 4:2:0 | 6.68 | 12.08 | 1.8× |
   | 4K 4:4:4 | 6.90 | 18.81 | 2.7× |
 
+### Sound (#80, plus the Mac and the host mute)
+
+- #80: Linux hosts send what applications play as Opus (PipeWire `pw-record` + graph linker, or `parec`); Linux viewers play it through ALSA. Echo-free when two machines show each other.
+- The Mac viewer plays it through #80's `gliff-audio` (Opus, jitter buffer, cpal on CoreAudio). **Machine ▸ Play Sound** is the same top-level `muted` key as the Linux speaker button; `--no-audio` starts muted. Oversized packets are refused.
+- `gliff-server --mute-local-audio`: the host's speakers are muted while the client plays its sound, following a new default output, and restored on sound off, session end, or a crash (watchdog). PipeWire path only. Set it as the machine's server command.
+
 ### Docs
 
 - README fork notes, `docs/macos.md`, `docs/settings.md`, and the crate list in `docs/architecture.md`.
@@ -102,18 +106,17 @@ The log is newest first, and each entry names the commit.
 
 ## Pending
 
-### PR #80 (sound)
+### Sound
 
-- [ ] Linux test with sound (Linux host to Linux client).
-- [ ] `make check` on the Mac, on `merge/pr-80` merged with the working branch.
-- [ ] Merge into the working branch and push. A trial merge is clean; both sides change `README.md` and `crates/gliff-macos/src/client.rs`, but git combines them on its own.
-
-Sound support today:
+Support today:
 
 | Host → client | Sound |
 |---|---|
-| Linux → Linux | Yes |
-| Mac on either end | No: the Mac client and host turn the feature off for now |
+| Linux → Linux | Yes (#80) |
+| Linux → Mac | Yes (tested 2026-10-29), including `--mute-local-audio` |
+| Mac → any | No: the Mac host does not send sound yet |
+
+- [ ] Linux host → Linux client with sound, on the merged working branch.
 
 ### Deferred testing
 
@@ -122,7 +125,8 @@ Sound support today:
 ### Follow-ups
 
 - [ ] A decode (GPU/CPU) option in the Mac settings window (config-only for now).
-- [ ] Sound on the Mac, as client or host.
+- [ ] A "Host speakers: keep / mute" choice in both clients' settings (today: the server command).
+- [ ] Sound from a Mac host (ScreenCaptureKit audio capture + #80's Opus encoder).
 - [ ] A warning when "Private screen" is chosen with a Mac host.
 - [ ] Viewer and client CPU use and frame rate in a live GPU session (Activity Monitor).
 
@@ -132,7 +136,7 @@ Sound support today:
   ```sh
   gh repo edit LaurentFough/gliff --default-branch acrogenesis/macos-client-host
   ```
-- [ ] Delete merged branches: `feature/macos-gpu-video`, `macos-settings`, `merge/pr-98`.
+- [x] Delete merged branches (2026-10-29).
 - [ ] Rename remotes (`origin` → `acrogenesis`, `LaurentFough/gliff` → `origin`) and track the fork, which also stops the "unpushed commits" warnings.
 
 ### PR #26
@@ -142,6 +146,18 @@ Sound support today:
 ## Log
 
 Newest first. Format: `### YYYY-MM-DD — summary (commit)`, then a line or two.
+
+### 2026-10-29 — Merge sound into the working branch; clean up
+No-fast-forward merge of `feature/macos-audio` (which holds `merge/pr-80`): #80, Mac sound and `--mute-local-audio`, tested Linux host → Mac (muted on the host, playing on the Mac). Deleted the five merged branches on the fork.
+
+### 2026-10-29 — Host `--mute-local-audio` (`c0fd85a`)
+Sound played on both the host's speakers and the client (#80's design). New `gliff-server --mute-local-audio`: mutes the default output via `wpctl` while the client plays sound, only when the recorder links applications directly (PipeWire), follows a new default output every 2 s, restores what it muted on sound off, session end or a fallback recorder, and a detached watchdog unmutes if the server dies. `local_mute.rs` with unit tests on a fake backend. Enable per machine with the server command. README, docs/macos.md.
+
+### 2026-10-29 — Mac viewer plays Linux hosts' sound (`bdc80da`)
+Branched from `merge/pr-80`. The Mac client offers `audio`, asks a server that offers it, and plays through #80's `gliff-audio` `Sink` (Opus, jitter buffer, cpal on CoreAudio). New `sound.rs` with tests; Machine ▸ Play Sound; `--no-audio`; the switch is the top-level `muted` key shared with the Linux client (`Store::muted`/`set_muted`, with a test); audio packets over 4000 bytes are refused. Docs: `docs/macos.md`, `docs/settings.md`, README. Not built here.
+
+### 2026-10-29 — Working branch merged into `merge/pr-80` (`5185c1b`)
+Clean merge, so the #80 test build includes GPU video and settings. The Mac client now reads past `AudioFrame` payloads (`server_payload`), so a host that sends sound anyway cannot break the stream; with a test. README: #5 listed as ported, GPU video and `make video-check` notes, ToDone.md.
 
 ### 2026-10-29 — ToDone.md added
 This running report.
