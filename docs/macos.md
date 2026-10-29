@@ -93,6 +93,12 @@ when the host does not send sound (Mac hosts, and Linux hosts without sound
 support). Sound is Opus at 128 kbit/s through the same jitter buffer as on
 Linux, and the output device is opened only while sound plays.
 
+The Linux host keeps playing on its own speakers too. To hear it only on the
+Mac, set the machine's **Server command** in Settings to
+`gliff-server --mute-local-audio`: the host mutes its default output while
+the Mac plays its sound, and restores it afterwards (see the
+[README](../README.md#use)).
+
 The command line sits below a machine's saved settings, as on Linux:
 `--headless`, `--no-clipboard` and `--server-bin` apply unless the machine
 sets that option itself. `--output` names a screen for this connection and

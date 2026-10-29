@@ -22,6 +22,13 @@ pub struct Capture {
 }
 
 impl Capture {
+    /// The recorder takes each application's stream directly (PipeWire
+    /// with the graph linker), not the output's monitor, so muting the local
+    /// speakers does not silence what the client hears.
+    pub fn isolated(&self) -> bool {
+        self._linker.is_some() && !self.pulse
+    }
+
     pub fn start(prefer_pulse: bool) -> Result<Self> {
         let (mut child, linker, pulse) = recorder(prefer_pulse)?;
         let mut graph_failure = linker.as_ref().map(|linker| linker.failed.clone());
@@ -112,7 +119,7 @@ fn offer(tx: &mpsc::Sender<(u32, Vec<u8>)>, seq: &mut u32, packet: Vec<u8>) -> b
 /// A command that finds the sound server: Tailscale SSH starts commands
 /// without `XDG_RUNTIME_DIR`, and every PipeWire and PulseAudio tool looks
 /// for its socket there.
-fn command(program: &str) -> std::process::Command {
+pub(crate) fn command(program: &str) -> std::process::Command {
     let mut cmd = std::process::Command::new(program);
     cmd.stdin(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
@@ -471,11 +478,24 @@ pub struct Sound {
     retry_at: Option<tokio::time::Instant>,
     retry_delay: std::time::Duration,
     prefer_pulse: bool,
+    /// `--mute-local-audio`: silence this host's speakers while the client
+    /// plays its sound (see `local_mute.rs`).
+    mute_local: bool,
+    /// Started on first use; dropping it restores the speakers.
+    local_mute: Option<crate::local_mute::LocalMute>,
 }
 
 impl Sound {
+    pub fn new(mute_local: bool) -> Self {
+        Self {
+            mute_local,
+            ..Self::default()
+        }
+    }
+
     pub fn set(&mut self, enabled: bool, writer: &crate::writer::Writer) {
         if !enabled {
+            self.unmute_local();
             self.wanted = false;
             self.capture = None;
             self.retry_at = None;
@@ -492,6 +512,7 @@ impl Sound {
         match Capture::start(self.prefer_pulse) {
             Ok(capture) => {
                 tracing::info!(pulse = capture.pulse, "audio on");
+                self.mute_local_for(&capture);
                 self.capture = Some(capture);
                 writer.send(
                     gliff_proto::ServerMsg::AudioStart {
@@ -507,6 +528,31 @@ impl Sound {
                 self.prefer_pulse = !self.prefer_pulse;
                 self.schedule_retry();
             }
+        }
+    }
+
+    /// Mute the local speakers for a recorder that cannot hear the mute;
+    /// a monitor recorder would record it, so unmute for that one.
+    fn mute_local_for(&mut self, capture: &Capture) {
+        if !self.mute_local {
+            return;
+        }
+        if capture.isolated() {
+            self.local_mute
+                .get_or_insert_with(crate::local_mute::LocalMute::spawn)
+                .engage();
+        } else {
+            tracing::warn!(
+                "--mute-local-audio: recording the whole output (no pw-dump/pw-record); \
+                 local speakers stay on, or the client would hear silence"
+            );
+            self.unmute_local();
+        }
+    }
+
+    fn unmute_local(&mut self) {
+        if let Some(mute) = &mut self.local_mute {
+            mute.release();
         }
     }
 

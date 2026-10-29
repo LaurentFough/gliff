@@ -72,6 +72,12 @@ struct Cli {
     /// GLIFF_CAPTURE environment variable.
     #[arg(long, value_parser = ["auto", "dmabuf", "shm"])]
     capture: Option<String>,
+    /// Silence this machine's own speakers while a client plays its sound,
+    /// and restore them when sound stops or the session ends. Needs
+    /// PipeWire with WirePlumber (`pw-dump`, `pw-record`, `wpctl`); on the
+    /// whole-output fallback the speakers stay on.
+    #[arg(long)]
+    mute_local_audio: bool,
 }
 
 pub(crate) fn main() -> Result<()> {
@@ -107,6 +113,7 @@ pub(crate) fn main() -> Result<()> {
         video: gliff_sw::VideoMode::resolve(cli.video.as_deref()),
         full_chroma: cli.full_chroma,
         capture: hypr_capture::CaptureMode::resolve(cli.capture.as_deref()),
+        mute_local_audio: cli.mute_local_audio,
     };
 
     let rt = tokio::runtime::Builder::new_current_thread()

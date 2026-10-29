@@ -231,7 +231,12 @@ A host with PipeWire's `pw-record` and `pw-dump` sends what its applications
 play except Gliff itself, so when two machines show each other, neither hears
 its own sound come back. A host missing either sends its whole output, Gliff
 included, and two such machines that show each other echo; mute one side to
-stop it. Hosts keep playing their sound on their own speakers. Sound is Opus
+stop it. Hosts keep playing their sound on their own speakers, unless the
+host runs `gliff-server --mute-local-audio` (set it as the machine's server
+command in Settings): then the host's speakers are muted while the client
+plays its sound and restored when sound stops or the session ends, even if
+the server is killed. That needs PipeWire with WirePlumber on the host
+(`pw-dump`, `pw-record`, `wpctl`). Sound is Opus
 at 128 kbit/s, and the client buffers 40 to 250 ms of it, more on a jittery
 link.
 
@@ -307,6 +312,11 @@ gliff 0.4.1).
   it. `make video-check` checks the output and compares decode times (4K
   4:4:4: 6.9 ms GPU against 18.8 ms CPU). See
   [macOS support](docs/macos.md).
+- **Host speakers muted while streaming.** `gliff-server --mute-local-audio`
+  mutes the Linux host's default output while a client plays its sound, follows
+  a new default output, and restores what it changed on sound off, session end
+  or a crash (a detached watchdog). Only when the host records each
+  application directly (PipeWire), so the client never hears the mute.
 - **Sound on the Mac.** The viewer plays a Linux host's sound with #80's
   `gliff-audio` (Opus, the jitter buffer, and a cpal player on CoreAudio).
   **Machine ▸ Play Sound** is the same `muted` switch as the Linux client's

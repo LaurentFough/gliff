@@ -43,6 +43,8 @@ pub struct Config {
     pub full_chroma: bool,
     /// What the capture ring is made of; `Shm` implies the CPU tier.
     pub capture: CaptureMode,
+    /// Silence this host's speakers while the client plays its sound.
+    pub mute_local_audio: bool,
 }
 
 /// Events from the capture thread.
@@ -273,7 +275,7 @@ where
         .features
         .iter()
         .any(|feature| feature == gliff_proto::FEATURE_AUDIO);
-    let mut sound = crate::audio::Sound::default();
+    let mut sound = crate::audio::Sound::new(cfg.mute_local_audio);
     loop {
         let flow = tokio::select! {
             msg = msg_rx.recv() => match msg {
