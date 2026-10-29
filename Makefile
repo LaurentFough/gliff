@@ -94,7 +94,7 @@ endef
 
 .PHONY: help version doctor \
         build check fix test e2e clean \
-        macos verify signing signing-show app install package package-release icon \
+        macos verify video-check signing signing-show app install package package-release icon \
         dev install-dev discovery discovery-off \
         logs-clean
 
@@ -201,6 +201,10 @@ verify: ## Check the installed app's signature and the ~/.local/bin links
 	        esac; \
 	    done; \
 	    echo "signature and links OK")
+
+video-check: ## GPU video check + GPU vs CPU decode times (needs an installed app; ARGS="--cases 1080p-444")
+	$(call need_os,Darwin,video-check)
+	$(call run,video-check,python3 scripts/macos-video-check.py --json "$(LOG_DIR)/video-check.json" $(ARGS))
 
 signing: ## Create the local "gliff-local" signing identity once (bin/setup-macos-signing)
 	$(call need_os,Darwin,signing)

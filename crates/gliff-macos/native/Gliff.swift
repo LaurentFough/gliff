@@ -869,6 +869,10 @@ final class GPUVideo {
     private var scheduled = false
     /// Called on the main thread when a frame is waiting.
     var onFrame: ((GPUFrame) -> Void)?
+    /// Test hook (scripts/macos-video-check.py): GLIFF_VIDEO_PROBE=1 reads a
+    /// few decoded pixels back into each `decoded` event.
+    static let probing = ProcessInfo.processInfo.environment["GLIFF_VIDEO_PROBE"] == "1"
+    private lazy var probeQueue = device.makeCommandQueue()
 
     /// Hardware decode needs a Metal device and a hardware H.264 decoder
     /// (absent in some virtual machines).
@@ -903,12 +907,43 @@ final class GPUVideo {
         let aux = data.subdata(in: (base + 16 + mainLen)..<(base + 16 + mainLen + auxLen))
         let started = DispatchTime.now().uptimeNanoseconds
         do {
-            if let frame = try pipeline.decode(main: main, aux: aux) { post(frame) }
+            let frame = try pipeline.decode(main: main, aux: aux)
+            // Decode and recombine only; the probe below is not timed.
             let ms = Double(DispatchTime.now().uptimeNanoseconds - started) / 1_000_000
-            event(["type": "decoded", "frame_id": id, "ms": ms])
+            var reply: [String: Any] = ["type": "decoded", "frame_id": id, "ms": ms]
+            if let frame = frame {
+                if GPUVideo.probing { reply["probe"] = probe(frame.texture) }
+                post(frame)
+            }
+            event(reply)
         } catch {
             event(["type": "decode_error", "frame_id": id, "message": "\(error)"])
         }
+    }
+
+    /// The points video_fixture.rs samples: the four stripe centres, then an
+    /// even and an odd column of the alternating half.
+    static func probePoints(_ w: Int, _ h: Int) -> [(Int, Int)] {
+        let x0 = (w / 2) & ~1
+        return [(w / 8, h / 4), (3 * w / 8, h / 4), (5 * w / 8, h / 4), (7 * w / 8, h / 4), (x0, 3 * h / 4), (x0 + 1, 3 * h / 4)]
+    }
+
+    /// RGB at the probe points, copied out of the (GPU-private) texture.
+    private func probe(_ texture: MTLTexture) -> [[Int]] {
+        let points = GPUVideo.probePoints(texture.width, texture.height)
+        guard let queue = probeQueue, let buffer = device.makeBuffer(length: 4 * points.count, options: .storageModeShared),
+              let commands = queue.makeCommandBuffer(), let blit = commands.makeBlitCommandEncoder() else { return [] }
+        for (i, point) in points.enumerated() {
+            blit.copy(from: texture, sourceSlice: 0, sourceLevel: 0,
+                      sourceOrigin: MTLOrigin(x: point.0, y: point.1, z: 0), sourceSize: MTLSize(width: 1, height: 1, depth: 1),
+                      to: buffer, destinationOffset: 4 * i, destinationBytesPerRow: 4, destinationBytesPerImage: 4)
+        }
+        blit.endEncoding()
+        commands.commit()
+        commands.waitUntilCompleted()
+        let bytes = buffer.contents().bindMemory(to: UInt8.self, capacity: 4 * points.count)
+        // bgra8Unorm: B, G, R, A.
+        return points.indices.map { i in [Int(bytes[4 * i + 2]), Int(bytes[4 * i + 1]), Int(bytes[4 * i])] }
     }
 
     private func post(_ frame: GPUFrame) {

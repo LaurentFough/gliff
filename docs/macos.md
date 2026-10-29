@@ -241,11 +241,24 @@ Native keyboard checks read real German and US layouts without selecting them;
 Linux tests compile the captured German symbols with the host's XKB library.
 Picker checks cover screen preferences independently for each host and port.
 
-The opt-in viewer regression feeds240 Retina-size frames to a temporary
+The opt-in viewer regression feeds 240 Retina-size frames to a temporary
 window, bounds memory and cleans up without SSH or capture:
 
 ```
 python3 scripts/macos-viewer-check.py
+```
+
+That check feeds decoded BGRA frames, so it covers the CPU path only. The
+hardware path has its own opt-in check. It encodes a moving test pattern with
+gliff's encoder at 1080p and 4K, in 4:2:0 and 4:4:4, sends the coded frames
+to the installed viewer as the client does, and reads pixels back from the
+Metal texture (`GLIFF_VIDEO_PROBE=1`). It checks the colours against the
+pattern and the CPU decoder, checks that 4:4:4 keeps one-pixel colour
+detail, and prints GPU and CPU decode times side by side:
+
+```
+python3 scripts/macos-video-check.py            # or: make video-check
+python3 scripts/macos-video-check.py --cases 1080p-444 --frames 60
 ```
 
 With a nearby host advertising Gliff, the optional integration check exercises
