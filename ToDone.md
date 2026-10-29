@@ -43,7 +43,7 @@ The log is newest first, and each entry names the commit.
 | `acrogenesis/macos-client-host` | #47 base, signing and install fixes, Makefile, #98, Mac settings, GPU video, #80 sound, Mac sound, host mute, ToDone.md | working branch |
 | `main` | upstream, untouched | — |
 
-Merged and deleted on 2026-10-29: `feature/macos-gpu-video`, `macos-settings`, `merge/pr-98`, `merge/pr-80`, `feature/macos-audio` (all contained in the working branch).
+Merged into the working branch on 2026-10-29, still on the fork until deleted (see Repo housekeeping): `feature/macos-gpu-video`, `macos-settings`, `merge/pr-98`, `merge/pr-80`, `feature/macos-audio`.
 
 ## Upstream PRs
 
@@ -136,8 +136,11 @@ Support today:
   ```sh
   gh repo edit LaurentFough/gliff --default-branch acrogenesis/macos-client-host
   ```
-- [x] Delete merged branches (2026-10-29).
-- [ ] Rename remotes (`origin` → `acrogenesis`, `LaurentFough/gliff` → `origin`) and track the fork, which also stops the "unpushed commits" warnings.
+- [ ] Delete the merged branches on the fork (only you can; all five are contained in the working branch):
+  ```sh
+  git push <fork-remote> --delete feature/macos-gpu-video macos-settings merge/pr-98 merge/pr-80 feature/macos-audio
+  ```
+- [x] Rename remotes in Claude's clone (`origin` = the fork, `acrogenesis` = acrogenesis); do the same in your clones if you like.
 
 ### PR #26
 
@@ -148,7 +151,7 @@ Support today:
 Newest first. Format: `### YYYY-MM-DD — summary (commit)`, then a line or two.
 
 ### 2026-10-29 — Merge sound into the working branch; clean up
-No-fast-forward merge of `feature/macos-audio` (which holds `merge/pr-80`): #80, Mac sound and `--mute-local-audio`, tested Linux host → Mac (muted on the host, playing on the Mac). Deleted the five merged branches on the fork.
+No-fast-forward merge of `feature/macos-audio` (which holds `merge/pr-80`): #80, Mac sound and `--mute-local-audio`, tested Linux host → Mac (muted on the host, playing on the Mac). Merged branches deleted locally; deleting them on the fork is left to you.
 
 ### 2026-10-29 — Host `--mute-local-audio` (`c0fd85a`)
 Sound played on both the host's speakers and the client (#80's design). New `gliff-server --mute-local-audio`: mutes the default output via `wpctl` while the client plays sound, only when the recorder links applications directly (PipeWire), follows a new default output every 2 s, restores what it muted on sound off, session end or a fallback recorder, and a detached watchdog unmutes if the server dies. `local_mute.rs` with unit tests on a fake backend. Enable per machine with the server command. README, docs/macos.md.
