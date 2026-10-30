@@ -65,7 +65,7 @@ Merged into the working branch on 2026-10-29, still on the fork until deleted (s
   - the saved signing identity is read with `plutil`;
   - binary paths come from cargo, so a custom `target-dir` works.
 - A `Makefile` over the `bin/` and `scripts/` tools:
-  - `help`, `doctor`, `build`, `check`, `fix`, `test`, `e2e`, `clean`;
+  - `help`, `doctor`, `build`, `check`, `fix`, `test`, `e2e`, `clean`, `distclean`;
   - `macos`, the full pipeline (sign, build, install, verify), plus `verify`, `signing`, `app`, `install`, `package`, `package-release`;
   - `video-check`, and the `dev` and `discovery` targets.
 - Every make step is logged to `target/logs/`.
@@ -161,6 +161,9 @@ Support today:
 ## Log
 
 Newest first. Format: `### YYYY-MM-DD — summary (commit)`, then a line or two.
+
+### 2026-10-29 — `make distclean` (Makefile 0.3.0)
+Removes everything `.gitignore` ignores (`git clean -Xd`: `target/`, stray logs, `.DS_Store`, `patch/`), nothing tracked. Lists it first and asks; `FORCE=1` skips the question and is required without a terminal. README make table updated.
 
 ### 2026-10-29 — Project `.gitignore`; iOS plan in docs (`907e2ed`)
 `.gitignore` grouped for this workspace: Rust/cargo (Cargo.lock stays tracked), Python, Swift/Xcode, logs, macOS (`.DS_Store` and friends), editors, packaging, and local scratch (`/patch/`, `*.patch`). The old `patch/` files are not committed: each is already in history as a commit (signing, `plutil`, cargo paths, the ssh test), or belongs to the abandoned objc2 `gliff-mac` prototype. Added `docs/ios-ipados-plan.md` (the iOS/iPadOS plan doc, with frontmatter) and a follow-up for it.

@@ -201,6 +201,7 @@ exit status.
 | `make dev` / `make install-dev` | `bin/dev` / `bin/install-dev` (Linux) |
 | `make discovery` / `make discovery-off` | `bin/enable-discovery` (`SSH_PORT=`) / `--disable` |
 | `make clean` | `cargo clean` |
+| `make distclean` | removes everything `.gitignore` ignores (`target/`, stray logs, `.DS_Store`, `patch/`): lists it, then asks (`FORCE=1` skips) |
 
 Pass extra script or cargo arguments with `ARGS`, for example
 `make build ARGS="-p gliff"`. The Makefile works with the GNU make 3.81 that

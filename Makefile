@@ -23,7 +23,7 @@
 #=   CHECK=1                  `make macos`: run scripts/check.sh before installing
 #=   SIGNING=0                `make macos`: skip creating the gliff-local identity
 
-MAKEFILE_VERSION := 0.2.0
+MAKEFILE_VERSION := 0.3.0
 
 #= bash for pipefail, so `cmd | tee log` fails when cmd fails. Present on
 #= macOS (/bin/bash 3.2) and every Linux this repo targets. make 3.81
@@ -96,7 +96,7 @@ endef
         build check fix test e2e clean \
         macos verify video-check signing signing-show app install package package-release icon \
         dev install-dev discovery discovery-off \
-        logs-clean
+        logs-clean distclean
 
 #= ---------------------------------------------------------------------------
 #= Info
@@ -161,6 +161,22 @@ clean: ## cargo clean (removes target/, logs included)
 
 logs-clean: ## Remove target/logs
 	$(Q)rm -rf "$(LOG_DIR)"
+
+#= Everything .gitignore ignores, and nothing tracked or unignored: target/,
+#= stray logs, .DS_Store, patch/. Lists it first and asks; FORCE=1 skips the
+#= question (and is required without a terminal). The installed app, the
+#= signing identity and ~/.config/gliff are outside the repo and untouched.
+distclean: ## Remove all ignored files (target/, logs, .DS_Store, patch/): lists, then asks; FORCE=1 skips
+	$(call need_tool,git,install git)
+	$(Q)cd "$(ROOT)" && list=$$(git clean -Xdn); \
+	if [ -z "$$list" ]; then echo "distclean: nothing to remove"; exit 0; fi; \
+	printf '%s\n' "$$list"; \
+	if [ "$(FORCE)" != 1 ]; then \
+	    if [ ! -t 0 ]; then echo "distclean: not a terminal; run make distclean FORCE=1" >&2; exit 1; fi; \
+	    printf 'Remove these? [y/N] '; read answer; \
+	    case "$$answer" in y|Y|yes) ;; *) echo "distclean: kept everything"; exit 0 ;; esac; \
+	fi; \
+	git clean -Xdf && echo "distclean: done"
 
 #== macOS
 
