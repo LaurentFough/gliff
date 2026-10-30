@@ -44,6 +44,22 @@ A quick look at what this fork adds. The README carries the same list; [ToDone.m
 - **Fixes**: Mac install and signing (`plutil`, a custom cargo `target-dir`); the client ignores stray sound packets from a host.
 - **Planned**: an iOS/iPadOS client; see [docs/ios-ipados-plan.md](docs/ios-ipados-plan.md).
 
+## Screenshots
+
+The new features are outlined in blue. Host names are placeholders.
+
+**Tabs:** two machines in one window; **+** or File ▸ New Tab adds another.
+
+![Two Gliff tabs, one per machine, with the + button](docs/images/macos-tabs.png)
+
+**Reconnect in Settings:** per machine, or for all machines.
+
+<img src="docs/images/macos-settings-reconnect.png" width="784" alt="Gliff Settings with the Reconnect automatically row">
+
+**Machine menu** (a mockup drawn to match the menu in `Gliff.swift`; regenerate with `docs/images/src/render.py`): Play Sound, Reconnect and Reconnect Automatically.
+
+<img src="docs/images/macos-machine-menu.png" width="760" alt="Machine menu: Mirror Screen, Private Screen, Share Clipboard, Play Sound, Reconnect, Reconnect Automatically">
+
 ## Status
 
 | Path | State |
