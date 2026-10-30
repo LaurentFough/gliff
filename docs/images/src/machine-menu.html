@@ -1,10 +1,10 @@
 <!doctype html>
-<!-- machine-menu.html v1.0.0 — a close macOS approximation of Gliff's
+<!-- machine-menu.html v1.1.0 — a close macOS approximation of Gliff's
      Machine menu (crates/gliff-macos/native/Gliff.swift, App menu setup),
      rendered to PNG by render.py at @2x. Items and order match the code. -->
 <html><head><meta charset="utf-8">
 <style>
-  :root { --blue: #007AFF; }
+  :root { --hl: #FF3B30; }  /* macOS systemRed */
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body {
     width: 760px; height: 400px; overflow: hidden;
@@ -43,8 +43,8 @@
     padding-left: 22px; border-radius: 5px; color: #1d1d1f; }
   .item .check { position: absolute; left: 7px; font-size: 11px; font-weight: 700; top: 5px; }
   .sep { height: 1px; margin: 5px 9px; background: rgba(0,0,0,0.11); }
-  /* feature outline: 2 pt systemBlue, as in the redacted screenshots */
-  .hl { position: absolute; border: 2px solid var(--blue); border-radius: 7px; pointer-events: none; }
+  /* feature outline: 2 pt systemRed, as in the redacted screenshots */
+  .hl { position: absolute; border: 2px solid var(--hl); border-radius: 7px; pointer-events: none; }
 </style></head>
 <body>
   <div class="bar">

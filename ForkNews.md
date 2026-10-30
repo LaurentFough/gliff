@@ -46,9 +46,9 @@ A quick look at what this fork adds. The README carries the same list; [ToDone.m
 
 ## Screenshots
 
-The new features are outlined in blue.
+The new features are outlined in red.
 
-**Tabs:** two machines in one window; **+** or File ▸ New Tab adds another.
+**Tabs:** two connections in one window, one outline each; **+** or File ▸ New Tab adds another.
 
 ![Two Gliff tabs, one per machine, with the + button](docs/images/macos-tabs.png)
 

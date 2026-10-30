@@ -183,6 +183,9 @@ Support today:
 
 Newest first. Format: `### YYYY-MM-DD — summary (commit)`, then a line or two.
 
+### 2026-10-30 — Screenshots: red outlines, one per tab
+Outlines are now macOS systemRed (#FF3B30); the tabs shot has one box per tab (per connection).
+
 ### 2026-10-30 — Fix: screenshots not shown
 `.gitignore` ignores `*.png`, so the three images were never committed; `docs/images/*.png` is now an exception. Screenshots captions shortened.
 
