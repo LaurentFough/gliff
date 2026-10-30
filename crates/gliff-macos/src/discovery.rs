@@ -104,10 +104,14 @@ pub fn picker_settings(
     let state = shared.state();
     let mut screens = serde_json::Map::new();
     let mut pinned = Vec::new();
+    //= The config's machines, in its order (oldest first): the picker lists
+    //= them, newest first, and completes the SSH address from them.
+    let mut machines = Vec::new();
     for m in state["machines"].as_array().into_iter().flatten() {
         let Some(name) = m["name"].as_str() else {
             continue;
         };
+        machines.push(serde_json::Value::from(name));
         screens.insert(
             name.into(),
             screen_ui(shared.resolve(name, cli).screen).into(),
@@ -122,6 +126,7 @@ pub fn picker_settings(
         "default_screen": screen_ui(shared.resolve("", cli).screen),
         "screens": screens,
         "pinned": pinned,
+        "machines": machines,
     })
 }
 
@@ -310,5 +315,10 @@ mod tests {
         assert_eq!(v["screens"]["pinned@h"], "mirror");
         assert_eq!(v["screens"]["plain@h"], "private");
         assert_eq!(v["pinned"], serde_json::json!(["pinned@h"]));
+        assert_eq!(
+            v["machines"],
+            serde_json::json!(["pinned@h", "plain@h"]),
+            "the config's order, for the picker's list and autocomplete"
+        );
     }
 }

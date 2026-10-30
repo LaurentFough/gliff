@@ -1547,7 +1547,7 @@ final class ComputerPickerRow: NSTableRowView {
     }
 }
 
-final class ComputerPicker: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTableViewDataSource, NSTableViewDelegate, NSTextFieldDelegate {
+final class ComputerPicker: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTableViewDataSource, NSTableViewDelegate, NSTextFieldDelegate, NSSearchFieldDelegate {
     let nearby = NearbyComputers()
     let table = NSTableView()
     let address = NSTextField(string: "")
@@ -1577,6 +1577,15 @@ final class ComputerPicker: NSObject, NSApplicationDelegate, NSWindowDelegate, N
     // which is also saved (moved) on Connect.
     var sessionScreens: [String: String] = [:]
     var legacyUsed = false
+    // Known machines (the config's machines list, newest first): the sidebar
+    // lists them, filtered by its search field, and the SSH Address field
+    // completes from them as you type. lastTyped is the address as typed, so
+    // deleting a completion does not bring it back.
+    var machines: [String] = []
+    var shownMachines: [String] = []
+    let machineSearch = NSSearchField()
+    let machineTable = NSTableView()
+    var lastTyped = ""
     init(screenOverride: String? = nil, preferences: UserDefaults? = nil) {
         self.screenOverride = screenOverride
         if let preferences = preferences { self.preferences = preferences }
@@ -1669,12 +1678,48 @@ final class ComputerPicker: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         let actions = stack([settingsButton, NSView(), cancel, connect], .horizontal, 8)
         let content = stack([heading, list, statusRow, fields, screenRow, actions], .vertical, 12)
         view.addSubview(content)
+        // The sidebar: known machines, as in the settings window. It takes the
+        // content's height, so it never changes how tall the window is.
+        machineSearch.placeholderString = "Search machines"
+        machineSearch.setAccessibilityLabel("Search known machines")
+        machineSearch.delegate = self
+        machineSearch.translatesAutoresizingMaskIntoConstraints = false
+        let machineColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("machine"))
+        machineColumn.title = "Machines"; machineColumn.width = 196; machineTable.addTableColumn(machineColumn)
+        machineTable.columnAutoresizingStyle = .firstColumnOnlyAutoresizingStyle
+        machineTable.frame = NSRect(x: 0, y: 0, width: 220, height: 60); machineTable.autoresizingMask = [.width]
+        machineTable.headerView = nil; machineTable.style = .sourceList; machineTable.rowHeight = 26
+        machineTable.delegate = self; machineTable.dataSource = self
+        machineTable.target = self; machineTable.doubleAction = #selector(connect)
+        machineTable.setAccessibilityLabel("Known Machines")
+        let machineScroll = NSScrollView()
+        machineScroll.translatesAutoresizingMaskIntoConstraints = false
+        machineScroll.hasVerticalScroller = true; machineScroll.borderType = .noBorder
+        machineScroll.drawsBackground = false
+        machineScroll.documentView = machineTable
+        let sidebar = NSVisualEffectView()
+        sidebar.material = .sidebar; sidebar.blendingMode = .withinWindow
+        sidebar.wantsLayer = true; sidebar.layer?.cornerRadius = 8; sidebar.layer?.masksToBounds = true
+        sidebar.translatesAutoresizingMaskIntoConstraints = false
+        sidebar.addSubview(machineSearch); sidebar.addSubview(machineScroll)
+        view.addSubview(sidebar)
         for row in [heading, list, statusRow, fields, screenRow, actions] { row.translatesAutoresizingMaskIntoConstraints = false }
         let listHeight = list.heightAnchor.constraint(equalToConstant: 66)
         self.listHeight = listHeight
         NSLayoutConstraint.activate([
-            view.widthAnchor.constraint(greaterThanOrEqualToConstant: 600),
-            content.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 20),
+            view.widthAnchor.constraint(greaterThanOrEqualToConstant: 840),
+            sidebar.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 12),
+            sidebar.topAnchor.constraint(equalTo: view.topAnchor, constant: 12),
+            sidebar.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -12),
+            sidebar.widthAnchor.constraint(equalToConstant: 220),
+            machineSearch.leadingAnchor.constraint(equalTo: sidebar.leadingAnchor, constant: 10),
+            machineSearch.trailingAnchor.constraint(equalTo: sidebar.trailingAnchor, constant: -10),
+            machineSearch.topAnchor.constraint(equalTo: sidebar.topAnchor, constant: 10),
+            machineScroll.leadingAnchor.constraint(equalTo: sidebar.leadingAnchor),
+            machineScroll.trailingAnchor.constraint(equalTo: sidebar.trailingAnchor),
+            machineScroll.topAnchor.constraint(equalTo: machineSearch.bottomAnchor, constant: 8),
+            machineScroll.bottomAnchor.constraint(equalTo: sidebar.bottomAnchor, constant: -6),
+            content.leadingAnchor.constraint(equalTo: sidebar.trailingAnchor, constant: 20),
             content.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -20),
             content.topAnchor.constraint(equalTo: view.topAnchor, constant: 20),
             content.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -20),
@@ -1698,7 +1743,7 @@ final class ComputerPicker: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         ])
         table.nextKeyView = address; address.nextKeyView = port
         port.nextKeyView = screen; screen.nextKeyView = connect; connect.nextKeyView = cancel; cancel.nextKeyView = refresh
-        refresh.nextKeyView = table
+        refresh.nextKeyView = machineSearch; machineSearch.nextKeyView = machineTable; machineTable.nextKeyView = table
         w.defaultButtonCell = connect.cell as? NSButtonCell
         window = w; restoreScreenPreference(); fitWindow()
         w.center(); w.makeKeyAndOrderFront(nil); w.makeFirstResponder(address)
@@ -1715,6 +1760,8 @@ final class ComputerPicker: NSObject, NSApplicationDelegate, NSWindowDelegate, N
                     self.configScreens = cmd["screens"] as? [String: String] ?? [:]
                     self.pinned = Set(cmd["pinned"] as? [String] ?? [])
                     self.defaultScreen = cmd["default_screen"] as? String ?? "mirror"
+                    self.machines = (cmd["machines"] as? [String] ?? []).reversed()
+                    self.filterMachines()
                     // Choices made in this window still win (sessionScreens).
                     self.preferenceTarget = nil; self.restoreScreenPreference()
                 }
@@ -1748,9 +1795,49 @@ final class ComputerPicker: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         window.contentMinSize = size
         if wasCompact { window.setContentSize(size) }
     }
-    func numberOfRows(in tableView: NSTableView) -> Int { rows.count }
-    func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? { ComputerPickerRow() }
+    /// The sidebar's rows: known machines matching its search field.
+    func filterMachines() {
+        let query = machineSearch.stringValue.trimmingCharacters(in: .whitespaces).lowercased()
+        shownMachines = query.isEmpty ? machines : machines.filter { $0.lowercased().contains(query) }
+        machineTable.reloadData()
+    }
+    /// Inline completion while typing forward at the end of the SSH Address:
+    /// the newest known machine that starts with what was typed fills in, with
+    /// the added part selected (type on to replace it, Tab or Return to keep
+    /// it). Deleting, or editing elsewhere in the text, completes nothing.
+    func autocompleteAddress() {
+        let typed = address.stringValue
+        let previous = lastTyped
+        lastTyped = typed
+        let length = (typed as NSString).length
+        guard length > (previous as NSString).length, let editor = address.currentEditor() as? NSTextView,
+              editor.selectedRange().location == length, editor.selectedRange().length == 0 else { return }
+        let lowered = typed.lowercased()
+        guard let match = machines.first(where: { ($0 as NSString).length > length && $0.lowercased().hasPrefix(lowered) }) else { return }
+        let rest = (match as NSString).substring(from: length)
+        address.stringValue = typed + rest
+        address.currentEditor()?.selectedRange = NSRange(location: length, length: (rest as NSString).length)
+    }
+    func numberOfRows(in tableView: NSTableView) -> Int { tableView === machineTable ? shownMachines.count : rows.count }
+    func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? { tableView === machineTable ? nil : ComputerPickerRow() }
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+        if tableView === machineTable {
+            guard shownMachines.indices.contains(row) else { return nil }
+            let cell = (tableView.makeView(withIdentifier: NSUserInterfaceItemIdentifier("machine"), owner: self) as? NSTableCellView) ?? {
+                let cell = NSTableCellView(); cell.identifier = NSUserInterfaceItemIdentifier("machine")
+                let text = self.label(""); text.lineBreakMode = .byTruncatingMiddle; text.translatesAutoresizingMaskIntoConstraints = false
+                cell.textField = text; cell.addSubview(text)
+                NSLayoutConstraint.activate([
+                    text.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 8),
+                    text.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -6),
+                    text.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
+                ])
+                return cell
+            }()
+            cell.textField?.stringValue = shownMachines[row]
+            cell.toolTip = shownMachines[row]
+            return cell
+        }
         guard rows.indices.contains(row) else { return nil }
         let computer = rows[row]
         let identifier = tableColumn!.identifier
@@ -1783,7 +1870,18 @@ final class ComputerPicker: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         return cell
     }
     func tableViewSelectionDidChange(_ notification: Notification) {
+        if notification.object as? NSTableView === machineTable {
+            // A known machine: its address on the default port; the screen
+            // follows that machine's settings.
+            guard shownMachines.indices.contains(machineTable.selectedRow) else { return }
+            selectedID = nil; table.deselectAll(nil)
+            address.stringValue = shownMachines[machineTable.selectedRow]; port.stringValue = "22"
+            lastTyped = address.stringValue
+            restoreScreenPreference()
+            return
+        }
         guard !updating, rows.indices.contains(table.selectedRow) else { return }
+        machineTable.deselectAll(nil)
         let computer = rows[table.selectedRow]; selectedID = computer.id
         address.stringValue = computer.address; port.stringValue = String(computer.port)
         restoreScreenPreference()
@@ -1819,7 +1917,11 @@ final class ComputerPicker: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         updateScreenDetail()
     }
     @objc func openSettings(_ sender: Any?) { event(["type": "open_settings"]) }
-    func controlTextDidChange(_ note: Notification) { restoreScreenPreference() }
+    func controlTextDidChange(_ note: Notification) {
+        if note.object as? NSSearchField === machineSearch { filterMachines(); return }
+        if note.object as? NSTextField === address { autocompleteAddress() }
+        restoreScreenPreference()
+    }
     @objc func refresh(_ sender: Any?) { nearby.start() }
     func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
         if commandSelector == #selector(NSResponder.insertNewline(_:)) { connect(nil); return true }

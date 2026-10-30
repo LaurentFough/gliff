@@ -102,6 +102,26 @@ Timer.scheduledTimer(withTimeInterval:0.4,repeats:false) { _ in
     picker.address.stringValue="tester@keyboard.example";picker.port.stringValue="2222";picker.restoreScreenPreference()
     precondition(picker.screenMode=="private","A choice made in the window was lost")
     diagnostic("SETTINGS PASS: saved screens, defaults, UserDefaults migration and in-window choices")
+    // Known machines: the sidebar lists and filters them, choosing one fills
+    // the address, and typing completes from them (deleting keeps the typed part).
+    picker.machines=["old@host.example","xoot@10.0.8.44","xoot@lorax.example"]
+    picker.filterMachines()
+    precondition(picker.machineTable.numberOfRows==3,"Known machines were not listed")
+    picker.machineSearch.stringValue="xoot";picker.filterMachines()
+    precondition(picker.machineTable.numberOfRows==2,"Machine search did not filter")
+    picker.machineSearch.stringValue="";picker.filterMachines()
+    picker.machineTable.selectRowIndexes(IndexSet(integer:0),byExtendingSelection:false)
+    precondition(picker.address.stringValue=="old@host.example" && picker.port.stringValue=="22","Choosing a known machine did not fill the address")
+    picker.address.stringValue="";picker.lastTyped=""
+    window.makeFirstResponder(picker.address)
+    let editor=picker.address.currentEditor() as! NSTextView
+    editor.insertText("xoot@10",replacementRange:editor.selectedRange())
+    precondition(picker.address.stringValue=="xoot@10.0.8.44","Typing did not complete a known machine")
+    editor.deleteBackward(nil)
+    precondition(picker.address.stringValue=="xoot@10","Deleting the completion brought it back")
+    picker.address.stringValue="tester@keyboard.example";picker.port.stringValue="2222";picker.restoreScreenPreference()
+    precondition(picker.screenMode=="private","The window's choice was lost after using known machines")
+    diagnostic("MACHINES PASS: sidebar list and search, choosing fills the address, typing completes")
     window.makeFirstResponder(picker.address)
     let tab=NSEvent.keyEvent(with:.keyDown,location:.zero,modifierFlags:[],timestamp:0,windowNumber:window.windowNumber,context:nil,characters:"\\t",charactersIgnoringModifiers:"\\t",isARepeat:false,keyCode:48)!
     window.sendEvent(tab)

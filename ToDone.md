@@ -106,6 +106,12 @@ Merged into the working branch on 2026-10-29, still on the fork until deleted (s
 - **Reconnect:** a failed or dropped session shows its error with a Reconnect button (and Machine ▸ Reconnect). Sessions that had connected retry automatically, 5 × 1.5 s as on Linux; a failed first connect waits, so SSH prompts do not repeat; incompatible servers are never retried.
 - Bridge: packet kind 6 (TARGET window), events carry `"window"`; the Rust `Hub` routes them.
 
+### Known machines in the connection window (on `feature/macos-picker-machines`; testing pending)
+
+- A sidebar in the connection window (at launch and for File ▸ New Tab) lists the config's `machines`, newest first, with a search field; choosing one fills the address and its screen; double-click connects.
+- The SSH Address field completes inline from the same list while typing forward; deleting keeps the typed part.
+- The client sends `machines` with `machine_settings` (test extended); the picker check covers the list, search, choosing and completion.
+
 ### Docs
 
 - `ForkNews.md` (the short list of what the fork adds, also near the top of the README), README fork notes, `docs/macos.md`, `docs/settings.md`, and the crate list in `docs/architecture.md`.
@@ -141,6 +147,8 @@ Support today:
 - [x] Tabs on the Mac: merged 2026-10-29 (one viewer process for every connection); several connections in tabs tested 2026-10-30; the rest under Deferred testing.
 - [x] Reconnect for dead sessions on the Mac: merged 2026-10-29; testing tabled, see Deferred testing.
 - [ ] Viewer and client CPU use and frame rate in a live GPU session (Activity Monitor).
+- [ ] Test the connection window's known machines: the sidebar lists past machines and filters by search; choosing fills the address; double-click connects; typing completes; File ▸ New Tab shows the same.
+- [ ] Discovery on the Mac shows nothing (reported 2026-10-30). Diagnose with docs/macos.md "When nothing is found": `dns-sd -B _gliff._tcp local.` on the Mac, Local Network permission (also for the terminal when started from one), `gliff-discovery` and Avahi on the host, and whether the hosts are on the same LAN (not Tailscale/VPN).
 - [ ] An iOS/iPadOS client: plan, effort and open decisions in [docs/ios-ipados-plan.md](docs/ios-ipados-plan.md) (Phase 0 spike first).
 
 ### Repo housekeeping
@@ -162,6 +170,9 @@ Support today:
 ## Log
 
 Newest first. Format: `### YYYY-MM-DD — summary (commit)`, then a line or two.
+
+### 2026-10-30 — Connection window: known machines and autocomplete (`feature/macos-picker-machines`)
+Sidebar of past machines (search, choose, double-click to connect) and inline autocomplete of the SSH address from the config's `machines`, also in File ▸ New Tab. Discovery not finding hosts: the browse code matches what Linux advertises; docs/macos.md gains "When nothing is found" (dns-sd, Local Network permission incl. terminal launches, Avahi, LAN-only mDNS).
 
 ### 2026-10-30 — Mac tabs: several connections at once tested
 Several machines connected at the same time, each in its own tab, work as implemented. ForkNews.md and the README's fork features and status now say so; the remaining tab checks (sound following the visible tab, drag and merge, Machine menu, clipboard, restore at launch) and Mac reconnect stay under Deferred testing.

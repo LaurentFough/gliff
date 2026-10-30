@@ -169,6 +169,37 @@ with a nonstandard port, use `gliff --port 2222 user@host`.
 Bonjour discovery is local to the LAN. Enter an SSH address manually for
 routed networks, jump hosts and VPN-only peers.
 
+### Known machines and autocomplete
+
+The connection window (at launch, and for File ▸ New Tab) lists every machine
+you have connected to, newest first, in a sidebar with a search field: the
+`machines` list in `config.toml`. Choosing one fills the SSH address (port 22)
+and the screen it is set to; double-click connects. Typing in **SSH Address**
+completes from the same list: the rest of the newest matching machine is
+filled in and selected, so typing on replaces it and Tab or Return keeps it.
+Deleting never brings a completion back.
+
+### When nothing is found
+
+Work from the bottom up; each step separates one cause:
+
+1. **On the Mac, outside Gliff:** `dns-sd -B _gliff._tcp local.` (Ctrl+C to
+   stop). Nothing listed means the advertisements do not reach the Mac at
+   all: go to step 3.
+2. **Listed there, but not in Gliff:** Local Network access. In System
+   Settings ▸ Privacy & Security ▸ Local Network, allow **Gliff**. When Gliff
+   is started from a terminal (`~/.local/bin/gliff`), macOS asks on behalf of
+   that terminal app instead, so allow it there too, or open the app.
+   `gliff --discover` prints what Gliff itself sees.
+3. **On the Linux host:** `systemctl --user status gliff-discovery` (enable
+   it with `gliff-enable-discovery`, or `make discovery` in a checkout),
+   `systemctl status avahi-daemon`, and `avahi-browse -rt _gliff._tcp` to see
+   the host's own advertisement. A firewall must allow mDNS (UDP 5353).
+4. **The network:** mDNS stays on one LAN segment. Machines reached over
+   Tailscale, Headscale, WireGuard or another routed or VPN link are never
+   discovered this way; they appear in the known-machines list once you have
+   connected by address.
+
 ## Host the Mac
 
 On the Mac, choose **Gliff → Enable Remote Control…**, or run:
