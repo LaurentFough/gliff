@@ -47,6 +47,10 @@ This fork ([LaurentFough/gliff](https://github.com/LaurentFough/gliff)) builds o
 
 The new features are outlined in red.
 
+**Connection window:** known machines in a sidebar (search, **+** to add, **−** to forget); the SSH Address field autocompletes from them.
+
+<img src="docs/images/macos-connect-machines.png" width="871" alt="Connect to a Computer window with the known-machines sidebar and the SSH Address field">
+
 **Tabs:** two connections in one window, one outline each; **+** or File ▸ New Tab adds another.
 
 ![Two Gliff tabs, one per machine, with the + button](docs/images/macos-tabs.png)

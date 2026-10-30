@@ -183,6 +183,9 @@ Support today:
 
 Newest first. Format: `### YYYY-MM-DD — summary (commit)`, then a line or two.
 
+### 2026-10-30 — Screenshot: connection window with known machines
+The sidebar (search, list, + / −) and the autocompleting SSH Address field outlined; host name replaced with a placeholder.
+
 ### 2026-10-30 — Screenshots: red outlines, one per tab
 Outlines are now macOS systemRed (#FF3B30); the tabs shot has one box per tab (per connection).
 
