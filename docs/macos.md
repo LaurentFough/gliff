@@ -213,9 +213,16 @@ logical display coordinates. macOS hosts mirror physical screens and reject
 
 ## Current differences from Linux
 
-- Native AppKit window with one connection per window. The Linux client's
-  recent-host tabs and Omarchy theme are not yet in the macOS client.
-  Settings changes that need a new session reconnect in the same window.
+- **Tabs.** Each connection is a native macOS window tab: the tab bar's
+  **+** or File ▸ New Tab (⌘T while the pointer is off the picture) opens the
+  connection window for another machine; drag a tab out for its own window,
+  or Window ▸ Merge All Windows to gather them. Every tab stays connected;
+  only a tab you can see plays sound (its host stops recording otherwise),
+  and the Mac's clipboard is offered to the active tab's machine. The tabs
+  open when Gliff quits reopen at the next launch (`[[open_tabs]]` in
+  `config.toml`); closing a tab forgets it. A machine named on the command
+  line opens alone. The Linux client's Omarchy theme is not in the macOS
+  client. Settings changes that need a new session reconnect in the same tab.
 - A session that fails or drops shows its error with a **Reconnect** button
   (or Machine ▸ Reconnect). A session that had connected is retried
   automatically, as on Linux: up to 5 times, 1.5 s apart. A first connection

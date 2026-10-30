@@ -24,6 +24,10 @@ func packet(_ kind: UInt8, _ data: Data) {
 func event(_ value: [String: Any]) {
     if let data = try? JSONSerialization.data(withJSONObject: value) { packet(2, data) }
 }
+// An event for one viewer window (tab); the client routes it by "window".
+func event(_ value: [String: Any], window: UInt32) {
+    var tagged = value; tagged["window"] = window; event(tagged)
+}
 func diagnostic(_ text: String) {
     FileHandle.standardError.write(Data((text + "\n").utf8))
 }
@@ -115,14 +119,19 @@ func keyboardLayout(_ identifier: String? = nil) -> [String: Any]? {
 // resolves the wait directly, so a paste callback on the main thread can wait.
 final class PasteProvider: NSObject, NSPasteboardItemDataProvider {
     let serial: UInt32
+    // The viewer window whose machine offered the text (nil outside the viewer).
+    let window: UInt32?
     let condition = NSCondition()
     var text: String?
     var finished = false
     var requested = false
-    init(_ serial: UInt32) { self.serial = serial }
+    init(_ serial: UInt32, _ window: UInt32?) { self.serial = serial; self.window = window }
     func pasteboard(_ pasteboard: NSPasteboard?, item: NSPasteboardItem, provideDataForType type: NSPasteboard.PasteboardType) {
         condition.lock()
-        if !requested { requested = true; event(["type": "paste", "serial": serial]) }
+        if !requested {
+            requested = true
+            if let window = window { event(["type": "paste", "serial": serial], window: window) } else { event(["type": "paste", "serial": serial]) }
+        }
         let deadline = Date(timeIntervalSinceNow: 30)
         while !finished { if !condition.wait(until: deadline) { break } }
         let value = text
@@ -137,6 +146,9 @@ final class PasteProvider: NSObject, NSPasteboardItemDataProvider {
 final class Clipboard {
     var provider: PasteProvider?
     var observed = Int.min
+    // The viewer offers the Mac's clipboard only to the active tab's machine,
+    // as on Linux; nil (the host side) sends events without a window.
+    var localWindow: () -> UInt32? = { nil }
     var timer: Timer?
     let lock = NSLock()
     func start() {
@@ -148,22 +160,31 @@ final class Clipboard {
         observed = pb.changeCount
         lock.lock(); provider = nil; lock.unlock()
         let text = pb.string(forType: .string)
-        event(["type": "clipboard", "text": (text.map { $0.utf8.count <= 1024*1024 ? $0 : "" } as Any?) ?? NSNull()])
+        let value: [String: Any] = ["type": "clipboard", "text": (text.map { $0.utf8.count <= 1024*1024 ? $0 : "" } as Any?) ?? NSNull()]
+        if let window = localWindow() { event(value, window: window) } else { event(value) }
+    }
+    // A tab became active: offer its machine what is on the clipboard now,
+    // unless that is text a machine offered (reading it would wait on a paste
+    // request to that machine).
+    func reoffer() {
+        lock.lock(); let remote = provider != nil; lock.unlock()
+        if remote { return }
+        observed = Int.min; poll()
     }
     // Called on the pipe reader, including while the main thread is pasting.
-    func receive(_ cmd: [String: Any]) -> Bool {
+    func receive(_ cmd: [String: Any], window: UInt32? = nil) -> Bool {
         guard cmd["type"] as? String == "clipboard_data" else { return false }
         lock.lock(); let p = provider; lock.unlock()
-        if cmd["serial"] as? UInt32 == p?.serial { p?.receive(cmd) }
+        if cmd["serial"] as? UInt32 == p?.serial && p?.window == window { p?.receive(cmd) }
         return true
     }
-    func command(_ cmd: [String: Any]) {
+    func command(_ cmd: [String: Any], window: UInt32? = nil) {
         guard cmd["type"] as? String == "clipboard_offer" else { return }
         let pb = NSPasteboard.general
         pb.clearContents()
         lock.lock()
         if cmd["text"] as? Bool == true, let serial = cmd["serial"] as? UInt32 {
-            let p = PasteProvider(serial); let item = NSPasteboardItem()
+            let p = PasteProvider(serial, window); let item = NSPasteboardItem()
             item.setDataProvider(p, forTypes: [.string]); provider = p
             pb.writeObjects([item])
         } else { provider = nil }
@@ -862,6 +883,8 @@ final class GPUPresenter {
 /// acknowledges the frame to the server) or `decode_error`.
 final class GPUVideo {
     let device: MTLDevice
+    /// The viewer window this decoder belongs to; its events carry it.
+    var window: UInt32 = 0
     private let recombiner: Recombiner
     private var pipeline: FramePipeline?
     private let lock = NSLock()
@@ -893,14 +916,14 @@ final class GPUVideo {
 
     /// Packet: frame_id u64 LE, main_len u32 LE, aux_len u32 LE, main, aux.
     func decode(packet data: Data) {
-        guard data.count >= 16 else { event(["type": "decode_error", "message": "short packet"]); return }
+        guard data.count >= 16 else { event(["type": "decode_error", "message": "short packet"], window: window); return }
         let id = UInt64(number(data, 0)) | UInt64(number(data, 4)) << 32
         let mainLen = Int(number(data, 8)), auxLen = Int(number(data, 12))
         guard 16 + mainLen + auxLen == data.count else {
-            event(["type": "decode_error", "frame_id": id, "message": "packet lengths disagree"]); return
+            event(["type": "decode_error", "frame_id": id, "message": "packet lengths disagree"], window: window); return
         }
         guard let pipeline = pipeline else {
-            event(["type": "decode_error", "frame_id": id, "message": "video before configuration"]); return
+            event(["type": "decode_error", "frame_id": id, "message": "video before configuration"], window: window); return
         }
         let base = data.startIndex
         let main = data.subdata(in: (base + 16)..<(base + 16 + mainLen))
@@ -915,9 +938,9 @@ final class GPUVideo {
                 if GPUVideo.probing { reply["probe"] = probe(frame.texture) }
                 post(frame)
             }
-            event(reply)
+            event(reply, window: window)
         } catch {
-            event(["type": "decode_error", "frame_id": id, "message": "\(error)"])
+            event(["type": "decode_error", "frame_id": id, "message": "\(error)"], window: window)
         }
     }
 
@@ -993,6 +1016,9 @@ final class RemoteView: NSView {
     var released = false
     var hovering = false
     var message = "Connecting…"
+    /// This view's window (tab) id: its events carry it.
+    var tab: UInt32 = 0
+    func send(_ value: [String: Any]) { event(value, window: tab) }
     // Shown under the message when a session failed or dropped; sends "reconnect".
     let reconnectButton = NSButton(title: "Reconnect", target: nil, action: nil)
     func showReconnect(_ show: Bool) {
@@ -1057,15 +1083,15 @@ final class RemoteView: NSView {
         }
     }
     func release() {
-        for key in pressed { event(["type": "key", "keycode": key, "pressed": false]) }
-        for button in buttons { event(["type": "button", "button": button, "pressed": false]) }
+        for key in pressed { send(["type": "key", "keycode": key, "pressed": false]) }
+        for button in buttons { send(["type": "button", "button": button, "pressed": false]) }
         pressed.removeAll(); buttons.removeAll()
     }
     func key(_ e: NSEvent, _ down: Bool) {
         if down && e.keyCode == 53 && e.modifierFlags.contains(.shift) { release(); released = true; return }
         guard hovering, !released, !e.isARepeat else { return }
         if down { pressed.insert(e.keyCode) } else { pressed.remove(e.keyCode) }
-        event(["type": "key", "keycode": e.keyCode, "pressed": down])
+        send(["type": "key", "keycode": e.keyCode, "pressed": down])
     }
     override func keyDown(with e: NSEvent) { key(e, true) }
     override func keyUp(with e: NSEvent) { key(e, false) }
@@ -1074,8 +1100,8 @@ final class RemoteView: NSView {
         // Caps Lock sends flagsChanged on both toggle directions, rather than
         // ordinary key-down/up events. Each transition must toggle the host.
         if e.keyCode == 57 {
-            event(["type": "key", "keycode": 57, "pressed": true])
-            event(["type": "key", "keycode": 57, "pressed": false])
+            send(["type": "key", "keycode": 57, "pressed": true])
+            send(["type": "key", "keycode": 57, "pressed": false])
             return
         }
         let mask: NSEvent.ModifierFlags
@@ -1088,7 +1114,7 @@ final class RemoteView: NSView {
         }
         let down = e.modifierFlags.contains(mask) && !pressed.contains(e.keyCode)
         if down { pressed.insert(e.keyCode) } else { pressed.remove(e.keyCode) }
-        event(["type": "key", "keycode": e.keyCode, "pressed": down])
+        send(["type": "key", "keycode": e.keyCode, "pressed": down])
     }
     func motion(_ e: NSEvent) {
         let p = convert(e.locationInWindow, from: nil), r = pictureRect
@@ -1098,7 +1124,7 @@ final class RemoteView: NSView {
             return
         }
         hovering = true
-        event(["type": "motion", "x": (p.x-r.minX)/r.width*Double(size.width)/scale, "y": (p.y-r.minY)/r.height*Double(size.height)/scale])
+        send(["type": "motion", "x": (p.x-r.minX)/r.width*Double(size.width)/scale, "y": (p.y-r.minY)/r.height*Double(size.height)/scale])
     }
     override func mouseMoved(with e: NSEvent) { motion(e) }
     override func mouseDragged(with e: NSEvent) { motion(e) }
@@ -1108,7 +1134,7 @@ final class RemoteView: NSView {
     override func mouseExited(with e: NSEvent) { hovering = false; release() }
     func button(_ e: NSEvent, _ down: Bool) {
         if down { hovering = true; released = false; window?.makeFirstResponder(self); buttons.insert(e.buttonNumber) } else { buttons.remove(e.buttonNumber) }
-        motion(e); event(["type": "button", "button": e.buttonNumber, "pressed": down])
+        motion(e); send(["type": "button", "button": e.buttonNumber, "pressed": down])
     }
     override func mouseDown(with e: NSEvent) { button(e, true) }
     override func mouseUp(with e: NSEvent) { button(e, false) }
@@ -1119,40 +1145,70 @@ final class RemoteView: NSView {
     override func scrollWheel(with e: NSEvent) {
         guard pictureRect.contains(convert(e.locationInWindow, from: nil)) else { return }
         let factor = e.hasPreciseScrollingDeltas ? 1.0 : 10.0
-        if e.scrollingDeltaY != 0 { event(["type": "axis", "horizontal": false, "value": -e.scrollingDeltaY * factor]) }
-        if e.scrollingDeltaX != 0 { event(["type": "axis", "horizontal": true, "value": -e.scrollingDeltaX * factor]) }
+        if e.scrollingDeltaY != 0 { send(["type": "axis", "horizontal": false, "value": -e.scrollingDeltaY * factor]) }
+        if e.scrollingDeltaX != 0 { send(["type": "axis", "horizontal": true, "value": -e.scrollingDeltaX * factor]) }
     }
 }
 
-final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
-    let view = RemoteView()
+// One viewer window (a tab) and the connection the client runs for it. Made
+// on the bridge reader thread when the client opens it (its decoder, so video
+// for a new window never waits for the main thread); its window and view are
+// made on the main thread right after. Window 0 is the one opened at launch.
+final class Tab {
+    let id: UInt32
+    // Hardware decode (VideoToolbox + Metal) when this Mac has it; the client
+    // then sends coded video (kind 5) instead of BGRA pixels (kind 1).
+    let gpu: GPUVideo?
+    var view: RemoteView!
     var window: NSWindow?
+    // The last machine_state the client sent: the Machine menu shows the
+    // active tab's.
+    var state: [String: Any] = [:]
+    var pending: Data?
+    let pendingLock = NSLock()
+    var drawing = false
+    var painted = false
+    init(id: UInt32) {
+        self.id = id
+        gpu = GPUVideo.make()
+        gpu?.window = id
+    }
+    var shareClipboard: Bool { state["clipboard"] as? Bool != false }
+    var playSound: Bool { state["sound"] as? Bool != false }
+}
+
+final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
+    // Every open window, by id; read on the bridge reader thread too.
+    private let tabsLock = NSLock()
+    private var tabs: [UInt32: Tab] = [:]
+    // Reader thread only: the window the next packets are for (kind 6).
+    private var target: UInt32 = 0
+    // The tab that last became key: the Machine menu and the local clipboard
+    // follow it.
+    private var activeTab: UInt32 = 0
     // The Machine menu: the everyday per-machine choices, saved through the
     // client like the settings window (see crates/gliff-macos/src/settings.rs).
     let mirrorItem = NSMenuItem(title: "Mirror Screen", action: #selector(App.mirrorScreen), keyEquivalent: "")
     let privateItem = NSMenuItem(title: "Private Screen", action: #selector(App.privateScreen), keyEquivalent: "")
     let clipboardItem = NSMenuItem(title: "Share Clipboard", action: #selector(App.toggleClipboard), keyEquivalent: "")
-    var shareClipboard = true
     // Machine > Play Sound: the shared mute switch; enabled when the host sends sound.
     let soundItem = NSMenuItem(title: "Play Sound", action: #selector(App.toggleSound), keyEquivalent: "")
-    var playSound = true
-    // Hardware decode (VideoToolbox + Metal) when this Mac has it; the
-    // client then sends coded video (kind 5) instead of BGRA pixels (kind 1).
-    let gpu = GPUVideo.make()
-    var pending: Data?
-    let pendingLock = NSLock()
-    var drawing = false
-    var painted = false
+
+    func tab(_ id: UInt32) -> Tab? { tabsLock.lock(); defer { tabsLock.unlock() }; return tabs[id] }
+    func tab(for window: NSWindow?) -> Tab? {
+        guard let window = window else { return nil }
+        tabsLock.lock(); defer { tabsLock.unlock() }
+        return tabs.values.first { $0.window === window }
+    }
+    var keyTab: Tab? { tab(for: NSApp.keyWindow) ?? tab(activeTab) }
+    var tabCount: Int { tabsLock.lock(); defer { tabsLock.unlock() }; return tabs.count }
+
     func applicationDidFinishLaunching(_ note: Notification) {
+        let first = Tab(id: 0)
+        tabsLock.lock(); tabs[0] = first; tabsLock.unlock()
         // The client reads this first, before it says Hello (it decides the
         // chroma it asks for and how it sends frames).
-        if let gpu = gpu, let presenter = try? GPUPresenter(device: gpu.device) {
-            view.presenter = presenter
-            gpu.onFrame = { [weak self] frame in self?.showGPU(frame) }
-            event(["type": "video_caps", "hardware": true])
-        } else {
-            event(["type": "video_caps", "hardware": false])
-        }
+        event(["type": "video_caps", "hardware": first.gpu != nil])
         let menu = NSMenu(); let appItem = NSMenuItem(); menu.addItem(appItem)
         let appMenu = NSMenu(); appItem.submenu = appMenu
         let hosting = appMenu.addItem(withTitle: "Enable Remote Control…", action: #selector(App.requestHostPermissions), keyEquivalent: "")
@@ -1161,6 +1217,11 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
         settings.target = self
         appMenu.addItem(NSMenuItem.separator())
         appMenu.addItem(withTitle: "Quit Gliff", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        let fileItem = NSMenuItem(); menu.addItem(fileItem)
+        let fileMenu = NSMenu(title: "File"); fileItem.submenu = fileMenu
+        let newTab = fileMenu.addItem(withTitle: "New Tab", action: #selector(App.newWindowForTab(_:)), keyEquivalent: "t")
+        newTab.target = self
+        fileMenu.addItem(withTitle: "Close Tab", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
         let machineItem = NSMenuItem(); menu.addItem(machineItem)
         let machineMenu = NSMenu(title: "Machine"); machineItem.submenu = machineMenu
         // Enabled state is set from machine_state (screen_locked), not validation.
@@ -1172,132 +1233,225 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
         machineMenu.addItem(NSMenuItem.separator())
         let reconnect = machineMenu.addItem(withTitle: "Reconnect", action: #selector(App.reconnect), keyEquivalent: "")
         reconnect.target = self
-        view.reconnectButton.target = self; view.reconnectButton.action = #selector(App.reconnect)
-        view.reconnectButton.bezelStyle = .rounded; view.reconnectButton.isHidden = true
-        view.addSubview(view.reconnectButton)
+        // The Window menu: AppKit adds the tab commands (Show Tab Bar, Merge
+        // All Windows, Move Tab to New Window) and the window list.
+        let windowItem = NSMenuItem(); menu.addItem(windowItem)
+        let windowMenu = NSMenu(title: "Window"); windowItem.submenu = windowMenu
+        windowMenu.addItem(withTitle: "Minimize", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
         NSApplication.shared.mainMenu = menu
-        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1100, height: 720), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
-        w.title = CommandLine.arguments.dropFirst(2).first ?? "Gliff"
-        w.contentView = view; w.delegate = self; w.acceptsMouseMovedEvents = true
-        w.center(); w.makeKeyAndOrderFront(nil); w.makeFirstResponder(view); window = w
+        NSApplication.shared.windowsMenu = windowMenu
+        makeWindow(first, title: CommandLine.arguments.dropFirst(2).first ?? "Gliff")
         NSApplication.shared.activate(ignoringOtherApps: true)
+        clipboard.localWindow = { [weak self] in self?.keyTab?.id }
         clipboard.start()
         keyboardLayoutChanged(nil)
         DistributedNotificationCenter.default().addObserver(self, selector: #selector(keyboardLayoutChanged(_:)), name: Notification.Name(kTISNotifySelectedKeyboardInputSourceChanged as String), object: nil)
-        resizeEvent()
         NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .keyUp]) { [weak self] e in
-            guard let self = self, self.window?.isKeyWindow == true, !self.view.released, self.view.hovering, self.view.hasPicture else { return e }
-            self.view.key(e, e.type == .keyDown); return nil
+            guard let tab = self?.tab(for: NSApp.keyWindow), !tab.view.released, tab.view.hovering, tab.view.hasPicture else { return e }
+            tab.view.key(e, e.type == .keyDown); return nil
         }
-        readCommands { [weak self] kind, data in
-            guard let self = self else { return }
-            if kind == 5 {
-                // Coded video: decode here, on the reader thread, in order.
-                if let gpu = self.gpu { gpu.decode(packet: data) } else { event(["type": "gpu_failed", "message": "no hardware decoder"]) }
+        readCommands { [weak self] kind, data in self?.command(kind, data) }
+    }
+
+    /// A tab's window and view, joined to the front window's tab group.
+    func makeWindow(_ tab: Tab, title: String) {
+        let view = RemoteView(); view.tab = tab.id
+        if let gpu = tab.gpu {
+            if let presenter = try? GPUPresenter(device: gpu.device) {
+                view.presenter = presenter
+                gpu.onFrame = { [weak self, weak tab] frame in if let tab = tab { self?.showGPU(frame, tab) } }
+            } else {
+                event(["type": "gpu_failed", "message": "no Metal layer"], window: tab.id)
+            }
+        }
+        view.reconnectButton.target = self; view.reconnectButton.action = #selector(App.reconnectClicked(_:))
+        view.reconnectButton.bezelStyle = .rounded; view.reconnectButton.isHidden = true
+        view.addSubview(view.reconnectButton)
+        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1100, height: 720), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
+        w.title = title
+        w.subtitle = "Shift+Esc releases keyboard"
+        w.contentView = view; w.delegate = self; w.acceptsMouseMovedEvents = true
+        w.isReleasedWhenClosed = false
+        w.tabbingMode = .preferred; w.tabbingIdentifier = "gliff-viewer"
+        let front = keyTab?.window ?? NSApp.windows.first { $0.isVisible && $0.tabbingIdentifier == "gliff-viewer" }
+        tab.view = view; tab.window = w
+        if let front = front, front !== w {
+            front.addTabbedWindow(w, ordered: .above)
+        } else {
+            w.center()
+        }
+        w.makeKeyAndOrderFront(nil); w.makeFirstResponder(view)
+        resizeEvent(tab)
+    }
+
+    /// One packet from the client, on the bridge reader thread.
+    func command(_ kind: UInt8, _ data: Data) {
+        if kind == 6 {
+            if data.count >= 4 { target = number(data, 0) }
+            return
+        }
+        let id = target
+        if kind == 2 {
+            let cmd = json(data)
+            if cmd["type"] as? String == "open_window" {
+                let tab = Tab(id: id)
+                tabsLock.lock(); tabs[id] = tab; tabsLock.unlock()
+                let title = cmd["title"] as? String ?? "Gliff"
+                DispatchQueue.main.async { self.makeWindow(tab, title: title) }
                 return
             }
-            if kind == 1 {
-                self.pendingLock.lock(); self.pending = data
-                let schedule = !self.drawing; self.drawing = true; self.pendingLock.unlock()
-                if schedule { DispatchQueue.main.async { autoreleasepool { self.drawPending() } } }
-            } else {
-                let cmd = json(data)
-                if clipboard.receive(cmd) { return }
-                if cmd["type"] as? String == "video_config" { self.configureVideo(cmd); return }
-                DispatchQueue.main.async {
-                    clipboard.command(cmd)
-                    if cmd["type"] as? String == "cursor_mode" { self.view.cursorInVideo = cmd["embedded"] as? Bool == true }
-                    // Pointer scale for the GPU path (the CPU path gets it with each frame).
-                    if cmd["type"] as? String == "video_scale", let milli = cmd["scale_milli"] as? Int, milli > 0 { self.view.scale = Double(milli) / 1000 }
-                    if cmd["type"] as? String == "machine_state" { self.applyMachineState(cmd) }
-                    if cmd["type"] as? String == "report_size" { self.resizeEvent() }
-                    if let message = cmd["message"] as? String {
-                        self.view.message = message; self.view.image = nil
-                        self.view.presenter?.current = nil; self.view.gpuSize = nil; self.view.needsDisplay = true
-                        self.view.showReconnect(cmd["reconnect"] as? Bool == true)
-                    }
-                    if let text = cmd["clipboard"] as? String { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(text, forType: .string) }
-                }
-            }
+            // A closed tab's last packets.
+            guard let tab = tab(id) else { return }
+            if clipboard.receive(cmd, window: id) { return }
+            if cmd["type"] as? String == "video_config" { configureVideo(cmd, tab); return }
+            DispatchQueue.main.async { self.apply(cmd, tab) }
+            return
+        }
+        guard let tab = tab(id) else { return }
+        if kind == 5 {
+            // Coded video: decode here, on the reader thread, in order.
+            if let gpu = tab.gpu { gpu.decode(packet: data) } else { event(["type": "gpu_failed", "message": "no hardware decoder"], window: id) }
+            return
+        }
+        if kind == 1 {
+            tab.pendingLock.lock(); tab.pending = data
+            let schedule = !tab.drawing; tab.drawing = true; tab.pendingLock.unlock()
+            if schedule { DispatchQueue.main.async { autoreleasepool { self.drawPending(tab) } } }
         }
     }
+
+    /// A JSON command for one tab, on the main thread.
+    func apply(_ cmd: [String: Any], _ tab: Tab) {
+        guard let view = tab.view else { return }
+        clipboard.command(cmd, window: tab.id)
+        if cmd["type"] as? String == "cursor_mode" { view.cursorInVideo = cmd["embedded"] as? Bool == true }
+        // Pointer scale for the GPU path (the CPU path gets it with each frame).
+        if cmd["type"] as? String == "video_scale", let milli = cmd["scale_milli"] as? Int, milli > 0 { view.scale = Double(milli) / 1000 }
+        if cmd["type"] as? String == "machine_state" { tab.state = cmd; if tab.id == keyTab?.id { showMachineState(cmd) } }
+        if cmd["type"] as? String == "report_size" { resizeEvent(tab) }
+        if let message = cmd["message"] as? String {
+            view.message = message; view.image = nil
+            view.presenter?.current = nil; view.gpuSize = nil; view.needsDisplay = true
+            view.showReconnect(cmd["reconnect"] as? Bool == true)
+        }
+        if let text = cmd["clipboard"] as? String { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(text, forType: .string) }
+    }
+
     /// A new coded stream: size and whether an auxiliary (Dual420) stream
     /// comes with it. Runs on the reader thread, ahead of that stream's frames.
-    func configureVideo(_ cmd: [String: Any]) {
-        guard let gpu = gpu else { event(["type": "gpu_failed", "message": "no hardware decoder"]); return }
+    func configureVideo(_ cmd: [String: Any], _ tab: Tab) {
+        guard let gpu = tab.gpu else { event(["type": "gpu_failed", "message": "no hardware decoder"], window: tab.id); return }
         let width = cmd["width"] as? Int ?? 0, height = cmd["height"] as? Int ?? 0
         let dual = cmd["dual"] as? Bool == true
         let scale = Double(cmd["scale_milli"] as? Int ?? 1000) / 1000
         do {
             try gpu.configure(width: width, height: height, dual: dual)
-            DispatchQueue.main.async { self.view.scale = scale }
+            DispatchQueue.main.async { tab.view?.scale = scale }
             let chroma = dual ? "4:4:4" : "4:2:0"
             diagnostic("Gliff video: VideoToolbox + Metal, \(width)x\(height) \(chroma)")
         } catch {
-            event(["type": "gpu_failed", "message": "\(error)"])
+            event(["type": "gpu_failed", "message": "\(error)"], window: tab.id)
         }
     }
-    func showGPU(_ frame: GPUFrame) {
+    func showGPU(_ frame: GPUFrame, _ tab: Tab) {
+        guard let view = tab.view else { return }
         if view.image != nil { view.image = nil }
         view.showReconnect(false)
         view.presenter?.current = frame
         let size = CGSize(width: frame.texture.width, height: frame.texture.height)
         if view.gpuSize != size { view.gpuSize = size; view.needsDisplay = true } else { view.presenter?.draw() }
-        if !painted { painted = true; diagnostic("Gliff displayed first frame: \(frame.texture.width)x\(frame.texture.height) (GPU)") }
+        if !tab.painted { tab.painted = true; diagnostic("Gliff displayed first frame: \(frame.texture.width)x\(frame.texture.height) (GPU)") }
     }
-    func applyMachineState(_ cmd: [String: Any]) {
-        let privateScreen = cmd["screen"] as? String == "private"
-        let locked = cmd["screen_locked"] as? Bool == true
-        mirrorItem.state = privateScreen ? .off : .on
-        privateItem.state = privateScreen ? .on : .off
-        mirrorItem.isEnabled = !locked; privateItem.isEnabled = !locked
-        if locked { mirrorItem.toolTip = "--output names the screen for this connection"; privateItem.toolTip = mirrorItem.toolTip }
-        shareClipboard = cmd["clipboard"] as? Bool != false
-        clipboardItem.state = shareClipboard ? .on : .off
-        if let sound = cmd["sound"] as? Bool {
-            playSound = sound
-            soundItem.state = sound ? .on : .off
-            let available = cmd["sound_available"] as? Bool == true
-            soundItem.isEnabled = available
-            soundItem.toolTip = available ? nil : "This computer does not send sound (sound comes from Linux hosts)"
-        }
-    }
-    @objc func openSettings() { event(["type": "open_settings"]) }
-    @objc func mirrorScreen() { event(["type": "setting", "field": "screen", "value": "mirror"]) }
-    @objc func privateScreen() { event(["type": "setting", "field": "screen", "value": "private"]) }
-    @objc func toggleClipboard() { event(["type": "setting", "field": "clipboard", "value": !shareClipboard]) }
-    @objc func toggleSound() { event(["type": "sound", "on": !playSound]) }
-    @objc func reconnect() { event(["type": "reconnect"]) }
-    @objc func requestHostPermissions() {
-        _ = CGRequestScreenCaptureAccess()
-        _ = AXIsProcessTrustedWithOptions([kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary)
-        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") { NSWorkspace.shared.open(url) }
-    }
-    func drawPending() {
-        pendingLock.lock(); let data = pending; pending = nil; drawing = false; pendingLock.unlock()
-        guard let data = data, data.count >= 12 else { return }
+    func drawPending(_ tab: Tab) {
+        tab.pendingLock.lock(); let data = tab.pending; tab.pending = nil; tab.drawing = false; tab.pendingLock.unlock()
+        guard let view = tab.view, let data = data, data.count >= 12 else { return }
         let w = Int(number(data, 0)), h = Int(number(data, 4)), s = number(data, 8)
         guard w > 0, h > 0, s > 0, w * h * 4 == data.count - 12, let provider = CGDataProvider(data: data.subdata(in: 12..<data.count) as CFData) else { return }
         view.image = CGImage(width: w, height: h, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: w * 4, space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipFirst.rawValue).union(.byteOrder32Little), provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent)
         view.scale = Double(s)/1000; view.needsDisplay = true
         view.showReconnect(false)
         if view.gpuSize != nil { view.presenter?.current = nil; view.gpuSize = nil }
-        if !painted { painted = true; diagnostic("Gliff displayed first frame: \(w)x\(h)") }
+        if !tab.painted { tab.painted = true; diagnostic("Gliff displayed first frame: \(w)x\(h)") }
     }
-    func resizeEvent() {
-        let factor = window?.backingScaleFactor ?? 1
-        event(["type": "resize", "width": Int(view.bounds.width * factor), "height": Int(view.bounds.height * factor), "scale": factor])
+
+    /// The Machine menu for the active tab's session.
+    func showMachineState(_ cmd: [String: Any]) {
+        let privateScreen = cmd["screen"] as? String == "private"
+        let locked = cmd["screen_locked"] as? Bool == true
+        mirrorItem.state = privateScreen ? .off : .on
+        privateItem.state = privateScreen ? .on : .off
+        mirrorItem.isEnabled = !locked; privateItem.isEnabled = !locked
+        mirrorItem.toolTip = locked ? "--output names the screen for this connection" : nil; privateItem.toolTip = mirrorItem.toolTip
+        clipboardItem.state = cmd["clipboard"] as? Bool != false ? .on : .off
+        let sound = cmd["sound"] as? Bool
+        soundItem.state = sound != false ? .on : .off
+        let available = cmd["sound_available"] as? Bool == true
+        soundItem.isEnabled = available
+        soundItem.toolTip = available ? nil : "This computer does not send sound (sound comes from Linux hosts)"
+    }
+    // Menu commands go to the active tab's session.
+    func toKeyTab(_ value: [String: Any]) { if let tab = keyTab { event(value, window: tab.id) } else { event(value) } }
+    @objc func openSettings() { toKeyTab(["type": "open_settings"]) }
+    @objc func mirrorScreen() { toKeyTab(["type": "setting", "field": "screen", "value": "mirror"]) }
+    @objc func privateScreen() { toKeyTab(["type": "setting", "field": "screen", "value": "private"]) }
+    @objc func toggleClipboard() { toKeyTab(["type": "setting", "field": "clipboard", "value": !(keyTab?.shareClipboard ?? true)]) }
+    @objc func toggleSound() { toKeyTab(["type": "sound", "on": !(keyTab?.playSound ?? true)]) }
+    @objc func reconnect() { toKeyTab(["type": "reconnect"]) }
+    @objc func reconnectClicked(_ sender: NSButton) {
+        if let tab = tab(for: sender.window) { event(["type": "reconnect"], window: tab.id) }
+    }
+    // The tab bar's + button and File > New Tab: the client opens the
+    // connection window and then a new tab.
+    @objc func newWindowForTab(_ sender: Any?) { event(["type": "new_tab"]) }
+    @objc func requestHostPermissions() {
+        _ = CGRequestScreenCaptureAccess()
+        _ = AXIsProcessTrustedWithOptions([kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary)
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") { NSWorkspace.shared.open(url) }
+    }
+    func resizeEvent(_ tab: Tab) {
+        guard let view = tab.view else { return }
+        let factor = tab.window?.backingScaleFactor ?? 1
+        event(["type": "resize", "width": Int(view.bounds.width * factor), "height": Int(view.bounds.height * factor), "scale": factor], window: tab.id)
     }
     @objc func keyboardLayoutChanged(_ note: Notification?) {
         if let layout = keyboardLayout() { event(layout) }
     }
-    func windowDidResize(_ note: Notification) { resizeEvent() }
-    func windowDidEnterFullScreen(_ note: Notification) { resizeEvent() }
-    func windowDidExitFullScreen(_ note: Notification) { resizeEvent() }
-    func windowDidChangeBackingProperties(_ note: Notification) { resizeEvent() }
-    func windowDidResignKey(_ note: Notification) { view.release() }
+    func noteTab(_ note: Notification) -> Tab? { tab(for: note.object as? NSWindow) }
+    func windowDidResize(_ note: Notification) { if let tab = noteTab(note) { resizeEvent(tab) } }
+    func windowDidEnterFullScreen(_ note: Notification) { if let tab = noteTab(note) { resizeEvent(tab) } }
+    func windowDidExitFullScreen(_ note: Notification) { if let tab = noteTab(note) { resizeEvent(tab) } }
+    func windowDidChangeBackingProperties(_ note: Notification) { if let tab = noteTab(note) { resizeEvent(tab) } }
+    func windowDidBecomeKey(_ note: Notification) {
+        guard let tab = noteTab(note) else { return }
+        activeTab = tab.id
+        showMachineState(tab.state)
+        clipboard.reoffer()
+    }
+    func windowDidResignKey(_ note: Notification) { noteTab(note)?.view.release() }
+    // A tab in the background (or a minimised window) stays connected but
+    // silent; its host stops recording.
+    func windowDidChangeOcclusionState(_ note: Notification) {
+        guard let tab = noteTab(note), let window = tab.window else { return }
+        event(["type": "visible", "on": window.occlusionState.contains(.visible)], window: tab.id)
+    }
+    func windowWillClose(_ note: Notification) {
+        guard let tab = noteTab(note) else { return }
+        tab.view.release()
+        // Closing the last window quits (applicationWillTerminate says bye
+        // to all), and its machine reopens next time; closing one tab of
+        // several forgets that machine.
+        guard tabCount > 1 else { return }
+        tabsLock.lock(); tabs[tab.id] = nil; tabsLock.unlock()
+        tab.gpu?.onFrame = nil
+        event(["type": "closed"], window: tab.id)
+    }
     func applicationShouldTerminateAfterLastWindowClosed(_ app: NSApplication) -> Bool { true }
-    func applicationWillTerminate(_ note: Notification) { DistributedNotificationCenter.default().removeObserver(self); view.release(); event(["type": "bye"]) }
+    func applicationWillTerminate(_ note: Notification) {
+        DistributedNotificationCenter.default().removeObserver(self)
+        tabsLock.lock(); let all = Array(tabs.values); tabsLock.unlock()
+        for tab in all { tab.view?.release() }
+        event(["type": "bye"])
+    }
 }
 
 struct NearbyComputer {

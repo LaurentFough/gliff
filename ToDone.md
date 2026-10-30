@@ -128,7 +128,7 @@ Support today:
 - [ ] A "Host speakers: keep / mute" choice in both clients' settings (today: the server command).
 - [ ] Sound from a Mac host (ScreenCaptureKit audio capture + #80's Opus encoder).
 - [ ] A warning when "Private screen" is chosen with a Mac host.
-- [ ] Tabs on the Mac (Linux has them since upstream #23). Native macOS window tabs only group windows of one process, and each Mac connection is its own viewer process today. Options: (1) one viewer process hosting every connection as a window, grouped by macOS tabs; (2) move the Mac viewer onto PR #5's in-process client core (`gliff-client` + `gliff-ffi`), shared with the iOS plan.
+- [ ] Tabs on the Mac (built on `feature/macos-tabs`, awaiting build and test; Linux has them since upstream #23). Native macOS window tabs only group windows of one process, and each Mac connection is its own viewer process today. Options: (1) one viewer process hosting every connection as a window, grouped by macOS tabs; (2) move the Mac viewer onto PR #5's in-process client core (`gliff-client` + `gliff-ffi`), shared with the iOS plan.
 - [ ] Reconnect for dead sessions on the Mac (built on `feature/macos-reconnect`, awaiting test): today a failed or dropped session shows "Close this window and connect again". Add a Reconnect button in that window (and Machine ▸ Reconnect while it shows), and optionally reconnect automatically as the Linux client does.
 - [ ] Viewer and client CPU use and frame rate in a live GPU session (Activity Monitor).
 
@@ -151,6 +151,9 @@ Support today:
 ## Log
 
 Newest first. Format: `### YYYY-MM-DD — summary (commit)`, then a line or two.
+
+### 2026-10-29 — Mac: native tabs (`feature/macos-tabs`, on `feature/macos-reconnect`)
+One viewer process hosts every connection so macOS groups them as tabs: the bridge gains packet kind 6 (TARGET window) and events carry `"window"`; the Rust `Hub` routes them, and each tab runs the existing session code (`visit`). Tab bar + / File ▸ New Tab opens the connection window; tabs stay connected; only visible tabs play sound; the clipboard follows the active tab; open tabs reopen at launch (`[[open_tabs]]`, closing a tab forgets it). Tests: event routing, open-tabs store, background-tab sound. Not built here.
 
 ### 2026-10-29 — Mac: reconnect dead sessions (`feature/macos-reconnect`)
 A failed or dropped session shows its error with a Reconnect button. Sessions that had connected retry automatically (5 × 1.5 s, as on Linux); a failed first connect waits, so SSH prompts do not repeat; incompatible servers are never retried (typed `Incompatible` error). Settings and the Machine menu work while waiting. `Retry` rule with unit tests; docs/macos.md.

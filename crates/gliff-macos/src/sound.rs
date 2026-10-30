@@ -29,6 +29,9 @@ pub struct Sound {
     offered: bool,
     /// The Machine menu's switch for this session.
     wanted: bool,
+    /// The window can be seen: a tab in the background stays connected but
+    /// silent, and its host stops recording, as on Linux.
+    visible: bool,
     /// What the server was last told (`ClientMsg::Audio`).
     on: bool,
     sink: Sink,
@@ -39,6 +42,7 @@ impl Sound {
         Self {
             offered: false,
             wanted,
+            visible: true,
             on: false,
             sink: Sink::default(),
         }
@@ -56,6 +60,12 @@ impl Sound {
     /// has to change.
     pub fn want(&mut self, wanted: bool) -> Option<ClientMsg> {
         self.wanted = wanted;
+        self.sync()
+    }
+
+    /// The window was shown or hidden (another tab selected, minimised).
+    pub fn visible(&mut self, visible: bool) -> Option<ClientMsg> {
+        self.visible = visible;
         self.sync()
     }
 
@@ -85,7 +95,7 @@ impl Sound {
     }
 
     fn sync(&mut self) -> Option<ClientMsg> {
-        let on = self.offered && self.wanted;
+        let on = self.offered && self.wanted && self.visible;
         if on == self.on {
             return None;
         }
@@ -140,6 +150,15 @@ mod tests {
             s.server_features(&audio()),
             Some(ClientMsg::Audio { enabled: true })
         );
+    }
+
+    #[test]
+    fn a_background_tab_is_silent_until_shown() {
+        let mut s = Sound::new(true);
+        s.server_features(&audio());
+        assert_eq!(s.visible(false), Some(ClientMsg::Audio { enabled: false }));
+        assert_eq!(s.want(true), None, "still hidden");
+        assert_eq!(s.visible(true), Some(ClientMsg::Audio { enabled: true }));
     }
 
     #[test]
