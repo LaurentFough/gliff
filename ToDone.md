@@ -152,6 +152,9 @@ Support today:
 
 Newest first. Format: `### YYYY-MM-DD — summary (commit)`, then a line or two.
 
+### 2026-10-29 — Input check follows tabs (`feature/macos-tabs`)
+`make check` on the tabs branch: all Rust tests passed (42 in gliff-macos), the helper compiled, but `scripts/macos-input-check.py` built its viewer from `App.view`/`App.window`, which moved into `Tab`. The harness now builds a `Tab` and registers it with `App.addTab`, and also checks resize events carry the window id.
+
 ### 2026-10-29 — Mac: native tabs (`feature/macos-tabs`, on `feature/macos-reconnect`)
 One viewer process hosts every connection so macOS groups them as tabs: the bridge gains packet kind 6 (TARGET window) and events carry `"window"`; the Rust `Hub` routes them, and each tab runs the existing session code (`visit`). Tab bar + / File ▸ New Tab opens the connection window; tabs stay connected; only visible tabs play sound; the clipboard follows the active tab; open tabs reopen at launch (`[[open_tabs]]`, closing a tab forgets it). Tests: event routing, open-tabs store, background-tab sound. Not built here.
 

@@ -60,16 +60,20 @@ precondition(observedEvents.isEmpty, "letterbox key reached the host")
 let app = NSApplication.shared
 let delegate = App()
 let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1470, height: 956), styleMask: [.titled, .resizable], backing: .buffered, defer: false)
-window.contentView = delegate.view; delegate.window = window
+// One viewer tab, built by hand: the window and view the app would make.
+let tab = Tab(id: 0)
+let tabView = RemoteView()
+window.contentView = tabView; tab.view = tabView; tab.window = window
+delegate.addTab(tab)
 let pixels = Data(repeating: 0, count: 1470 * 956 * 4)
-delegate.view.image = CGImage(width: 1470, height: 956, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: 1470 * 4, space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipFirst.rawValue), provider: CGDataProvider(data: pixels as CFData)!, decode: nil, shouldInterpolate: false, intent: .defaultIntent)
-precondition(delegate.view.pictureRect == delegate.view.bounds, "A matching private desktop did not fill the viewport")
+tabView.image = CGImage(width: 1470, height: 956, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: 1470 * 4, space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipFirst.rawValue), provider: CGDataProvider(data: pixels as CFData)!, decode: nil, shouldInterpolate: false, intent: .defaultIntent)
+precondition(tabView.pictureRect == tabView.bounds, "A matching private desktop did not fill the viewport")
 observedEvents.removeAll()
 let note = Notification(name: NSWindow.didEnterFullScreenNotification, object: window)
 delegate.windowDidEnterFullScreen(note)
 delegate.windowDidExitFullScreen(note)
 delegate.windowDidChangeBackingProperties(note)
-precondition(observedEvents.count == 3 && observedEvents.allSatisfy { $0["type"] as? String == "resize" }, "Fullscreen or backing changes did not update the remote viewport")
+precondition(observedEvents.count == 3 && observedEvents.allSatisfy { $0["type"] as? String == "resize" && $0["window"] as? UInt32 == 0 }, "Fullscreen or backing changes did not update the remote viewport")
 let input = Input()
 input.capsLock = false
 input.handle(["type": "key", "keycode": UInt16(57), "pressed": true])

@@ -1202,10 +1202,12 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
     var keyTab: Tab? { tab(for: NSApp.keyWindow) ?? tab(activeTab) }
     var tabCount: Int { tabsLock.lock(); defer { tabsLock.unlock() }; return tabs.count }
+    /// Register a tab; any thread (scripts/macos-input-check.py builds one by hand).
+    func addTab(_ tab: Tab) { tabsLock.lock(); tabs[tab.id] = tab; tabsLock.unlock() }
 
     func applicationDidFinishLaunching(_ note: Notification) {
         let first = Tab(id: 0)
-        tabsLock.lock(); tabs[0] = first; tabsLock.unlock()
+        addTab(first)
         // The client reads this first, before it says Hello (it decides the
         // chroma it asks for and how it sends frames).
         event(["type": "video_caps", "hardware": first.gpu != nil])
@@ -1295,7 +1297,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
             let cmd = json(data)
             if cmd["type"] as? String == "open_window" {
                 let tab = Tab(id: id)
-                tabsLock.lock(); tabs[id] = tab; tabsLock.unlock()
+                addTab(tab)
                 let title = cmd["title"] as? String ?? "Gliff"
                 DispatchQueue.main.async { self.makeWindow(tab, title: title) }
                 return
