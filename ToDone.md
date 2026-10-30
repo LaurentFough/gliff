@@ -106,11 +106,18 @@ Merged into the working branch on 2026-10-29, still on the fork until deleted (s
 - **Reconnect:** a failed or dropped session shows its error with a Reconnect button (and Machine ▸ Reconnect). Sessions that had connected retry automatically, 5 × 1.5 s as on Linux; a failed first connect waits, so SSH prompts do not repeat; incompatible servers are never retried.
 - Bridge: packet kind 6 (TARGET window), events carry `"window"`; the Rust `Hub` routes them.
 
-### Known machines in the connection window (on `feature/macos-picker-machines`; testing pending)
+### Known machines in the connection window (on `feature/macos-picker-machines`; list and autocomplete tested 2026-10-30)
 
 - A sidebar in the connection window (at launch and for File ▸ New Tab) lists the config's `machines`, newest first, with a search field; choosing one fills the address and its screen; double-click connects.
 - The SSH Address field completes inline from the same list while typing forward; deleting keeps the typed part.
 - The client sends `machines` with `machine_settings` (test extended); the picker check covers the list, search, choosing and completion.
+- **+** adds the typed address to `machines`; **−** forgets the selected machine (asks first): `Store::forget` removes it from `machines`, `[overrides]` and `[[open_tabs]]`, as the Linux client's Forget (on `feature/machines-and-auto-reconnect`).
+
+### Per-machine auto-reconnect (on `feature/machines-and-auto-reconnect`; testing pending)
+
+- New shared setting `auto_reconnect` (default on) in `gliff-settings`, per machine or in `[defaults]`.
+- Off: not reopened at launch, and a dropped session waits for Reconnect (Mac: the error says so; Linux: "click the tab to reconnect"). Changing it never reconnects a session, on either client.
+- Mac: Machine ▸ Reconnect Automatically (checkbox) and a Reconnect row in Settings. Linux honours it; its settings window does not show it yet.
 
 ### Docs
 
@@ -147,7 +154,10 @@ Support today:
 - [x] Tabs on the Mac: merged 2026-10-29 (one viewer process for every connection); several connections in tabs tested 2026-10-30; the rest under Deferred testing.
 - [x] Reconnect for dead sessions on the Mac: merged 2026-10-29; testing tabled, see Deferred testing.
 - [ ] Viewer and client CPU use and frame rate in a live GPU session (Activity Monitor).
-- [ ] Test the connection window's known machines: the sidebar lists past machines and filters by search; choosing fills the address; double-click connects; typing completes; File ▸ New Tab shows the same.
+- [x] Connection window's known machines: list, search, choosing, double-click, autocomplete, File ▸ New Tab (tested 2026-10-30).
+- [ ] Test + (adds the typed address) and − (asks, then forgets the machine and its settings).
+- [ ] Test auto-reconnect: Machine ▸ Reconnect Automatically off for one of two tabs, ⌘Q, relaunch (only the other reopens); with it off, kill `gliff-server` (no retries, the message says why); Settings ▸ Reconnect matches the menu; on Linux, the same machine off is not reopened.
+- [ ] Linux settings window: show `auto_reconnect`.
 - [ ] Discovery on the Mac shows nothing (reported 2026-10-30). Diagnose with docs/macos.md "When nothing is found": `dns-sd -B _gliff._tcp local.` on the Mac, Local Network permission (also for the terminal when started from one), `gliff-discovery` and Avahi on the host, and whether the hosts are on the same LAN (not Tailscale/VPN).
 - [ ] An iOS/iPadOS client: plan, effort and open decisions in [docs/ios-ipados-plan.md](docs/ios-ipados-plan.md) (Phase 0 spike first).
 
@@ -170,6 +180,9 @@ Support today:
 ## Log
 
 Newest first. Format: `### YYYY-MM-DD — summary (commit)`, then a line or two.
+
+### 2026-10-30 — Add/forget machines; per-machine auto-reconnect (`feature/machines-and-auto-reconnect`)
+The known-machines list and autocomplete tested OK. Added + / − to the picker sidebar (`Store::forget`, as Linux's Forget) and a shared `auto_reconnect` setting: Machine ▸ Reconnect Automatically and a Settings row on the Mac; off skips launch reopen and drop retries, on both clients; changing it never reconnects. Tests: model, store forget, menu setting, picker rules.
 
 ### 2026-10-30 — Fix: the connection window's sidebar did not compile
 `make check` on `feature/macos-picker-machines`: `#selector(connect)` for the sidebar's double-click came after the local `connect` button, which Swift refuses ("cannot refer to variable 'connect'"). Now `#selector(ComputerPicker.connect(_:))`.

@@ -1175,6 +1175,7 @@ final class Tab {
     }
     var shareClipboard: Bool { state["clipboard"] as? Bool != false }
     var playSound: Bool { state["sound"] as? Bool != false }
+    var autoReconnect: Bool { state["auto_reconnect"] as? Bool != false }
 }
 
 final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
@@ -1193,6 +1194,9 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
     let clipboardItem = NSMenuItem(title: "Share Clipboard", action: #selector(App.toggleClipboard), keyEquivalent: "")
     // Machine > Play Sound: the shared mute switch; enabled when the host sends sound.
     let soundItem = NSMenuItem(title: "Play Sound", action: #selector(App.toggleSound), keyEquivalent: "")
+    // Machine > Reconnect Automatically: the machine's auto_reconnect setting
+    // (reopen at launch, retry a dropped session).
+    let autoReconnectItem = NSMenuItem(title: "Reconnect Automatically", action: #selector(App.toggleAutoReconnect), keyEquivalent: "")
 
     func tab(_ id: UInt32) -> Tab? { tabsLock.lock(); defer { tabsLock.unlock() }; return tabs[id] }
     func tab(for window: NSWindow?) -> Tab? {
@@ -1235,6 +1239,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
         machineMenu.addItem(NSMenuItem.separator())
         let reconnect = machineMenu.addItem(withTitle: "Reconnect", action: #selector(App.reconnect), keyEquivalent: "")
         reconnect.target = self
+        autoReconnectItem.target = self; machineMenu.addItem(autoReconnectItem)
         // The Window menu: AppKit adds the tab commands (Show Tab Bar, Merge
         // All Windows, Move Tab to New Window) and the window list.
         let windowItem = NSMenuItem(); menu.addItem(windowItem)
@@ -1385,6 +1390,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
         mirrorItem.isEnabled = !locked; privateItem.isEnabled = !locked
         mirrorItem.toolTip = locked ? "--output names the screen for this connection" : nil; privateItem.toolTip = mirrorItem.toolTip
         clipboardItem.state = cmd["clipboard"] as? Bool != false ? .on : .off
+        autoReconnectItem.state = cmd["auto_reconnect"] as? Bool != false ? .on : .off
         let sound = cmd["sound"] as? Bool
         soundItem.state = sound != false ? .on : .off
         let available = cmd["sound_available"] as? Bool == true
@@ -1397,6 +1403,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
     @objc func mirrorScreen() { toKeyTab(["type": "setting", "field": "screen", "value": "mirror"]) }
     @objc func privateScreen() { toKeyTab(["type": "setting", "field": "screen", "value": "private"]) }
     @objc func toggleClipboard() { toKeyTab(["type": "setting", "field": "clipboard", "value": !(keyTab?.shareClipboard ?? true)]) }
+    @objc func toggleAutoReconnect() { toKeyTab(["type": "setting", "field": "auto_reconnect", "value": !(keyTab?.autoReconnect ?? true)]) }
     @objc func toggleSound() { toKeyTab(["type": "sound", "on": !(keyTab?.playSound ?? true)]) }
     @objc func reconnect() { toKeyTab(["type": "reconnect"]) }
     @objc func reconnectClicked(_ sender: NSButton) {
@@ -1585,6 +1592,7 @@ final class ComputerPicker: NSObject, NSApplicationDelegate, NSWindowDelegate, N
     var shownMachines: [String] = []
     let machineSearch = NSSearchField()
     let machineTable = NSTableView()
+    let removeMachine = NSButton()
     var lastTyped = ""
     init(screenOverride: String? = nil, preferences: UserDefaults? = nil) {
         self.screenOverride = screenOverride
@@ -1701,7 +1709,16 @@ final class ComputerPicker: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         sidebar.material = .sidebar; sidebar.blendingMode = .withinWindow
         sidebar.wantsLayer = true; sidebar.layer?.cornerRadius = 8; sidebar.layer?.masksToBounds = true
         sidebar.translatesAutoresizingMaskIntoConstraints = false
-        sidebar.addSubview(machineSearch); sidebar.addSubview(machineScroll)
+        // + adds what is in SSH Address; − forgets the selected machine.
+        let addMachine = NSButton(image: NSImage(systemSymbolName: "plus", accessibilityDescription: "Add Machine")!, target: self, action: #selector(addMachine(_:)))
+        addMachine.bezelStyle = .inline; addMachine.toolTip = "Add the SSH address to your machines"
+        removeMachine.title = ""; removeMachine.imagePosition = .imageOnly
+        removeMachine.image = NSImage(systemSymbolName: "minus", accessibilityDescription: "Remove Machine")
+        removeMachine.target = self; removeMachine.action = #selector(removeMachine(_:))
+        removeMachine.bezelStyle = .inline; removeMachine.toolTip = "Forget the selected machine and its settings"
+        removeMachine.isEnabled = false
+        let machineButtons = stack([addMachine, removeMachine], .horizontal, 4)
+        sidebar.addSubview(machineSearch); sidebar.addSubview(machineScroll); sidebar.addSubview(machineButtons)
         view.addSubview(sidebar)
         for row in [heading, list, statusRow, fields, screenRow, actions] { row.translatesAutoresizingMaskIntoConstraints = false }
         let listHeight = list.heightAnchor.constraint(equalToConstant: 66)
@@ -1718,7 +1735,9 @@ final class ComputerPicker: NSObject, NSApplicationDelegate, NSWindowDelegate, N
             machineScroll.leadingAnchor.constraint(equalTo: sidebar.leadingAnchor),
             machineScroll.trailingAnchor.constraint(equalTo: sidebar.trailingAnchor),
             machineScroll.topAnchor.constraint(equalTo: machineSearch.bottomAnchor, constant: 8),
-            machineScroll.bottomAnchor.constraint(equalTo: sidebar.bottomAnchor, constant: -6),
+            machineScroll.bottomAnchor.constraint(equalTo: machineButtons.topAnchor, constant: -4),
+            machineButtons.leadingAnchor.constraint(equalTo: sidebar.leadingAnchor, constant: 8),
+            machineButtons.bottomAnchor.constraint(equalTo: sidebar.bottomAnchor, constant: -6),
             content.leadingAnchor.constraint(equalTo: sidebar.trailingAnchor, constant: 20),
             content.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -20),
             content.topAnchor.constraint(equalTo: view.topAnchor, constant: 20),
@@ -1873,6 +1892,7 @@ final class ComputerPicker: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         if notification.object as? NSTableView === machineTable {
             // A known machine: its address on the default port; the screen
             // follows that machine's settings.
+            removeMachine.isEnabled = shownMachines.indices.contains(machineTable.selectedRow)
             guard shownMachines.indices.contains(machineTable.selectedRow) else { return }
             selectedID = nil; table.deselectAll(nil)
             address.stringValue = shownMachines[machineTable.selectedRow]; port.stringValue = "22"
@@ -1928,10 +1948,36 @@ final class ComputerPicker: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         if commandSelector == #selector(NSResponder.cancelOperation(_:)) { cancel(nil); return true }
         return false
     }
+    /// An SSH address the client accepts (the same rule as discovery.rs).
+    static func validAddress(_ host: String) -> Bool {
+        !host.isEmpty && !host.hasPrefix("-") && host.utf8.count <= 320 &&
+            host.range(of: "^[A-Za-z0-9_.:@\\[\\]%-]+$", options: .regularExpression) != nil
+    }
+    /// + : remember the typed address as a machine without connecting.
+    @objc func addMachine(_ sender: Any?) {
+        let host = address.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard ComputerPicker.validAddress(host) else {
+            status.stringValue = "Type an SSH address such as user@computer.local, then + to add it."; fitWindow(); return
+        }
+        event(["type": "machine_add", "host": host])
+    }
+    /// − : forget the selected machine, after asking (its settings go too).
+    @objc func removeMachine(_ sender: Any?) {
+        guard shownMachines.indices.contains(machineTable.selectedRow), let window = window else { return }
+        let host = shownMachines[machineTable.selectedRow]
+        let alert = NSAlert()
+        alert.messageText = "Remove \(host)?"
+        alert.informativeText = "It leaves your machines, with its saved settings, and will not reopen at launch."
+        alert.addButton(withTitle: "Remove"); alert.addButton(withTitle: "Cancel")
+        alert.beginSheetModal(for: window) { [weak self] response in
+            guard response == .alertFirstButtonReturn else { return }
+            event(["type": "machine_remove", "host": host])
+            self?.machineTable.deselectAll(nil); self?.removeMachine.isEnabled = false
+        }
+    }
     @objc func connect(_ sender: Any?) {
         let host = address.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !host.isEmpty, !host.hasPrefix("-"), host.utf8.count <= 320,
-              host.range(of: "^[A-Za-z0-9_.:@\\[\\]%-]+$", options: .regularExpression) != nil,
+        guard ComputerPicker.validAddress(host),
               let number = Int(port.stringValue), (1...65535).contains(number) else {
             status.stringValue = "Enter an SSH address and a port between 1 and 65535."; fitWindow(); return
         }
@@ -1971,6 +2017,9 @@ final class SettingsWindow: NSObject, NSApplicationDelegate, NSWindowDelegate, N
     let scopeNote = NSTextField(wrappingLabelWithString: "")
     let screen = NSPopUpButton()
     let clipboardBox = NSButton(checkboxWithTitle: "Share the clipboard", target: nil, action: nil)
+    let reconnectBox = NSButton(checkboxWithTitle: "Reconnect automatically", target: nil, action: nil)
+    let reconnectOrigin = NSTextField(labelWithString: "")
+    let reconnectReset = NSButton(title: "Reset", target: nil, action: nil)
     let serverBin = NSTextField(string: "")
     let screenOrigin = NSTextField(labelWithString: "")
     let clipboardOrigin = NSTextField(labelWithString: "")
@@ -2051,6 +2100,8 @@ final class SettingsWindow: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         screen.target = self; screen.action = #selector(screenChanged)
         screen.setAccessibilityLabel("Screen")
         clipboardBox.target = self; clipboardBox.action = #selector(clipboardChanged)
+        reconnectBox.target = self; reconnectBox.action = #selector(reconnectChanged)
+        reconnectReset.identifier = NSUserInterfaceItemIdentifier("auto_reconnect")
         serverBin.target = self; serverBin.action = #selector(serverChanged)
         serverBin.cell?.sendsActionOnEndEditing = true
         serverBin.setAccessibilityLabel("Server command")
@@ -2060,14 +2111,15 @@ final class SettingsWindow: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         serverReset.identifier = NSUserInterfaceItemIdentifier("server_bin")
         let display = row("Screen", screen, screenOrigin, screenReset, "Mirror shows the machine's screen; Private makes a separate Linux screen that follows this window.")
         let clip = row("Clipboard", clipboardBox, clipboardOrigin, clipboardReset, "Copy on one machine and paste on the other. Turn off for machines you do not trust.")
+        let again = row("Reconnect", reconnectBox, reconnectOrigin, reconnectReset, "Reopen the machine at launch if it was open at quit, and retry a dropped session. Off, it waits for Reconnect.")
         let server = row("Server command", serverBin, serverOrigin, serverReset, "Starts the server over SSH, e.g. gliff-server --low-bandwidth. Blank uses the inherited command.")
-        let rule = label("A screen or server command change reconnects the machine; the clipboard changes at once. Changes are saved as you make them.", secondary: true)
+        let rule = label("A screen or server command change reconnects the machine; the clipboard and Reconnect change at once. Changes are saved as you make them.", secondary: true)
         rule.preferredMaxLayoutWidth = 480; rule.lineBreakMode = .byWordWrapping; rule.maximumNumberOfLines = 3
         pathLabel.font = NSFont.systemFont(ofSize: 11); pathLabel.textColor = .tertiaryLabelColor
         pathLabel.preferredMaxLayoutWidth = 480
         errorLabel.font = NSFont.systemFont(ofSize: 12); errorLabel.textColor = .systemRed
         errorLabel.preferredMaxLayoutWidth = 480
-        let form = NSStackView(views: [heading, scopeNote, display, clip, server, rule, errorLabel, NSView(), pathLabel])
+        let form = NSStackView(views: [heading, scopeNote, display, clip, again, server, rule, errorLabel, NSView(), pathLabel])
         form.orientation = .vertical; form.alignment = .leading; form.spacing = 14
         form.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(sidebar); view.addSubview(form)
@@ -2146,6 +2198,9 @@ final class SettingsWindow: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         let c = effective("clipboard")
         clipboardBox.state = c.value as? Bool == false ? .off : .on
         clipboardOrigin.stringValue = c.origin; clipboardReset.isHidden = !c.here
+        let r = effective("auto_reconnect")
+        reconnectBox.state = r.value as? Bool == false ? .off : .on
+        reconnectOrigin.stringValue = r.origin; reconnectReset.isHidden = !r.here
         let b = effective("server_bin")
         serverBin.placeholderString = inherited("server_bin").0 as? String ?? "gliff-server"
         // Do not replace text the user is typing.
@@ -2161,6 +2216,7 @@ final class SettingsWindow: NSObject, NSApplicationDelegate, NSWindowDelegate, N
     }
     @objc func screenChanged(_ sender: Any?) { if !updating { edit("screen", screen.indexOfSelectedItem == 1 ? "private" : "mirror") } }
     @objc func clipboardChanged(_ sender: Any?) { if !updating { edit("clipboard", clipboardBox.state == .on) } }
+    @objc func reconnectChanged(_ sender: Any?) { if !updating { edit("auto_reconnect", reconnectBox.state == .on) } }
     @objc func serverChanged(_ sender: Any?) {
         guard !updating else { return }
         let text = serverBin.stringValue.trimmingCharacters(in: .whitespaces)

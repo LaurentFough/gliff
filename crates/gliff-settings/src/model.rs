@@ -61,6 +61,11 @@ pub struct Settings {
     /// The command that starts the server over ssh; blank is `gliff-server`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server_bin: Option<String>,
+    /// Reconnect without being asked: reopen the machine's tab at launch when
+    /// it was open at quit, and retry a session that dropped. Off, the client
+    /// waits for the user (default on).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_reconnect: Option<bool>,
 }
 
 /// An option, to ask where its value comes from or to clear it.
@@ -70,14 +75,16 @@ pub enum Field {
     Clipboard,
     Decode,
     ServerBin,
+    AutoReconnect,
 }
 
 impl Field {
-    pub const ALL: [Field; 4] = [
+    pub const ALL: [Field; 5] = [
         Field::Screen,
         Field::Clipboard,
         Field::Decode,
         Field::ServerBin,
+        Field::AutoReconnect,
     ];
 }
 
@@ -88,6 +95,7 @@ impl Settings {
             Field::Clipboard => self.clipboard.is_some(),
             Field::Decode => self.decode.is_some(),
             Field::ServerBin => self.server_bin.is_some(),
+            Field::AutoReconnect => self.auto_reconnect.is_some(),
         }
     }
 
@@ -97,6 +105,7 @@ impl Settings {
             Field::Clipboard => self.clipboard = None,
             Field::Decode => self.decode = None,
             Field::ServerBin => self.server_bin = None,
+            Field::AutoReconnect => self.auto_reconnect = None,
         }
     }
 
@@ -124,6 +133,7 @@ impl Settings {
             clipboard: self.clipboard.or(below.clipboard),
             decode: self.decode.or(below.decode),
             server_bin: self.server_bin.clone().or_else(|| below.server_bin.clone()),
+            auto_reconnect: self.auto_reconnect.or(below.auto_reconnect),
         }
     }
 
@@ -138,6 +148,7 @@ impl Settings {
                 .server_bin
                 .clone()
                 .unwrap_or_else(|| DEFAULT_SERVER_BIN.to_string()),
+            auto_reconnect: self.auto_reconnect.unwrap_or(true),
         }
     }
 }
@@ -149,6 +160,7 @@ pub struct Resolved {
     pub clipboard: bool,
     pub decode: Video,
     pub server_bin: String,
+    pub auto_reconnect: bool,
 }
 
 #[cfg(test)]
@@ -162,6 +174,28 @@ mod tests {
         assert!(r.clipboard);
         assert_eq!(r.decode, Video::Auto);
         assert_eq!(r.server_bin, "gliff-server");
+        assert!(
+            r.auto_reconnect,
+            "reconnecting is on unless a machine turns it off"
+        );
+    }
+
+    #[test]
+    fn auto_reconnect_layers_like_the_other_options() {
+        let defaults = Settings {
+            auto_reconnect: Some(false),
+            ..Settings::default()
+        };
+        let machine = Settings {
+            auto_reconnect: Some(true),
+            ..Settings::default()
+        };
+        assert!(!Settings::default().over(&defaults).resolve().auto_reconnect);
+        assert!(machine.over(&defaults).resolve().auto_reconnect);
+        let mut m = machine;
+        assert!(m.is_set(Field::AutoReconnect));
+        m.clear(Field::AutoReconnect);
+        assert!(m.is_empty());
     }
 
     #[test]

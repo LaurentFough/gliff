@@ -173,6 +173,32 @@ impl Store {
         true
     }
 
+    /// Forget a machine, as the Linux client's "Forget" does: its place in
+    /// `machines`, its `[overrides]` entry and its tabs to reopen. False
+    /// when it was not known.
+    pub fn forget(&mut self, name: &str) -> bool {
+        let name = name.trim();
+        let mut known = false;
+        if let Some(Value::Array(list)) = self.doc.get_mut(MACHINES) {
+            let before = list.len();
+            list.retain(|v| v.as_str().map(str::trim) != Some(name));
+            known |= list.len() != before;
+        }
+        if let Some(Value::Table(t)) = self.doc.get_mut(OVERRIDES) {
+            known |= t.remove(name).is_some();
+            if t.is_empty() {
+                self.doc.remove(OVERRIDES);
+            }
+        }
+        let tabs = self.open_tabs();
+        let kept: Vec<_> = tabs.iter().filter(|(h, _)| h != name).cloned().collect();
+        if kept.len() != tabs.len() {
+            known = true;
+            self.set_open_tabs(&kept);
+        }
+        known
+    }
+
     /// Replace the `[defaults]` layer; an empty layer removes the table.
     pub fn set_defaults(&mut self, mut settings: Settings) {
         settings.tidy();
@@ -470,6 +496,30 @@ mod tests {
         assert_eq!(bad.open_tabs(), [("ok@z".to_string(), 22)]);
         s.set_open_tabs(&[]);
         assert!(!s.doc.contains_key(OPEN_TABS));
+    }
+
+    #[test]
+    fn forget_removes_a_machine_everywhere_it_is_kept() {
+        let mut s = store(
+            "machines = [\"a@b\", \"c@d\"]\nopen = [\"a@b\"]\n\
+             [overrides.\"a@b\"]\nclipboard = false\n\
+             [[open_tabs]]\nhost = \"a@b\"\nport = 22\n\
+             [[open_tabs]]\nhost = \"c@d\"\nport = 22\n",
+        );
+        assert!(s.forget("a@b"));
+        assert_eq!(s.machines(), ["c@d"]);
+        assert_eq!(s.machine("a@b"), Settings::default());
+        assert!(
+            !s.doc.contains_key(OVERRIDES),
+            "an empty [overrides] goes too"
+        );
+        assert_eq!(s.open_tabs(), [("c@d".to_string(), 22)]);
+        assert!(!s.forget("a@b"), "already forgotten");
+        assert_eq!(
+            s.doc.get("open").and_then(Value::as_array).map(Vec::len),
+            Some(1),
+            "Linux's list is its own"
+        );
     }
 
     #[test]

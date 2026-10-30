@@ -72,6 +72,7 @@ for one. Open **Settings…** (⌘,) from the connection window or the viewer.
 |---|---|---|
 | Screen | Mirror the machine's screen, or a private Linux screen that follows the window | reconnects the machine |
 | Clipboard | Share the clipboard in both directions | at once |
+| Reconnect | Reopen the machine at launch if it was open at quit, and retry a dropped session (`auto_reconnect`, default on) | at the next launch or failure |
 | Server command | The command started over SSH, e.g. `gliff-server --low-bandwidth` | reconnects the machine |
 
 **All Machines** sets the defaults; selecting a machine sets only that
@@ -80,8 +81,11 @@ where its value comes from (Built-in, Default, or set here). Changes are
 saved as you make them.
 
 While connected, the **Machine** menu has the everyday choices: Mirror
-Screen / Private Screen, Share Clipboard, Play Sound, and Reconnect. A screen
-or server command change reconnects in the same window.
+Screen / Private Screen, Share Clipboard, Play Sound, Reconnect, and
+**Reconnect Automatically**. A screen or server command change reconnects in
+the same window. Reconnect Automatically is the machine's `auto_reconnect`
+setting: off, its tab is not reopened at the next launch and a dropped
+session waits for Reconnect instead of retrying.
 
 **Sound.** The viewer plays the sound of a Linux host running a gliff with
 sound (upstream PR #80), through the Mac's default output. **Machine ▸ Play
@@ -174,7 +178,10 @@ routed networks, jump hosts and VPN-only peers.
 The connection window (at launch, and for File ▸ New Tab) lists every machine
 you have connected to, newest first, in a sidebar with a search field: the
 `machines` list in `config.toml`. Choosing one fills the SSH address (port 22)
-and the screen it is set to; double-click connects. Typing in **SSH Address**
+and the screen it is set to; double-click connects. **+** under the list adds
+what is in SSH Address without connecting; **−** forgets the selected
+machine, with its saved settings and its tab to reopen (it asks first), as
+the Linux client's Forget does. Typing in **SSH Address**
 completes from the same list: the rest of the newest matching machine is
 filled in and selected, so typing on replaces it and Tab or Return keeps it.
 Deleting never brings a completion back.
@@ -251,7 +258,8 @@ logical display coordinates. macOS hosts mirror physical screens and reject
   only a tab you can see plays sound (its host stops recording otherwise),
   and the Mac's clipboard is offered to the active tab's machine. The tabs
   open when Gliff quits reopen at the next launch (`[[open_tabs]]` in
-  `config.toml`); closing a tab forgets it. A machine named on the command
+  `config.toml`), except machines with Reconnect Automatically off; closing a
+  tab forgets it. A machine named on the command
   line opens alone. The Linux client's Omarchy theme is not in the macOS
   client. Settings changes that need a new session reconnect in the same tab.
 - A session that fails or drops shows its error with a **Reconnect** button

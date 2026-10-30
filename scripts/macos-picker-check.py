@@ -121,7 +121,10 @@ Timer.scheduledTimer(withTimeInterval:0.4,repeats:false) { _ in
     precondition(picker.address.stringValue=="xoot@10","Deleting the completion brought it back")
     picker.address.stringValue="tester@keyboard.example";picker.port.stringValue="2222";picker.restoreScreenPreference()
     precondition(picker.screenMode=="private","The window's choice was lost after using known machines")
-    diagnostic("MACHINES PASS: sidebar list and search, choosing fills the address, typing completes")
+    precondition(picker.removeMachine.isEnabled,"Selecting a known machine did not enable −")
+    precondition(ComputerPicker.validAddress("xoot@10.0.8.44") && ComputerPicker.validAddress("[fe80::1%en0]"),"A valid address was refused")
+    precondition(!ComputerPicker.validAddress("") && !ComputerPicker.validAddress("-oProxyCommand=x") && !ComputerPicker.validAddress("a b"),"An unsafe address was accepted")
+    diagnostic("MACHINES PASS: sidebar list and search, choosing fills the address, typing completes, + and − rules")
     window.makeFirstResponder(picker.address)
     let tab=NSEvent.keyEvent(with:.keyDown,location:.zero,modifierFlags:[],timestamp:0,windowNumber:window.windowNumber,context:nil,characters:"\\t",charactersIgnoringModifiers:"\\t",isARepeat:false,keyCode:48)!
     window.sendEvent(tab)

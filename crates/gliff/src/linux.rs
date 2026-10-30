@@ -588,8 +588,11 @@ fn build_ui(app: &adw::Application, cli: &Cli) {
     // closed, then any named on the command line, which is shown first.
     let config = Config::load(&ui.config_path);
     let from_cli = endpoints_from_cli(cli, &config);
+    //= A machine with auto_reconnect off keeps its tab but waits for a click.
     for machine in &config.open {
-        open_session(&ui, ssh_endpoint(cli, &config, machine));
+        if resolved_for(cli, &config, machine).auto_reconnect {
+            open_session(&ui, ssh_endpoint(cli, &config, machine));
+        }
     }
     for endpoint in from_cli.iter().cloned() {
         if find_session(&ui, machine_name(&endpoint)).is_none() {
@@ -1230,8 +1233,11 @@ fn apply_settings(ui: &Rc<App>) {
         if new == old {
             continue;
         }
+        //= The clipboard applies at once and auto_reconnect at the next
+        //= failure or launch; anything else needs a new session.
         let live_only = Resolved {
             clipboard: old.clipboard,
+            auto_reconnect: old.auto_reconnect,
             ..new.clone()
         } == old;
         if live_only {
@@ -1553,7 +1559,12 @@ fn remember_machine(ui: &Rc<App>, s: &Session) {
 /// The status keeps the error that ended the connection, if any, so it stays
 /// on screen while the reconnects run.
 fn schedule_reconnect(ui: Rc<App>, s: Rc<Session>, generation: u64, error: Option<&str>) {
-    let n = s.retries.get() + 1;
+    //= A machine with auto_reconnect off gives up at once: the tab waits.
+    let n = if s.opts.borrow().auto_reconnect {
+        s.retries.get() + 1
+    } else {
+        MAX_RETRIES + 1
+    };
     s.retries.set(n);
     if let Some(error) = error {
         *s.last_error.borrow_mut() = Some(error.to_owned());

@@ -179,6 +179,20 @@ pub async fn choose(
                             }
                             return Ok(Some(selection));
                         }
+                        //= The sidebar's + and −; the change notice below refreshes it.
+                        Some("machine_add") => {
+                            let host = event["host"].as_str().unwrap_or_default();
+                            let candidate = Selection { host: host.trim().into(), port: 22, screen: ScreenMode::Mirror };
+                            match candidate.validate() {
+                                Ok(()) => shared.remember(&crate::settings::machine_key(host)),
+                                Err(e) => tracing::warn!(%host, error = %e, "not adding the machine"),
+                            }
+                        }
+                        Some("machine_remove") => {
+                            if let Some(host) = event["host"].as_str() {
+                                shared.forget(&crate::settings::machine_key(host));
+                            }
+                        }
                         _ => anyhow::bail!("unexpected chooser response"),
                     }
                 }
