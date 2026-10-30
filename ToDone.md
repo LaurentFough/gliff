@@ -130,7 +130,7 @@ Support today:
 - [ ] #98's settings on the Linux client.
 - [x] Mac tabs: several machines connected at once, each in its own tab (tested 2026-10-30).
 - [x] Mac tabs (tested 2026-10-30): sound follows the visible tab, and stays off for a hidden tab across a reconnect and while minimised; drag a tab out; the Machine menu follows the active tab; clipboard to the active tab's machine; quit with two tabs and relaunch (both reopen); close one, quit, relaunch (only the other).
-- [ ] Mac tabs: Window ▸ Merge All Windows was missing (AppKit does not add the tab commands to a menu built in code); the Window menu now lists them (Show Previous/Next Tab, Move Tab to New Window, Merge All Windows, Show Tab Bar). Retest T5.
+- [x] Mac tabs: Window ▸ Merge All Windows (T5) works since the Window menu lists the tab commands (retested 2026-10-30).
 - [x] Mac reconnect (tested 2026-10-30): a dropped session retries and recovers; after 5 attempts the error and Reconnect button, then Reconnect works; a failed first connect waits with no retries or repeated prompts; fixing the server command in Settings then Reconnect connects; other tabs keep streaming meanwhile.
 
 ### Follow-ups
@@ -163,6 +163,9 @@ Support today:
 ## Log
 
 Newest first. Format: `### YYYY-MM-DD — summary (commit)`, then a line or two.
+
+### 2026-10-30 — T5 retested: Merge All Windows works
+Every tabs (T1–T9) and reconnect (R1–R5) check now passes.
 
 ### 2026-10-30 — Mac tabs and reconnect tested; Window menu gains the tab commands
 Tabs T1–T4 and T6–T9 and reconnect R1–R5 passed. T5 failed: no Window ▸ Merge All Windows, because AppKit does not add its tab commands to a menu built in code. The Window menu now lists Show Previous/Next Tab (⌘{ ⌘}), Move Tab to New Window, Merge All Windows and Show Tab Bar; retest pending.

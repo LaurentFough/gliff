@@ -30,7 +30,7 @@ A quick look at what this fork adds. The README carries the same list; [ToDone.m
 
 ## Fork features
 
-- **Tabs on the Mac**: every connection is a native macOS tab in one viewer. The tab bar's **+** or File ▸ New Tab adds a machine; tabs stay connected, only the visible one plays sound, and open tabs reopen at launch. *(Tested; Window ▸ Merge All Windows was missing, now added, retest pending.)*
+- **Tabs on the Mac**: every connection is a native macOS tab in one viewer. The tab bar's **+** or File ▸ New Tab adds a machine; tabs stay connected, only the visible one plays sound, and open tabs reopen at launch. *(Tested.)*
 - **Reconnect on the Mac**: a dropped or failed session shows a **Reconnect** button; sessions that had connected retry automatically (5 × 1.5 s, as on Linux), without repeating SSH prompts. *(Tested.)*
 - **GPU video on the Mac viewer**: VideoToolbox hardware H.264 decode, Metal 4:4:4 recombine, `CAMetalLayer` presentation; asks for 4:4:4 first, falls back to OpenH264 (`--video cpu` forces it). 4K 4:4:4: about 6.9 ms per frame on the GPU vs 18.8 ms on the CPU.
 - **Sound on the Mac viewer**: plays Linux hosts' sound through #80's `gliff-audio` (CoreAudio). **Machine ▸ Play Sound** shares the Linux client's mute switch; `--no-audio` starts muted.
@@ -47,8 +47,7 @@ A quick look at what this fork adds. The README carries the same list; [ToDone.m
 |---|---|
 | Linux host → Mac client | Tested: GPU video, sound, host mute |
 | Mac tabs: several connections at once | Tested (2026-10-30) |
-| Mac tabs: sound, clipboard, Machine menu, restore at launch | Tested (2026-10-30) |
-| Mac tabs: Window ▸ Merge All Windows | Fixed; retest pending |
+| Mac tabs: sound, clipboard, Machine menu, Window menu, restore at launch | Tested (2026-10-30) |
 | Mac reconnect | Tested (2026-10-30) |
 | Linux host → Linux client sound | Not retested on the merged branch |
 | Sound from a Mac host | Not built yet |
