@@ -183,6 +183,9 @@ Support today:
 
 Newest first. Format: `### YYYY-MM-DD — summary (commit)`, then a line or two.
 
+### 2026-10-30 — Tabs caption clarified
+The screenshot shows two tabs; the caption now says any number of tabs (connections) is supported.
+
 ### 2026-10-30 — Discovery resolved: hosts were not advertising
 Cause: `gliff-discovery` not running on the Linux hosts (no code fault on the Mac). The Arch package's install hook now tells you to run `gliff-enable-discovery`; docs/macos.md "When nothing is found" leads with it; status rows updated.
 

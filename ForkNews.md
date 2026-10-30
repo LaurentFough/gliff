@@ -52,7 +52,7 @@ The new features are outlined in red.
 
 <img src="docs/images/macos-connect-machines.png" width="871" alt="Connect to a Computer window with the known-machines sidebar and the SSH Address field">
 
-**Tabs:** two connections in one window, one outline each; **+** or File ▸ New Tab adds another.
+**Tabs:** this shows two tabs in one window, one connection each (outlined separately). Any number of tabs is supported: **+** or File ▸ New Tab opens another connection.
 
 ![Two Gliff tabs, one per machine, with the + button](docs/images/macos-tabs.png)
 
