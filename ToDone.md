@@ -24,6 +24,7 @@ A running report for the fork `LaurentFough/gliff`.
 - add a dated entry at the top of the [Log](#log);
 - bump `date-modified` in the frontmatter;
 - update whichever sections (state, PRs, features, pending) the change affects.
+- when a feature lands or its status changes, update [ForkNews.md](ForkNews.md) and the same list under "New in this fork" in the README.
 
 The log is newest first, and each entry names the commit.
 
@@ -107,7 +108,7 @@ Merged into the working branch on 2026-10-29, still on the fork until deleted (s
 
 ### Docs
 
-- README fork notes, `docs/macos.md`, `docs/settings.md`, and the crate list in `docs/architecture.md`.
+- `ForkNews.md` (the short list of what the fork adds, also near the top of the README), README fork notes, `docs/macos.md`, `docs/settings.md`, and the crate list in `docs/architecture.md`.
 - In the macGliff project: ADR 0001, the GPU video decision with its results.
 
 ## Pending
@@ -159,6 +160,9 @@ Support today:
 ## Log
 
 Newest first. Format: `### YYYY-MM-DD — summary (commit)`, then a line or two.
+
+### 2026-10-29 — ForkNews.md, and the README's "New in this fork"
+The short list of what the fork adds (upstream PRs, its own features, status), now including Mac tabs and reconnect. The README carries the same list near the top, links ForkNews.md and ToDone.md, and its fork notes gain Tabs and Reconnect; "one connection per window" is gone.
 
 ### 2026-10-29 — Merge Mac tabs and reconnect into the working branch; testing tabled
 No-fast-forward merge of `feature/macos-tabs` (which holds `feature/macos-reconnect`). `make check` passed the Rust tests and the helper compiled; the File menu and New Tab connection window appear. Hands-on testing of tabs and reconnect is tabled (Deferred testing).

@@ -14,6 +14,41 @@ back to the CPU where that is unavailable.
 
 ![A gliff window showing a terminal on a remote machine](.github/assets/screenshot.png)
 
+## New in this fork
+
+This fork ([LaurentFough/gliff](https://github.com/LaurentFough/gliff)) builds on acrogenesis' macOS client and host and adds the features below. See [ForkNews.md](ForkNews.md) for more details, and [ToDone.md](ToDone.md) for the full state and log; the detailed notes are under [Changes in this fork](#changes-in-this-fork).
+
+<!-- The same list as ForkNews.md: update both together. -->
+
+### Upstream PRs included
+
+- **#47**: native macOS client and host, LAN discovery (acrogenesis). The base of the fork.
+- **#98**: settings window and per-machine tab menu. Merged, and brought to the Mac client.
+- **#80**: sound from Linux hosts (Opus over the existing connection). Merged.
+- **#5**: dhh's macOS client. Only its VideoToolbox + Metal video path, ported into #47's viewer.
+
+### Fork features
+
+- **Tabs on the Mac**: every connection is a native macOS tab in one viewer. The tab bar's **+** or File ▸ New Tab adds a machine; tabs stay connected, only the visible one plays sound, and open tabs reopen at launch. *(Merged; hands-on testing pending.)*
+- **Reconnect on the Mac**: a dropped or failed session shows a **Reconnect** button; sessions that had connected retry automatically (5 × 1.5 s, as on Linux), without repeating SSH prompts. *(Merged; hands-on testing pending.)*
+- **GPU video on the Mac viewer**: VideoToolbox hardware H.264 decode, Metal 4:4:4 recombine, `CAMetalLayer` presentation; asks for 4:4:4 first, falls back to OpenH264 (`--video cpu` forces it). 4K 4:4:4: about 6.9 ms per frame on the GPU vs 18.8 ms on the CPU.
+- **Sound on the Mac viewer**: plays Linux hosts' sound through #80's `gliff-audio` (CoreAudio). **Machine ▸ Play Sound** shares the Linux client's mute switch; `--no-audio` starts muted.
+- **Host speaker mute**: `gliff-server --mute-local-audio` mutes the Linux host's speakers while the client plays, and restores them on stop, disconnect or crash.
+- **Shared settings**: a `gliff-settings` crate; both clients read and write `~/.config/gliff/config.toml`. On the Mac: a settings window (⌘,) and a Machine menu.
+- **Local signing**: no paid Apple Developer account needed (a self-signed `gliff-local` identity), so privacy permissions survive rebuilds.
+- **Makefile**: one front end for `bin/` and `scripts/`. `make macos` builds, signs, installs and verifies; `make install` on Arch; also `make check` and `make video-check`.
+- **Checks**: `make video-check` checks GPU output against the CPU decoder and benchmarks both; the ssh login-shell test no longer depends on your shell setup.
+- **Fixes**: Mac install and signing (`plutil`, a custom cargo `target-dir`); the client ignores stray sound packets from a host.
+
+### Status
+
+| Path | State |
+|---|---|
+| Linux host → Mac client | Tested: GPU video, sound, host mute |
+| Mac tabs and reconnect | Merged; hands-on testing pending |
+| Linux host → Linux client sound | Not retested on the merged branch |
+| Sound from a Mac host | Not built yet |
+
 ## What you get
 
 - Mirror a physical screen on either platform. Hyprland hosts also provide
@@ -27,7 +62,7 @@ back to the CPU where that is unavailable.
   send sound yet.
 - Linux hosts adapt quality to the link, giving up frame rate before sharpness.
 - Linux viewers provide tabs, reconnection, and your Omarchy theme. Mac
-  viewers use a native window with one connection.
+  viewers use native macOS tabs and reconnect after a dropped session.
 
 ## Requirements
 
@@ -298,6 +333,17 @@ gliff 0.4.1).
 
 ### macOS
 
+- **Tabs.** One viewer process hosts every connection as a native macOS
+  tab (macOS only groups windows of one process); the tab bar's **+** or File
+  ▸ New Tab opens the connection window for another machine. Every tab stays
+  connected, only a visible tab plays sound, the clipboard and Machine menu
+  follow the active tab, and open tabs reopen at launch (`[[open_tabs]]`).
+  See [macOS support](docs/macos.md).
+- **Reconnect.** A failed or dropped session shows its error with a
+  **Reconnect** button. A session that had connected retries automatically,
+  5 times 1.5 s apart, as on Linux; a failed first connection waits, so a
+  wrong password does not reopen the SSH prompt; an incompatible server is
+  never retried.
 - **Per-machine settings.** #98's settings model is a shared
   `gliff-settings` crate, so both clients read and write the same
   `~/.config/gliff/config.toml`. The Mac has a settings window (⌘,), a
@@ -338,7 +384,8 @@ gliff 0.4.1).
   `make macos` pipeline, `make verify` and `make video-check`; see
   [Make targets](#make-targets).
 - **ToDone.md**: a running report of this fork's state, pending work and a
-  log of each commit or merge.
+  log of each commit or merge. **ForkNews.md**: the short list of what the
+  fork adds, also at the top of this README.
 - **Hermetic tests**: the ssh login-shell test runs each shell with an empty
   environment, so a developer's `ZDOTDIR`, `BASH_ENV` or `XDG_CONFIG_HOME`
   no longer breaks `scripts/check.sh`. The picker check also covers saved
