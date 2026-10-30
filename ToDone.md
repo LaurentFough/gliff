@@ -128,6 +128,8 @@ Support today:
 - [ ] A "Host speakers: keep / mute" choice in both clients' settings (today: the server command).
 - [ ] Sound from a Mac host (ScreenCaptureKit audio capture + #80's Opus encoder).
 - [ ] A warning when "Private screen" is chosen with a Mac host.
+- [ ] Tabs on the Mac (Linux has them since upstream #23). Native macOS window tabs only group windows of one process, and each Mac connection is its own viewer process today. Options: (1) one viewer process hosting every connection as a window, grouped by macOS tabs; (2) move the Mac viewer onto PR #5's in-process client core (`gliff-client` + `gliff-ffi`), shared with the iOS plan.
+- [ ] Reconnect for dead sessions on the Mac: today a failed or dropped session shows "Close this window and connect again". Add a Reconnect button in that window (and Machine ▸ Reconnect while it shows), and optionally reconnect automatically as the Linux client does.
 - [ ] Viewer and client CPU use and frame rate in a live GPU session (Activity Monitor).
 
 ### Repo housekeeping
@@ -149,6 +151,9 @@ Support today:
 ## Log
 
 Newest first. Format: `### YYYY-MM-DD — summary (commit)`, then a line or two.
+
+### 2026-10-29 — Follow-ups: Mac tabs, reconnect for dead sessions
+Added to Follow-ups. Mac tabs need one process for all connections, or PR #5's in-process core.
 
 ### 2026-10-29 — Merge sound into the working branch; clean up
 No-fast-forward merge of `feature/macos-audio` (which holds `merge/pr-80`): #80, Mac sound and `--mute-local-audio`, tested Linux host → Mac (muted on the host, playing on the Mac). Merged branches deleted locally; deleting them on the fork is left to you.
