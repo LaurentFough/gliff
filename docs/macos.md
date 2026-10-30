@@ -188,7 +188,10 @@ Deleting never brings a completion back.
 
 ### When nothing is found
 
-Work from the bottom up; each step separates one cause:
+The usual cause is the host: installing gliff does not start advertising.
+On each Linux host, run `gliff-enable-discovery` once as the desktop user
+(`make discovery` in a checkout); it enables the `gliff-discovery` user
+service. Otherwise, work from the bottom up; each step separates one cause:
 
 1. **On the Mac, outside Gliff:** `dns-sd -B _gliff._tcp local.` (Ctrl+C to
    stop). Nothing listed means the advertisements do not reach the Mac at

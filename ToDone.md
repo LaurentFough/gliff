@@ -160,7 +160,7 @@ Support today:
 - [x] Auto-reconnect on the Mac (tested 2026-10-30): Machine ▸ Reconnect Automatically off skips the launch reopen and drop retries; Settings ▸ Reconnect matches.
 - [ ] Auto-reconnect on Linux: a machine with `auto_reconnect = false` is not reopened and not retried.
 - [ ] Linux settings window: show `auto_reconnect`.
-- [ ] **Pinned (2026-10-30), to resolve later:** Discovery on the Mac shows nothing (reported 2026-10-30). `dns-sd -B _gliff._tcp local.` on the Mac lists nothing either, so no advertisement reaches the Mac: the cause is the host (gliff-discovery, Avahi, firewall UDP 5353) or the network (different LAN, Tailscale/VPN). Next: the host-side checks, and whether the Mac sees any mDNS from that host.
+- [x] Discovery on the Mac (resolved 2026-10-30): the hosts were not running the `gliff-discovery` user service. `gliff-enable-discovery` on each host fixes it; the package now says so after install, and docs/macos.md leads with it.
 - [ ] An iOS/iPadOS client: plan, effort and open decisions in [docs/ios-ipados-plan.md](docs/ios-ipados-plan.md) (Phase 0 spike first).
 
 ### Repo housekeeping
@@ -182,6 +182,9 @@ Support today:
 ## Log
 
 Newest first. Format: `### YYYY-MM-DD — summary (commit)`, then a line or two.
+
+### 2026-10-30 — Discovery resolved: hosts were not advertising
+Cause: `gliff-discovery` not running on the Linux hosts (no code fault on the Mac). The Arch package's install hook now tells you to run `gliff-enable-discovery`; docs/macos.md "When nothing is found" leads with it; status rows updated.
 
 ### 2026-10-30 — Screenshot: connection window with known machines
 The sidebar (search, list, + / −) and the autocompleting SSH Address field outlined; host name replaced with a placeholder.

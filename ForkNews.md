@@ -74,7 +74,7 @@ The new features are outlined in red.
 | Mac reconnect | Tested (2026-10-30) |
 | Known machines (sidebar, + / −, autocomplete) | Tested (2026-10-30) |
 | Per-machine auto-reconnect | Tested on the Mac; Linux pending |
-| Mac discovery (Bonjour) | Not finding hosts; pinned |
+| Mac discovery (Bonjour) | Tested (2026-10-30); the host must run `gliff-discovery` (`gliff-enable-discovery`) |
 | Linux host → Linux client sound | Not retested on the merged branch |
 | Sound from a Mac host | Not built yet |
 
