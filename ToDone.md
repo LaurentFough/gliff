@@ -5,7 +5,7 @@ slug: gliff-macos-todone
 author: LaurentFough
 type: report
 date-created: 2026-10-29
-date-modified: 2026-10-29
+date-modified: 2026-10-30
 date-published:
 source: https://github.com/LaurentFough/gliff
 domain: remote-desktop
@@ -35,7 +35,7 @@ The log is newest first, and each entry names the commit.
 | Working branch | `acrogenesis/macos-client-host` (see Log for the latest commit) |
 | Pushed to | `LaurentFough/gliff` only (never acrogenesis or omacom) |
 | Ahead of acrogenesis' branch | see `git rev-list --count origin/acrogenesis/macos-client-host..HEAD` |
-| Last updated | 2026-10-29 |
+| Last updated | 2026-10-30 |
 
 ### Branches on the fork
 
@@ -100,7 +100,7 @@ Merged into the working branch on 2026-10-29, still on the fork until deleted (s
 - The Mac viewer plays it through #80's `gliff-audio` (Opus, jitter buffer, cpal on CoreAudio). **Machine ▸ Play Sound** is the same top-level `muted` key as the Linux speaker button; `--no-audio` starts muted. Oversized packets are refused.
 - `gliff-server --mute-local-audio`: the host's speakers are muted while the client plays its sound, following a new default output, and restored on sound off, session end, or a crash (watchdog). PipeWire path only. Set it as the machine's server command.
 
-### Mac tabs and reconnect (merged 2026-10-29; not yet tested by hand)
+### Mac tabs and reconnect (merged 2026-10-29; several connections in tabs tested 2026-10-30)
 
 - **Tabs:** one viewer process hosts every connection as a native macOS tab. The tab bar's + or File ▸ New Tab opens the connection window; Window menu tab commands; every tab stays connected; only visible tabs play sound; the clipboard and Machine menu follow the active tab; open tabs reopen at launch (`[[open_tabs]]`), closing a tab forgets it.
 - **Reconnect:** a failed or dropped session shows its error with a Reconnect button (and Machine ▸ Reconnect). Sessions that had connected retry automatically, 5 × 1.5 s as on Linux; a failed first connect waits, so SSH prompts do not repeat; incompatible servers are never retried.
@@ -128,7 +128,8 @@ Support today:
 ### Deferred testing
 
 - [ ] #98's settings on the Linux client.
-- [ ] Mac tabs, tabled 2026-10-29: the File menu and the New Tab connection window appear; nothing else tested. To test: two tabs stream at once; switching tabs moves sound to the visible one; drag a tab out and Merge All Windows; the Machine menu follows the active tab; clipboard to the active tab's machine; quit with two tabs and relaunch (both reopen); close one tab, quit, relaunch (only the other).
+- [x] Mac tabs: several machines connected at once, each in its own tab (tested 2026-10-30).
+- [ ] Mac tabs, the rest: switching tabs moves sound to the visible one; drag a tab out and Merge All Windows; the Machine menu follows the active tab; clipboard to the active tab's machine; quit with two tabs and relaunch (both reopen); close one tab, quit, relaunch (only the other).
 - [ ] Mac reconnect, tabled 2026-10-29: stop `gliff-server` mid-session (expect "Reconnecting… (attempt n of 5)", then recovery); a wrong address (error + Reconnect button, no repeated SSH prompts); Machine ▸ Reconnect while the error shows.
 
 ### Follow-ups
@@ -137,7 +138,7 @@ Support today:
 - [ ] A "Host speakers: keep / mute" choice in both clients' settings (today: the server command).
 - [ ] Sound from a Mac host (ScreenCaptureKit audio capture + #80's Opus encoder).
 - [ ] A warning when "Private screen" is chosen with a Mac host.
-- [x] Tabs on the Mac: merged 2026-10-29 (one viewer process for every connection); testing tabled, see Deferred testing.
+- [x] Tabs on the Mac: merged 2026-10-29 (one viewer process for every connection); several connections in tabs tested 2026-10-30; the rest under Deferred testing.
 - [x] Reconnect for dead sessions on the Mac: merged 2026-10-29; testing tabled, see Deferred testing.
 - [ ] Viewer and client CPU use and frame rate in a live GPU session (Activity Monitor).
 - [ ] An iOS/iPadOS client: plan, effort and open decisions in [docs/ios-ipados-plan.md](docs/ios-ipados-plan.md) (Phase 0 spike first).
@@ -161,6 +162,9 @@ Support today:
 ## Log
 
 Newest first. Format: `### YYYY-MM-DD — summary (commit)`, then a line or two.
+
+### 2026-10-30 — Mac tabs: several connections at once tested
+Several machines connected at the same time, each in its own tab, work as implemented. ForkNews.md and the README's fork features and status now say so; the remaining tab checks (sound following the visible tab, drag and merge, Machine menu, clipboard, restore at launch) and Mac reconnect stay under Deferred testing.
 
 ### 2026-10-29 — `make distclean` (Makefile 0.3.0)
 Removes everything `.gitignore` ignores (`git clean -Xd`: `target/`, stray logs, `.DS_Store`, `patch/`), nothing tracked. Lists it first and asks; `FORCE=1` skips the question and is required without a terminal. README make table updated.
