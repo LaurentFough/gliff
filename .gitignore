@@ -1,8 +1,54 @@
+#= gliff .gitignore (v1.0.0). Grouped by source; keep the existing groups when adding.
+
+#= Rust / cargo (Cargo.lock stays tracked: this workspace ships binaries)
 target/
+**/*.rs.bk
+*.pdb
+
+#= Python (scripts/)
 __pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+
+#= Swift / Xcode (the macOS helper is built by build.rs into target/;
+#= these cover local swiftc runs and a future iOS project)
+.build/
+DerivedData/
+xcuserdata/
+*.xcuserstate
+
+#= Logs (make writes to target/logs/; this catches strays elsewhere)
+*.log
+logs/
+
+#= macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+
+#= Editors
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+#= Images: only the ones the repo ships
 *.png
 !/.github/assets/*.png
 !/pkgbuild/gliff.png
+
+#= Arch packaging (makepkg)
 /pkgbuild/pkg/
 /pkgbuild/src/
 *.pkg.tar.zst
+
+#= Local scratch: git format-patch output and other working files
+/patch/
+*.patch
+*.orig
+*.rej
