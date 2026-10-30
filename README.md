@@ -37,6 +37,7 @@ This fork ([LaurentFough/gliff](https://github.com/LaurentFough/gliff)) builds o
 - **Shared settings**: a `gliff-settings` crate; both clients read and write `~/.config/gliff/config.toml`. On the Mac: a settings window (⌘,) and a Machine menu.
 - **Local signing**: no paid Apple Developer account needed (a self-signed `gliff-local` identity), so privacy permissions survive rebuilds.
 - **Makefile**: one front end for `bin/` and `scripts/`. `make macos` builds, signs, installs and verifies; `make install` on Arch; also `make check` and `make video-check`.
+- **Build once, install on other Macs**: `make install` skips an unchanged build (a build ID in the app); `make install-package` installs a ZIP from another Mac and re-signs it locally; `make release-upload` / `make install-release` carry it through GitHub Releases. Apple Silicon. *(New; testing pending.)*
 - **Checks**: `make video-check` checks GPU output against the CPU decoder and benchmarks both; the ssh login-shell test no longer depends on your shell setup.
 - **Fixes**: Mac install and signing (`plutil`, a custom cargo `target-dir`); the client ignores stray sound packets from a host.
 
@@ -196,6 +197,9 @@ exit status.
 | `make verify` | checks the installed app's signature and `~/.local/bin` links |
 | `make video-check` | checks the viewer's GPU video and compares GPU and CPU decode times (`ARGS="--cases 1080p-444"`) |
 | `make package` | `bin/package-macos --development`: ad-hoc signed ZIP and checksum (`OUT=`) |
+| `make install-package` | installs a `make package` ZIP from another Mac (`ZIP=`): checks the SHA-256, re-signs with this Mac's identity (`FORCE=1`) |
+| `make release-upload` | publishes this commit's package as a GitHub release `macos-COMMIT` (`TAG=`, `ZIP=`, `REPO=`; needs `gh`) |
+| `make install-release` | downloads and installs a Mac release (`TAG=`, default the newest; `REPO=`, `FORCE=1`) |
 | `make package-release` | `bin/package-macos`: Developer ID, notarized (`GLIFF_NOTARY_PROFILE`) |
 | `make icon` | `bin/export-macos-icon` |
 | `make dev` / `make install-dev` | `bin/dev` / `bin/install-dev` (Linux) |

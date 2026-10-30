@@ -1,0 +1,68 @@
+#!/bin/sh
+# Publish a `make package` ZIP as a GitHub release of the fork, so other Macs
+# install it with `make install-release` (bin/install-macos-release).
+#= Usage: bin/release-macos [--tag TAG] [PATH/gliff-*-macos-ARCH*.zip]
+#= Without a ZIP it runs bin/package-macos --development first. The build
+#= must come from a clean, pushed commit: the release points at it. The tag
+#= defaults to macos-COMMIT12; an existing release with that tag gets the
+#= assets replaced. Releases are marked pre-release: these are development
+#= builds (self-signed or ad-hoc, not notarized); the installer re-signs
+#= them with the receiving Mac's identity.
+#= Repository: GLIFF_RELEASE_REPO (default LaurentFough/gliff). Needs the
+#= GitHub CLI, signed in (gh auth login).
+#= Version: 1.0.0
+set -eu
+[ "$(uname -s)" = Darwin ] || { echo 'Run bin/release-macos on the Mac that built the package.' >&2; exit 1; }
+ROOT="$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)"
+. "$ROOT/bin/lib/macos-install.sh"
+GLIFF_RELEASE_REPO="${GLIFF_RELEASE_REPO:-LaurentFough/gliff}"
+usage() { echo 'Usage: bin/release-macos [--tag TAG] [PATH/gliff-*-macos-*.zip]' >&2; exit 1; }
+GLIFF_TAG=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --tag) [ $# -ge 2 ] || usage; GLIFF_TAG="$2"; shift ;;
+        -h|--help) usage ;;
+        -*) printf 'Unknown option %s\n' "$1" >&2; usage ;;
+        *) break ;;
+    esac
+    shift
+done
+[ $# -le 1 ] || usage
+command -v gh >/dev/null 2>&1 || { echo 'Needs the GitHub CLI: brew install gh, then gh auth login.' >&2; exit 1; }
+gh auth status >/dev/null 2>&1 || { echo 'The GitHub CLI is not signed in: gh auth login.' >&2; exit 1; }
+
+GLIFF_BUILD_ID=$(gliff_build_id "$ROOT")
+case "$GLIFF_BUILD_ID" in
+    *-dirty+*|unknown+*) printf 'The checkout is %s: commit and push first, so the release matches a commit.\n' "$GLIFF_BUILD_ID" >&2; exit 1 ;;
+esac
+if [ $# -eq 1 ]; then
+    GLIFF_ZIP="$1"
+else
+    "$ROOT/bin/package-macos" --development
+    GLIFF_ZIP=$(ls -t "$ROOT"/target/macos/gliff-*-macos-"$(uname -m)"-development.zip 2>/dev/null | head -1)
+fi
+[ -f "$GLIFF_ZIP" ] && [ -f "$GLIFF_ZIP.sha256" ] || { printf 'Need %s and its .sha256 (make package writes both).\n' "${GLIFF_ZIP:-the ZIP}" >&2; exit 1; }
+# The ZIP must be this checkout's build, or the release would point at the
+# wrong commit.
+GLIFF_ZIP_ID=$(unzip -p "$GLIFF_ZIP" Gliff.app/Contents/Info.plist | plutil -extract GliffBuildID raw -o - - 2>/dev/null || true)
+[ "$GLIFF_ZIP_ID" = "$GLIFF_BUILD_ID" ] || {
+    printf 'The ZIP is build %s, the checkout is %s: package this commit (make package) or check out the ZIP'"'"'s.\n' "${GLIFF_ZIP_ID:-unknown}" "$GLIFF_BUILD_ID" >&2; exit 1; }
+GLIFF_COMMIT=$(git -C "$ROOT" rev-parse HEAD)
+gh api "repos/$GLIFF_RELEASE_REPO/commits/$GLIFF_COMMIT" >/dev/null 2>&1 || {
+    printf 'Commit %s is not on %s yet: push it first.\n' "$(printf %s "$GLIFF_COMMIT" | cut -c1-12)" "$GLIFF_RELEASE_REPO" >&2; exit 1; }
+GLIFF_TAG="${GLIFF_TAG:-macos-$(printf %s "$GLIFF_COMMIT" | cut -c1-12)}"
+GLIFF_NOTES="Gliff for Mac, build $GLIFF_BUILD_ID (development: self-signed or ad-hoc, not notarized).
+
+Install on another Mac (Apple Silicon, macOS 13+), from a checkout:
+
+    make install-release TAG=$GLIFF_TAG
+
+or download both files and run \`make install-package ZIP=$(basename -- "$GLIFF_ZIP")\`. The installer checks the SHA-256, removes the quarantine flag and re-signs the app with that Mac's own identity."
+if gh release view "$GLIFF_TAG" --repo "$GLIFF_RELEASE_REPO" >/dev/null 2>&1; then
+    gh release upload "$GLIFF_TAG" "$GLIFF_ZIP" "$GLIFF_ZIP.sha256" --repo "$GLIFF_RELEASE_REPO" --clobber
+    printf 'Updated release %s on %s\n' "$GLIFF_TAG" "$GLIFF_RELEASE_REPO"
+else
+    gh release create "$GLIFF_TAG" "$GLIFF_ZIP" "$GLIFF_ZIP.sha256" --repo "$GLIFF_RELEASE_REPO" \
+        --target "$GLIFF_COMMIT" --prerelease --title "Gliff for Mac ($GLIFF_BUILD_ID)" --notes "$GLIFF_NOTES"
+    printf 'Published release %s on %s\n' "$GLIFF_TAG" "$GLIFF_RELEASE_REPO"
+fi

@@ -5,7 +5,7 @@ slug: gliff-macos-todone
 author: LaurentFough
 type: report
 date-created: 2026-10-29
-date-modified: 2026-10-29
+date-modified: 2026-10-30
 date-published:
 source: https://github.com/LaurentFough/gliff
 domain: remote-desktop
@@ -35,7 +35,7 @@ The log is newest first, and each entry names the commit.
 | Working branch | `acrogenesis/macos-client-host` (see Log for the latest commit) |
 | Pushed to | `LaurentFough/gliff` only (never acrogenesis or omacom) |
 | Ahead of acrogenesis' branch | see `git rev-list --count origin/acrogenesis/macos-client-host..HEAD` |
-| Last updated | 2026-10-29 |
+| Last updated | 2026-10-30 |
 
 ### Branches on the fork
 
@@ -106,6 +106,13 @@ Merged into the working branch on 2026-10-29, still on the fork until deleted (s
 - **Reconnect:** a failed or dropped session shows its error with a Reconnect button (and Machine ▸ Reconnect). Sessions that had connected retry automatically, 5 × 1.5 s as on Linux; a failed first connect waits, so SSH prompts do not repeat; incompatible servers are never retried.
 - Bridge: packet kind 6 (TARGET window), events carry `"window"`; the Rust `Hub` routes them.
 
+### Build once, install on other Macs (on `feature/macos-install-reuse`; testing pending)
+
+- `GliffBuildID` in the app's `Info.plist` (commit, `-dirty`, architecture). `make install` skips the build when the installed app is the same clean build with the same signing identity and a valid signature; `FORCE=1` rebuilds.
+- `make install-package ZIP=…`: checksum, architecture and macOS checks, quarantine removed, re-signed with the receiving Mac's identity, installed, verified.
+- `make release-upload` / `make install-release`: the ZIP as a pre-release `macos-COMMIT` on GitHub (gh), installed through `install-package`.
+- Shared `bin/lib/macos-install.sh` (identity choice, signing, safe swap) used by all three installers. Makefile 0.4.0. Apple Silicon only for now.
+
 ### Docs
 
 - `ForkNews.md` (the short list of what the fork adds, also near the top of the README), README fork notes, `docs/macos.md`, `docs/settings.md`, and the crate list in `docs/architecture.md`.
@@ -140,6 +147,10 @@ Support today:
 - [x] Tabs on the Mac: merged 2026-10-29 (one viewer process for every connection); testing tabled, see Deferred testing.
 - [x] Reconnect for dead sessions on the Mac: merged 2026-10-29; testing tabled, see Deferred testing.
 - [ ] Viewer and client CPU use and frame rate in a live GPU session (Activity Monitor).
+- [ ] Test build-once installs: `make install` twice (second skips), a change then `make install` (rebuilds), `make package` → `make install-package` on a second Mac, `make release-upload` → `make install-release`.
+- [ ] Intel Macs: a universal (arm64 + x86_64) package, or per-architecture releases.
+- [ ] Linux: prebuilt packages to copy between machines (today each Linux machine builds with `makepkg`).
+- [ ] Releases from CI: the workflow already packages development builds on macOS runners; attach those to `macos-*` releases instead of building locally.
 - [ ] An iOS/iPadOS client: plan, effort and open decisions in [docs/ios-ipados-plan.md](docs/ios-ipados-plan.md) (Phase 0 spike first).
 
 ### Repo housekeeping
@@ -161,6 +172,9 @@ Support today:
 ## Log
 
 Newest first. Format: `### YYYY-MM-DD — summary (commit)`, then a line or two.
+
+### 2026-10-30 — Build once, install on other Macs (`feature/macos-install-reuse`)
+Build ID in the app; `make install` skips unchanged builds; `make install-package` (checksum, quarantine, local re-sign); `make release-upload` / `make install-release` via GitHub Releases; shared `bin/lib/macos-install.sh`; Makefile 0.4.0; docs/macos.md "Build once, install on other Macs". Shell syntax checked here; nothing run on a Mac yet.
 
 ### 2026-10-29 — `make distclean` (Makefile 0.3.0)
 Removes everything `.gitignore` ignores (`git clean -Xd`: `target/`, stray logs, `.DS_Store`, `patch/`), nothing tracked. Lists it first and asks; `FORCE=1` skips the question and is required without a terminal. README make table updated.

@@ -58,6 +58,10 @@ cp "$GLIFF_CLIENT_BIN" "$GLIFF_SERVER_BIN" "$GLIFF_APP/Contents/MacOS/"
 cp crates/gliff-macos/resources/Gliff.icns LICENSE NOTICE "$GLIFF_APP/Contents/Resources/"
 "$GLIFF_SERVER_BIN" --install-native "$GLIFF_APP/Contents/MacOS/gliff-native"
 GLIFF_VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+# What was built: commit, uncommitted changes, architecture. install-macos
+# skips a rebuild when the installed app already is this build.
+. "$ROOT/bin/lib/macos-install.sh"
+GLIFF_BUILD_ID=$(gliff_build_id "$ROOT")
 cat > "$GLIFF_APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -70,6 +74,7 @@ cat > "$GLIFF_APP/Contents/Info.plist" <<PLIST
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>CFBundleShortVersionString</key><string>$GLIFF_VERSION</string>
 <key>CFBundleVersion</key><string>$GLIFF_VERSION</string>
+<key>GliffBuildID</key><string>$GLIFF_BUILD_ID</string>
 <key>LSMinimumSystemVersion</key><string>13.0</string>
 <key>NSHighResolutionCapable</key><true/>
 <key>NSLocalNetworkUsageDescription</key><string>Find nearby computers running Gliff so you can connect to their desktops.</string>
