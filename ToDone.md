@@ -171,6 +171,9 @@ Support today:
 
 Newest first. Format: `### YYYY-MM-DD — summary (commit)`, then a line or two.
 
+### 2026-10-30 — Fix: the connection window's sidebar did not compile
+`make check` on `feature/macos-picker-machines`: `#selector(connect)` for the sidebar's double-click came after the local `connect` button, which Swift refuses ("cannot refer to variable 'connect'"). Now `#selector(ComputerPicker.connect(_:))`.
+
 ### 2026-10-30 — Connection window: known machines and autocomplete (`feature/macos-picker-machines`)
 Sidebar of past machines (search, choose, double-click to connect) and inline autocomplete of the SSH address from the config's `machines`, also in File ▸ New Tab. Discovery not finding hosts: the browse code matches what Linux advertises; docs/macos.md gains "When nothing is found" (dns-sd, Local Network permission incl. terminal launches, Avahi, LAN-only mDNS).
 

@@ -1690,7 +1690,7 @@ final class ComputerPicker: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         machineTable.frame = NSRect(x: 0, y: 0, width: 220, height: 60); machineTable.autoresizingMask = [.width]
         machineTable.headerView = nil; machineTable.style = .sourceList; machineTable.rowHeight = 26
         machineTable.delegate = self; machineTable.dataSource = self
-        machineTable.target = self; machineTable.doubleAction = #selector(connect)
+        machineTable.target = self; machineTable.doubleAction = #selector(ComputerPicker.connect(_:))
         machineTable.setAccessibilityLabel("Known Machines")
         let machineScroll = NSScrollView()
         machineScroll.translatesAutoresizingMaskIntoConstraints = false
