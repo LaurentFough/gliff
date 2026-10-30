@@ -27,7 +27,12 @@ use serde_json::{json, Map, Value};
 use tokio::sync::watch;
 
 /// The options this client offers, in window order.
-pub const OFFERED: [Field; 3] = [Field::Screen, Field::Clipboard, Field::ServerBin];
+pub const OFFERED: [Field; 4] = [
+    Field::Screen,
+    Field::Clipboard,
+    Field::ServerBin,
+    Field::AutoReconnect,
+];
 /// Longest server command accepted from the UI.
 const MAX_SERVER_BIN: usize = 1024;
 
@@ -70,6 +75,15 @@ impl Shared {
     pub fn remember(&self, machine: &str) {
         let added = self.store.borrow_mut().remember(machine);
         if added {
+            self.save_and_announce();
+        }
+    }
+
+    /// Forget a machine (the picker's −): its place in the list, its
+    /// settings and its tabs to reopen, as the Linux client's "Forget".
+    pub fn forget(&self, machine: &str) {
+        let removed = self.store.borrow_mut().forget(machine);
+        if removed {
             self.save_and_announce();
         }
     }
@@ -186,6 +200,7 @@ pub fn cli_layer(
         },
         server_bin: (server_bin.trim() != DEFAULT_SERVER_BIN && !server_bin.trim().is_empty())
             .then(|| server_bin.trim().to_string()),
+        auto_reconnect: None,
     }
 }
 
@@ -223,6 +238,9 @@ fn layer_json(s: &Settings) -> Value {
     if let Some(bin) = &s.server_bin {
         m.insert("server_bin".into(), bin.clone().into());
     }
+    if let Some(auto) = s.auto_reconnect {
+        m.insert("auto_reconnect".into(), auto.into());
+    }
     Value::Object(m)
 }
 
@@ -241,6 +259,7 @@ pub fn state_json(store: &Store) -> Value {
             "screen": screen_ui(builtin.screen),
             "clipboard": builtin.clipboard,
             "server_bin": builtin.server_bin,
+            "auto_reconnect": builtin.auto_reconnect,
         },
         "defaults": layer_json(&store.defaults()),
         "machines": machines,
@@ -277,6 +296,13 @@ fn set_field(s: &mut Settings, field: Field, value: Option<&Value>) -> Result<()
             //= Blank clears it (Settings::tidy), like the Linux window.
             s.server_bin = Some(v.trim().to_string());
             s.tidy();
+        }
+        Field::AutoReconnect => {
+            s.auto_reconnect = Some(
+                value
+                    .as_bool()
+                    .context("auto_reconnect must be true or false")?,
+            );
         }
         Field::Decode => unreachable!("not offered"),
     }
@@ -330,6 +356,7 @@ pub fn machine_state(opts: &Resolved, screen_locked: bool) -> Value {
         "type": "machine_state",
         "screen": screen_ui(opts.screen),
         "clipboard": opts.clipboard,
+        "auto_reconnect": opts.auto_reconnect,
         "screen_locked": screen_locked,
     })
 }
@@ -555,5 +582,40 @@ mod tests {
         assert_eq!(v["screen"], "private");
         assert_eq!(v["screen_locked"], true);
         assert_eq!(v["clipboard"], true);
+        assert_eq!(v["auto_reconnect"], true);
+    }
+
+    #[test]
+    fn the_machine_menu_switches_auto_reconnect_without_reconnecting() {
+        let sh = Shared::new(Store::in_memory());
+        let before = sh.resolve("m@h", &Settings::default());
+        apply_machine_setting(
+            &sh,
+            "m@h",
+            &json!({"field": "auto_reconnect", "value": false}),
+        )
+        .unwrap();
+        let after = sh.resolve("m@h", &Settings::default());
+        assert!(!after.auto_reconnect);
+        assert_eq!(
+            change(&before, &after, false),
+            Change::None,
+            "it applies at the next launch or failure"
+        );
+        assert!(apply_machine_setting(
+            &sh,
+            "m@h",
+            &json!({"field": "auto_reconnect", "value": "no"})
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn forgetting_a_machine_drops_its_settings() {
+        let sh = Shared::new(Store::in_memory());
+        apply_machine_setting(&sh, "m@h", &json!({"field": "clipboard", "value": false})).unwrap();
+        sh.forget("m@h");
+        assert!(sh.resolve("m@h", &Settings::default()).clipboard);
+        assert!(sh.state()["machines"].as_array().unwrap().is_empty());
     }
 }

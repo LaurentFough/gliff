@@ -24,6 +24,7 @@ impl Field {
             Field::Clipboard => "clipboard",
             Field::Decode => "decode",
             Field::ServerBin => "server_bin",
+            Field::AutoReconnect => "auto_reconnect",
         }
     }
 
@@ -49,6 +50,7 @@ mod tests {
             clipboard: Some(false),
             decode: Some(Video::Cpu),
             server_bin: Some("x".into()),
+            auto_reconnect: Some(false),
         };
         let text = toml::to_string(&s).unwrap();
         for field in Field::ALL {

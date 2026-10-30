@@ -106,6 +106,19 @@ Merged into the working branch on 2026-10-29, still on the fork until deleted (s
 - **Reconnect:** a failed or dropped session shows its error with a Reconnect button (and Machine ▸ Reconnect). Sessions that had connected retry automatically, 5 × 1.5 s as on Linux; a failed first connect waits, so SSH prompts do not repeat; incompatible servers are never retried.
 - Bridge: packet kind 6 (TARGET window), events carry `"window"`; the Rust `Hub` routes them.
 
+### Known machines in the connection window (merged 2026-10-30; tested)
+
+- A sidebar in the connection window (at launch and for File ▸ New Tab) lists the config's `machines`, newest first, with a search field; choosing one fills the address and its screen; double-click connects.
+- The SSH Address field completes inline from the same list while typing forward; deleting keeps the typed part.
+- The client sends `machines` with `machine_settings` (test extended); the picker check covers the list, search, choosing and completion.
+- **+** adds the typed address to `machines`; **−** forgets the selected machine (asks first): `Store::forget` removes it from `machines`, `[overrides]` and `[[open_tabs]]`, as the Linux client's Forget.
+
+### Per-machine auto-reconnect (merged 2026-10-30; tested on the Mac)
+
+- New shared setting `auto_reconnect` (default on) in `gliff-settings`, per machine or in `[defaults]`.
+- Off: not reopened at launch, and a dropped session waits for Reconnect (Mac: the error says so; Linux: "click the tab to reconnect"). Changing it never reconnects a session, on either client.
+- Mac: Machine ▸ Reconnect Automatically (checkbox) and a Reconnect row in Settings. Linux honours it; its settings window does not show it yet.
+
 ### Docs
 
 - `ForkNews.md` (the short list of what the fork adds, also near the top of the README), README fork notes, `docs/macos.md`, `docs/settings.md`, and the crate list in `docs/architecture.md`.
@@ -142,6 +155,12 @@ Support today:
 - [x] Tabs on the Mac: merged 2026-10-29 (one viewer process for every connection); several connections in tabs tested 2026-10-30; the rest under Deferred testing.
 - [x] Reconnect for dead sessions on the Mac: merged 2026-10-29; testing tabled, see Deferred testing.
 - [ ] Viewer and client CPU use and frame rate in a live GPU session (Activity Monitor).
+- [x] Connection window's known machines: list, search, choosing, double-click, autocomplete, File ▸ New Tab (tested 2026-10-30).
+- [x] + (adds the typed address) and − (asks, then forgets the machine and its settings) (tested 2026-10-30).
+- [x] Auto-reconnect on the Mac (tested 2026-10-30): Machine ▸ Reconnect Automatically off skips the launch reopen and drop retries; Settings ▸ Reconnect matches.
+- [ ] Auto-reconnect on Linux: a machine with `auto_reconnect = false` is not reopened and not retried.
+- [ ] Linux settings window: show `auto_reconnect`.
+- [ ] Discovery on the Mac shows nothing (reported 2026-10-30). `dns-sd -B _gliff._tcp local.` on the Mac lists nothing either, so no advertisement reaches the Mac: the cause is the host (gliff-discovery, Avahi, firewall UDP 5353) or the network (different LAN, Tailscale/VPN). Next: the host-side checks, and whether the Mac sees any mDNS from that host.
 - [ ] An iOS/iPadOS client: plan, effort and open decisions in [docs/ios-ipados-plan.md](docs/ios-ipados-plan.md) (Phase 0 spike first).
 
 ### Repo housekeeping
@@ -164,11 +183,23 @@ Support today:
 
 Newest first. Format: `### YYYY-MM-DD — summary (commit)`, then a line or two.
 
+### 2026-10-30 — Merge known machines and per-machine auto-reconnect into the working branch
+No-fast-forward merge of `feature/machines-and-auto-reconnect` (which holds `feature/macos-picker-machines`): the connection window's known-machines sidebar with + / − and autocomplete, and the shared `auto_reconnect` setting. Both tested on the Mac. Discovery: `dns-sd` on the Mac sees no `_gliff._tcp` either, so the advertisements never reach it.
+
 ### 2026-10-30 — T5 retested: Merge All Windows works
 Every tabs (T1–T9) and reconnect (R1–R5) check now passes.
 
 ### 2026-10-30 — Mac tabs and reconnect tested; Window menu gains the tab commands
 Tabs T1–T4 and T6–T9 and reconnect R1–R5 passed. T5 failed: no Window ▸ Merge All Windows, because AppKit does not add its tab commands to a menu built in code. The Window menu now lists Show Previous/Next Tab (⌘{ ⌘}), Move Tab to New Window, Merge All Windows and Show Tab Bar; retest pending.
+
+### 2026-10-30 — Add/forget machines; per-machine auto-reconnect (`feature/machines-and-auto-reconnect`)
+The known-machines list and autocomplete tested OK. Added + / − to the picker sidebar (`Store::forget`, as Linux's Forget) and a shared `auto_reconnect` setting: Machine ▸ Reconnect Automatically and a Settings row on the Mac; off skips launch reopen and drop retries, on both clients; changing it never reconnects. Tests: model, store forget, menu setting, picker rules.
+
+### 2026-10-30 — Fix: the connection window's sidebar did not compile
+`make check` on `feature/macos-picker-machines`: `#selector(connect)` for the sidebar's double-click came after the local `connect` button, which Swift refuses ("cannot refer to variable 'connect'"). Now `#selector(ComputerPicker.connect(_:))`.
+
+### 2026-10-30 — Connection window: known machines and autocomplete (`feature/macos-picker-machines`)
+Sidebar of past machines (search, choose, double-click to connect) and inline autocomplete of the SSH address from the config's `machines`, also in File ▸ New Tab. Discovery not finding hosts: the browse code matches what Linux advertises; docs/macos.md gains "When nothing is found" (dns-sd, Local Network permission incl. terminal launches, Avahi, LAN-only mDNS).
 
 ### 2026-10-30 — Mac tabs: several connections at once tested
 Several machines connected at the same time, each in its own tab, work as implemented. ForkNews.md and the README's fork features and status now say so; the remaining tab checks (sound following the visible tab, drag and merge, Machine menu, clipboard, restore at launch) and Mac reconnect stay under Deferred testing.

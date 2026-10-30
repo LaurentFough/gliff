@@ -118,7 +118,19 @@ pub fn client_main() -> Result<()> {
         let initial = match cli.selection() {
             Some(selected) => vec![selected],
             None => {
-                let restored = shared.open_tabs();
+                //= Machines with auto_reconnect off stay closed until chosen.
+                let restored: Vec<_> = shared
+                    .open_tabs()
+                    .into_iter()
+                    .filter(|tab| {
+                        let machine = crate::settings::machine_key(&tab.host);
+                        let on = shared.resolve(&machine, &cli_layer).auto_reconnect;
+                        if !on {
+                            tracing::info!(%machine, "not reopening: auto_reconnect is off");
+                        }
+                        on
+                    })
+                    .collect();
                 if !restored.is_empty() {
                     tracing::info!(tabs = restored.len(), "reopening the last tabs");
                     restored
@@ -342,7 +354,9 @@ async fn visit(
                 };
                 let incompatible = e.downcast_ref::<Incompatible>().is_some();
                 let error = format!("{e:#}");
-                let (text, delay) = match retry.failed(established.get(), incompatible) {
+                //= Read now, so the Machine menu's switch applies to this failure.
+                let auto = shared.resolve(&machine, &cli_layer).auto_reconnect;
+                let (text, delay) = match retry.failed(established.get(), incompatible || !auto) {
                     Next::Retry { attempt } => {
                         tracing::warn!(%machine, %error, attempt, "session ended; reconnecting");
                         (
@@ -351,8 +365,16 @@ async fn visit(
                         )
                     }
                     Next::Wait => {
-                        tracing::warn!(%machine, %error, "session ended; waiting for Reconnect");
-                        (format!("{error}\nReconnect, or close this window."), None)
+                        tracing::warn!(%machine, %error, auto, "session ended; waiting for Reconnect");
+                        let why = if auto {
+                            ""
+                        } else {
+                            "Reconnect Automatically is off for this machine. "
+                        };
+                        (
+                            format!("{error}\n{why}Reconnect, or close this window."),
+                            None,
+                        )
                     }
                 };
                 v.message_with_reconnect(&text).await;
@@ -414,12 +436,14 @@ enum Next {
 }
 
 impl Retry {
-    fn failed(&mut self, established: bool, incompatible: bool) -> Next {
+    /// `never`: this failure must wait for the user (an incompatible server,
+    /// or the machine's auto_reconnect is off).
+    fn failed(&mut self, established: bool, never: bool) -> Next {
         if established {
             self.attempts = 0;
             self.auto = true;
         }
-        if self.auto && !incompatible && self.attempts < MAX_RETRIES {
+        if self.auto && !never && self.attempts < MAX_RETRIES {
             self.attempts += 1;
             Next::Retry {
                 attempt: self.attempts,
