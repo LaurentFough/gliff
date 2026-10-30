@@ -107,6 +107,50 @@ impl Shared {
         state_json(&self.store.borrow())
     }
 
+    /// The tabs to reopen at launch, as the connection window would choose
+    /// them (screens come from each machine's settings).
+    pub fn open_tabs(&self) -> Vec<crate::discovery::Selection> {
+        self.store
+            .borrow()
+            .open_tabs()
+            .into_iter()
+            .map(|(host, port)| crate::discovery::Selection {
+                host,
+                port,
+                screen: crate::discovery::ScreenMode::Mirror,
+            })
+            .collect()
+    }
+
+    /// Remember a newly opened tab (once per address and port).
+    pub fn add_open_tab(&self, tab: &crate::discovery::Selection) {
+        let mut tabs = self.store.borrow().open_tabs();
+        if tabs.iter().any(|(h, p)| *h == tab.host && *p == tab.port) {
+            return;
+        }
+        tabs.push((tab.host.clone(), tab.port));
+        self.store.borrow_mut().set_open_tabs(&tabs);
+        self.save_quietly();
+    }
+
+    /// Forget a tab the user closed.
+    pub fn remove_open_tab(&self, tab: &crate::discovery::Selection) {
+        let mut tabs = self.store.borrow().open_tabs();
+        let before = tabs.len();
+        tabs.retain(|(h, p)| !(*h == tab.host && *p == tab.port));
+        if tabs.len() != before {
+            self.store.borrow_mut().set_open_tabs(&tabs);
+            self.save_quietly();
+        }
+    }
+
+    /// Save without telling sessions: nothing they run with changed.
+    fn save_quietly(&self) {
+        if let Err(e) = self.store.borrow().save() {
+            tracing::warn!(error = %e, "cannot save settings");
+        }
+    }
+
     /// The sound switch, shared with the Linux client (`muted` in the file).
     pub fn muted(&self) -> bool {
         self.store.borrow().muted()

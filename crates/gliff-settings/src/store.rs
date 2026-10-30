@@ -1,9 +1,11 @@
 //! The config file both clients share: `$XDG_CONFIG_HOME/gliff/config.toml`,
 //! else `~/.config/gliff/config.toml`.
 //!
-//! [`Store`] owns four keys: `machines` (the machines this client has
-//! connected to, oldest first), `[defaults]`, `[overrides."user@host"]` and
-//! `muted` (the sound switch, shared with the Linux client's header button).
+//! [`Store`] owns five keys: `machines` (the machines this client has
+//! connected to, oldest first), `[defaults]`, `[overrides."user@host"]`,
+//! `muted` (the sound switch, shared with the Linux client's header button)
+//! and `[[open_tabs]]` (the Mac's tabs to reopen at launch, `host` + `port`;
+//! the Linux client keeps its own `open` list).
 //! Everything else in the file (the Linux client's `open` and `shown`, or
 //! keys from a newer build) is read and written back untouched, so either
 //! client can save without losing the other's state.
@@ -27,6 +29,7 @@ const OVERRIDES: &str = "overrides";
 /// Top-level, as the Linux client writes it: present and true only when
 /// sound is off.
 const MUTED: &str = "muted";
+const OPEN_TABS: &str = "open_tabs";
 
 /// The parsed config file and where it lives.
 #[derive(Debug, Clone)]
@@ -232,6 +235,41 @@ impl Store {
         }
     }
 
+    /// The Mac's tabs to reopen, in order: (SSH address, port). Malformed
+    /// entries are skipped.
+    pub fn open_tabs(&self) -> Vec<(String, u16)> {
+        let Some(Value::Array(list)) = self.doc.get(OPEN_TABS) else {
+            return Vec::new();
+        };
+        list.iter()
+            .filter_map(|v| {
+                let t = v.as_table()?;
+                let host = t.get("host")?.as_str()?.trim();
+                let port = t.get("port").and_then(Value::as_integer).unwrap_or(22);
+                let port = u16::try_from(port).ok().filter(|p| *p > 0)?;
+                (!host.is_empty()).then(|| (host.to_string(), port))
+            })
+            .collect()
+    }
+
+    /// Replace the tabs to reopen; none removes the key.
+    pub fn set_open_tabs(&mut self, tabs: &[(String, u16)]) {
+        if tabs.is_empty() {
+            self.doc.remove(OPEN_TABS);
+            return;
+        }
+        let list = tabs
+            .iter()
+            .map(|(host, port)| {
+                let mut t = Table::new();
+                t.insert("host".into(), Value::String(host.clone()));
+                t.insert("port".into(), Value::Integer(i64::from(*port)));
+                Value::Table(t)
+            })
+            .collect();
+        self.doc.insert(OPEN_TABS.into(), Value::Array(list));
+    }
+
     /// What a session with `name` runs with, given the command line's layer:
     /// built-in, then `[defaults]`, then `cli`, then the machine's override.
     pub fn resolve(&self, name: &str, cli: &Settings) -> Resolved {
@@ -411,6 +449,27 @@ mod tests {
             !store("muted = \"yes\"\n").muted(),
             "a malformed value means sound on"
         );
+    }
+
+    #[test]
+    fn open_tabs_round_trip_and_skip_bad_entries() {
+        let mut s = store("open = [\"linux@tab\"]\n");
+        assert!(s.open_tabs().is_empty());
+        s.set_open_tabs(&[("a@b".into(), 22), ("c@d".into(), 2222)]);
+        let back = store(&toml::to_string(&s.doc).unwrap());
+        assert_eq!(
+            back.open_tabs(),
+            [("a@b".to_string(), 22), ("c@d".to_string(), 2222)]
+        );
+        assert_eq!(
+            back.doc.get("open").and_then(Value::as_array).map(Vec::len),
+            Some(1),
+            "Linux's list untouched"
+        );
+        let bad = store("[[open_tabs]]\nhost = \"\"\n[[open_tabs]]\nhost = \"x@y\"\nport = 70000\n[[open_tabs]]\nhost = \"ok@z\"\n");
+        assert_eq!(bad.open_tabs(), [("ok@z".to_string(), 22)]);
+        s.set_open_tabs(&[]);
+        assert!(!s.doc.contains_key(OPEN_TABS));
     }
 
     #[test]

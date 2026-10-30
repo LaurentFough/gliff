@@ -40,10 +40,10 @@ The log is newest first, and each entry names the commit.
 
 | Branch | Contents | Status |
 |---|---|---|
-| `acrogenesis/macos-client-host` | #47 base, signing and install fixes, Makefile, #98, Mac settings, GPU video, #80 sound, Mac sound, host mute, ToDone.md | working branch |
+| `acrogenesis/macos-client-host` | #47 base, signing and install fixes, Makefile, #98, Mac settings, GPU video, #80 sound, Mac sound, host mute, Mac reconnect, Mac tabs, ToDone.md | working branch |
 | `main` | upstream, untouched | — |
 
-Merged into the working branch on 2026-10-29, still on the fork until deleted (see Repo housekeeping): `feature/macos-gpu-video`, `macos-settings`, `merge/pr-98`, `merge/pr-80`, `feature/macos-audio`.
+Merged into the working branch on 2026-10-29, still on the fork until deleted (see Repo housekeeping): `feature/macos-gpu-video`, `macos-settings`, `merge/pr-98`, `merge/pr-80`, `feature/macos-audio`, `feature/macos-reconnect`, `feature/macos-tabs`.
 
 ## Upstream PRs
 
@@ -99,6 +99,12 @@ Merged into the working branch on 2026-10-29, still on the fork until deleted (s
 - The Mac viewer plays it through #80's `gliff-audio` (Opus, jitter buffer, cpal on CoreAudio). **Machine ▸ Play Sound** is the same top-level `muted` key as the Linux speaker button; `--no-audio` starts muted. Oversized packets are refused.
 - `gliff-server --mute-local-audio`: the host's speakers are muted while the client plays its sound, following a new default output, and restored on sound off, session end, or a crash (watchdog). PipeWire path only. Set it as the machine's server command.
 
+### Mac tabs and reconnect (merged 2026-10-29; not yet tested by hand)
+
+- **Tabs:** one viewer process hosts every connection as a native macOS tab. The tab bar's + or File ▸ New Tab opens the connection window; Window menu tab commands; every tab stays connected; only visible tabs play sound; the clipboard and Machine menu follow the active tab; open tabs reopen at launch (`[[open_tabs]]`), closing a tab forgets it.
+- **Reconnect:** a failed or dropped session shows its error with a Reconnect button (and Machine ▸ Reconnect). Sessions that had connected retry automatically, 5 × 1.5 s as on Linux; a failed first connect waits, so SSH prompts do not repeat; incompatible servers are never retried.
+- Bridge: packet kind 6 (TARGET window), events carry `"window"`; the Rust `Hub` routes them.
+
 ### Docs
 
 - README fork notes, `docs/macos.md`, `docs/settings.md`, and the crate list in `docs/architecture.md`.
@@ -121,6 +127,8 @@ Support today:
 ### Deferred testing
 
 - [ ] #98's settings on the Linux client.
+- [ ] Mac tabs, tabled 2026-10-29: the File menu and the New Tab connection window appear; nothing else tested. To test: two tabs stream at once; switching tabs moves sound to the visible one; drag a tab out and Merge All Windows; the Machine menu follows the active tab; clipboard to the active tab's machine; quit with two tabs and relaunch (both reopen); close one tab, quit, relaunch (only the other).
+- [ ] Mac reconnect, tabled 2026-10-29: stop `gliff-server` mid-session (expect "Reconnecting… (attempt n of 5)", then recovery); a wrong address (error + Reconnect button, no repeated SSH prompts); Machine ▸ Reconnect while the error shows.
 
 ### Follow-ups
 
@@ -128,8 +136,8 @@ Support today:
 - [ ] A "Host speakers: keep / mute" choice in both clients' settings (today: the server command).
 - [ ] Sound from a Mac host (ScreenCaptureKit audio capture + #80's Opus encoder).
 - [ ] A warning when "Private screen" is chosen with a Mac host.
-- [ ] Tabs on the Mac (Linux has them since upstream #23). Native macOS window tabs only group windows of one process, and each Mac connection is its own viewer process today. Options: (1) one viewer process hosting every connection as a window, grouped by macOS tabs; (2) move the Mac viewer onto PR #5's in-process client core (`gliff-client` + `gliff-ffi`), shared with the iOS plan.
-- [ ] Reconnect for dead sessions on the Mac: today a failed or dropped session shows "Close this window and connect again". Add a Reconnect button in that window (and Machine ▸ Reconnect while it shows), and optionally reconnect automatically as the Linux client does.
+- [x] Tabs on the Mac: merged 2026-10-29 (one viewer process for every connection); testing tabled, see Deferred testing.
+- [x] Reconnect for dead sessions on the Mac: merged 2026-10-29; testing tabled, see Deferred testing.
 - [ ] Viewer and client CPU use and frame rate in a live GPU session (Activity Monitor).
 
 ### Repo housekeeping
@@ -138,9 +146,9 @@ Support today:
   ```sh
   gh repo edit LaurentFough/gliff --default-branch acrogenesis/macos-client-host
   ```
-- [ ] Delete the merged branches on the fork (only you can; all five are contained in the working branch):
+- [ ] Delete the merged branches on the fork (only you can; all seven are contained in the working branch):
   ```sh
-  git push <fork-remote> --delete feature/macos-gpu-video macos-settings merge/pr-98 merge/pr-80 feature/macos-audio
+  git push <fork-remote> --delete feature/macos-gpu-video macos-settings merge/pr-98 merge/pr-80 feature/macos-audio feature/macos-reconnect feature/macos-tabs
   ```
 - [x] Rename remotes in Claude's clone (`origin` = the fork, `acrogenesis` = acrogenesis); do the same in your clones if you like.
 
@@ -151,6 +159,18 @@ Support today:
 ## Log
 
 Newest first. Format: `### YYYY-MM-DD — summary (commit)`, then a line or two.
+
+### 2026-10-29 — Merge Mac tabs and reconnect into the working branch; testing tabled
+No-fast-forward merge of `feature/macos-tabs` (which holds `feature/macos-reconnect`). `make check` passed the Rust tests and the helper compiled; the File menu and New Tab connection window appear. Hands-on testing of tabs and reconnect is tabled (Deferred testing).
+
+### 2026-10-29 — Input check follows tabs (`feature/macos-tabs`)
+`make check` on the tabs branch: all Rust tests passed (42 in gliff-macos), the helper compiled, but `scripts/macos-input-check.py` built its viewer from `App.view`/`App.window`, which moved into `Tab`. The harness now builds a `Tab` and registers it with `App.addTab`, and also checks resize events carry the window id.
+
+### 2026-10-29 — Mac: native tabs (`feature/macos-tabs`, on `feature/macos-reconnect`)
+One viewer process hosts every connection so macOS groups them as tabs: the bridge gains packet kind 6 (TARGET window) and events carry `"window"`; the Rust `Hub` routes them, and each tab runs the existing session code (`visit`). Tab bar + / File ▸ New Tab opens the connection window; tabs stay connected; only visible tabs play sound; the clipboard follows the active tab; open tabs reopen at launch (`[[open_tabs]]`, closing a tab forgets it). Tests: event routing, open-tabs store, background-tab sound. Not built here.
+
+### 2026-10-29 — Mac: reconnect dead sessions (`feature/macos-reconnect`)
+A failed or dropped session shows its error with a Reconnect button. Sessions that had connected retry automatically (5 × 1.5 s, as on Linux); a failed first connect waits, so SSH prompts do not repeat; incompatible servers are never retried (typed `Incompatible` error). Settings and the Machine menu work while waiting. `Retry` rule with unit tests; docs/macos.md.
 
 ### 2026-10-29 — Follow-ups: Mac tabs, reconnect for dead sessions
 Added to Follow-ups. Mac tabs need one process for all connections, or PR #5's in-process core.

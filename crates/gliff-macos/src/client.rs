@@ -74,7 +74,7 @@ impl Cli {
 
 #[cfg(target_os = "macos")]
 pub fn client_main() -> Result<()> {
-    let cli = Cli::parse();
+    let cli = Rc::new(Cli::parse());
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .with_writer(std::io::stderr)
@@ -106,120 +106,337 @@ pub fn client_main() -> Result<()> {
             &cli.server_bin,
             cli.video.as_deref(),
         );
-        let selected = match cli.host.as_deref() {
-            Some(h) => crate::discovery::Selection {
-                host: h.into(),
-                port: cli.port.unwrap_or(22),
-                screen: crate::discovery::ScreenMode::Mirror,
-            },
-            None if cli.connect.is_some() => crate::discovery::Selection {
+        if cli.check_frames.is_some() {
+            //= Integration run: one session, no window.
+            let selected = cli
+                .selection()
+                .context("--check-frames needs a host or --connect")?;
+            return visit(None, selected, cli.clone(), shared, cli_layer).await;
+        }
+        //= What to open: the command line's machine, else the tabs open when
+        //= Gliff last quit, else the connection window's choice.
+        let initial = match cli.selection() {
+            Some(selected) => vec![selected],
+            None => {
+                let restored = shared.open_tabs();
+                if !restored.is_empty() {
+                    tracing::info!(tabs = restored.len(), "reopening the last tabs");
+                    restored
+                } else {
+                    match crate::discovery::choose(cli.picker_screen(), &shared, &cli_layer).await?
+                    {
+                        Some(selected) => vec![selected],
+                        None => return Ok(()),
+                    }
+                }
+            }
+        };
+        //= One viewer process for every connection, so macOS can group
+        //= their windows as tabs.
+        let mut hub = Hub::open(&tab_title(&cli, &initial[0])).await?;
+        let mut visits = Vec::new();
+        for (i, selected) in initial.into_iter().enumerate() {
+            let viewer = if i == 0 {
+                hub.window(0)
+            } else {
+                hub.new_window(&tab_title(&cli, &selected)).await?
+            };
+            visits.push(spawn_visit(viewer, selected, &cli, &shared, &cli_layer));
+        }
+        //= The app's own events: the tab bar's + or File ▸ New Tab asks for
+        //= another machine; quitting ends every session.
+        while let Some(ev) = hub.app_event().await {
+            match ev["type"].as_str() {
+                Some("new_tab") => {
+                    let chosen =
+                        crate::discovery::choose(cli.picker_screen(), &shared, &cli_layer).await;
+                    match chosen {
+                        Ok(Some(selected)) => {
+                            let viewer = hub.new_window(&tab_title(&cli, &selected)).await?;
+                            visits.push(spawn_visit(viewer, selected, &cli, &shared, &cli_layer));
+                        }
+                        Ok(None) => {}
+                        Err(e) => {
+                            tracing::warn!(error = %format!("{e:#}"), "connection window failed")
+                        }
+                    }
+                }
+                Some("open_settings") => {
+                    let shared = shared.clone();
+                    tokio::task::spawn_local(async move {
+                        if let Err(e) = crate::settings::window(shared).await {
+                            tracing::warn!(error = %e, "settings window failed");
+                        }
+                    });
+                }
+                Some("bye") => break,
+                _ => {}
+            }
+        }
+        for visit in visits {
+            let _ = visit.await;
+        }
+        Ok(())
+    })
+}
+
+#[cfg(target_os = "macos")]
+impl Cli {
+    /// The machine the command line names, if any.
+    fn selection(&self) -> Option<crate::discovery::Selection> {
+        let screen = crate::discovery::ScreenMode::Mirror;
+        match (&self.host, &self.connect) {
+            (Some(h), _) => Some(crate::discovery::Selection {
+                host: h.clone(),
+                port: self.port.unwrap_or(22),
+                screen,
+            }),
+            (None, Some(_)) => Some(crate::discovery::Selection {
                 host: String::new(),
                 port: 22,
-                screen: crate::discovery::ScreenMode::Mirror,
-            },
-            None => {
-                let screen = if cli.headless {
-                    Some(crate::discovery::ScreenMode::Private)
-                } else if cli.output.is_some() {
-                    Some(crate::discovery::ScreenMode::Mirror)
-                } else {
-                    None
-                };
-                let Some(selection) = crate::discovery::choose(screen, &shared, &cli_layer).await?
-                else {
-                    return Ok(());
-                };
-                selection
-            }
-        };
+                screen,
+            }),
+            (None, None) => None,
+        }
+    }
+
+    /// The screen the connection window starts on, when a flag names one.
+    fn picker_screen(&self) -> Option<crate::discovery::ScreenMode> {
+        if self.headless {
+            Some(crate::discovery::ScreenMode::Private)
+        } else if self.output.is_some() {
+            Some(crate::discovery::ScreenMode::Mirror)
+        } else {
+            None
+        }
+    }
+}
+
+/// A tab's title: the machine it shows.
+#[cfg(target_os = "macos")]
+fn tab_title(cli: &Cli, selected: &crate::discovery::Selection) -> String {
+    match &cli.connect {
+        Some(addr) if selected.host.is_empty() => format!("Gliff — {addr}"),
+        _ => format!("Gliff — {}", selected.host),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn spawn_visit(
+    viewer: Viewer,
+    selected: crate::discovery::Selection,
+    cli: &Rc<Cli>,
+    shared: &crate::settings::SharedRef,
+    cli_layer: &gliff_settings::Settings,
+) -> tokio::task::JoinHandle<()> {
+    let (cli, shared, cli_layer) = (cli.clone(), shared.clone(), cli_layer.clone());
+    tokio::task::spawn_local(async move {
         let host = selected.host.clone();
-        ensure!(
-            !host.is_empty() || cli.connect.is_some(),
-            "enter an SSH address"
-        );
-        if cli.connect.is_none() {
-            selected.validate()?;
+        if let Err(e) = visit(Some(viewer), selected, cli, shared, cli_layer).await {
+            tracing::warn!(%host, error = %format!("{e:#}"), "tab ended");
         }
-        let machine = crate::settings::machine_key(match &cli.connect {
-            Some(addr) if host.is_empty() => addr,
-            _ => &host,
-        });
-        if cli.check_frames.is_none() {
-            shared.remember(&machine);
-        }
-        let screen_locked = cli.output.is_some();
-        //= The sound switch for this visit: kept across reconnects, so a
-        //= `--no-audio` run the user unmutes stays unmuted.
-        let sound_wanted = Rc::new(Cell::new(!cli.no_audio && !shared.muted()));
-        let mut viewer = match cli.check_frames {
-            None => {
-                Some(Viewer::open(&format!("Gliff — {host} · Shift+Esc releases keyboard")).await?)
-            }
-            Some(_) => None,
-        };
-        //= One window for the whole visit: a settings change that needs a new
-        //= session reconnects inside it.
-        let result = loop {
-            let opts = shared.resolve(&machine, &cli_layer);
-            let live = viewer.as_mut().map(|viewer| Live {
-                //= `--video cpu` or a saved CPU decode keeps the CPU path.
-                gpu: viewer.gpu && opts.decode != gliff_settings::Video::Cpu,
-                viewer,
-                shared: shared.clone(),
-                machine: machine.clone(),
-                cli: cli_layer.clone(),
-                opts: opts.clone(),
-                screen_locked,
-                sound: sound_wanted.clone(),
-            });
-            let outcome = if let Some(addr) = &cli.connect {
-                match tokio::net::TcpStream::connect(addr).await {
-                    Ok(stream) => {
-                        stream.set_nodelay(true)?;
-                        let (rd, wr) = tokio::io::split(stream);
-                        run_session(rd, wr, &host, cli.check_frames, live).await
-                    }
-                    Err(e) => Err(e.into()),
-                }
-            } else {
-                let mut target = cli.ssh_target(&selected);
-                target.server_bin = opts.server_bin.clone();
-                if cli.check_frames.is_none() {
-                    target.askpass = Some(native::helper_path()?);
-                }
-                if let Some(output) = &cli.output {
-                    target
-                        .server_args
-                        .extend(["--output".into(), output.clone()]);
-                } else if opts.screen == gliff_settings::Screen::Own {
-                    target.server_args.push("--headless".into());
-                }
-                match spawn_ssh(&target) {
-                    Ok(mut ssh) => {
-                        let r =
-                            run_session(ssh.stdout, ssh.stdin, &host, cli.check_frames, live).await;
-                        let _ = ssh.child.kill().await;
-                        r
-                    }
-                    Err(e) => Err(e.into()),
-                }
-            };
-            match outcome {
-                Ok(Outcome::Reconnect) => {
-                    tracing::info!(%machine, "settings changed; reconnecting");
-                    if let Some(v) = &viewer {
-                        v.message("Reconnecting with the new settings…").await;
-                    }
-                }
-                Ok(Outcome::Done) => break Ok(()),
-                Err(e) => break Err(e),
-            }
-        };
-        if let Some(viewer) = viewer.take() {
-            viewer.finish(&result).await;
-        }
-        result
     })
+}
+
+/// One machine for as long as its window (tab) is open: connect, follow
+/// settings changes, and reconnect after failures. Without a window (an
+/// integration run) it is one session.
+#[cfg(target_os = "macos")]
+async fn visit(
+    mut viewer: Option<Viewer>,
+    selected: crate::discovery::Selection,
+    cli: Rc<Cli>,
+    shared: crate::settings::SharedRef,
+    cli_layer: gliff_settings::Settings,
+) -> Result<()> {
+    let host = selected.host.clone();
+    ensure!(
+        !host.is_empty() || cli.connect.is_some(),
+        "enter an SSH address"
+    );
+    if cli.connect.is_none() {
+        selected.validate()?;
+    }
+    let machine = crate::settings::machine_key(match &cli.connect {
+        Some(addr) if host.is_empty() => addr,
+        _ => &host,
+    });
+    if cli.check_frames.is_none() {
+        shared.remember(&machine);
+    }
+    //= Windowed SSH sessions reopen at the next launch until their tab is
+    //= closed (quitting Gliff keeps them).
+    let restorable = viewer.is_some() && cli.connect.is_none();
+    if restorable {
+        shared.add_open_tab(&selected);
+    }
+    let screen_locked = cli.output.is_some();
+    //= The sound switch for this visit: kept across reconnects, so a
+    //= `--no-audio` run the user unmutes stays unmuted.
+    let sound_wanted = Rc::new(Cell::new(!cli.no_audio && !shared.muted()));
+    //= A failed or dropped session: retried automatically after one that
+    //= connected, else the window waits for Reconnect (see `Retry`).
+    let mut retry = Retry::default();
+    //= The window already showed the error and the user closed it.
+    let mut shown = false;
+    //= One window for the whole visit: a settings change that needs a new
+    //= session reconnects inside it.
+    let result = loop {
+        let opts = shared.resolve(&machine, &cli_layer);
+        let established = Rc::new(Cell::new(false));
+        let live = viewer.as_mut().map(|viewer| Live {
+            //= `--video cpu` or a saved CPU decode keeps the CPU path.
+            gpu: viewer.gpu && opts.decode != gliff_settings::Video::Cpu,
+            viewer,
+            shared: shared.clone(),
+            machine: machine.clone(),
+            cli: cli_layer.clone(),
+            opts: opts.clone(),
+            screen_locked,
+            sound: sound_wanted.clone(),
+            established: established.clone(),
+        });
+        let outcome = if let Some(addr) = &cli.connect {
+            match tokio::net::TcpStream::connect(addr).await {
+                Ok(stream) => {
+                    stream.set_nodelay(true)?;
+                    let (rd, wr) = tokio::io::split(stream);
+                    run_session(rd, wr, &host, cli.check_frames, live).await
+                }
+                Err(e) => Err(e.into()),
+            }
+        } else {
+            let mut target = cli.ssh_target(&selected);
+            target.server_bin = opts.server_bin.clone();
+            if cli.check_frames.is_none() {
+                target.askpass = Some(native::helper_path()?);
+            }
+            if let Some(output) = &cli.output {
+                target
+                    .server_args
+                    .extend(["--output".into(), output.clone()]);
+            } else if opts.screen == gliff_settings::Screen::Own {
+                target.server_args.push("--headless".into());
+            }
+            match spawn_ssh(&target) {
+                Ok(mut ssh) => {
+                    let r = run_session(ssh.stdout, ssh.stdin, &host, cli.check_frames, live).await;
+                    let _ = ssh.child.kill().await;
+                    r
+                }
+                Err(e) => Err(e.into()),
+            }
+        };
+        match outcome {
+            Ok(Outcome::Reconnect) => {
+                tracing::info!(%machine, "settings changed; reconnecting");
+                if let Some(v) = &viewer {
+                    v.message("Reconnecting with the new settings…").await;
+                }
+            }
+            Ok(Outcome::Done) => break Ok(()),
+            Err(e) => {
+                //= Integration runs fail at once; a window offers a reconnect.
+                let Some(v) = viewer.as_mut() else {
+                    break Err(e);
+                };
+                let incompatible = e.downcast_ref::<Incompatible>().is_some();
+                let error = format!("{e:#}");
+                let (text, delay) = match retry.failed(established.get(), incompatible) {
+                    Next::Retry { attempt } => {
+                        tracing::warn!(%machine, %error, attempt, "session ended; reconnecting");
+                        (
+                            format!("{error}\nReconnecting… (attempt {attempt} of {MAX_RETRIES})"),
+                            Some(RETRY_DELAY),
+                        )
+                    }
+                    Next::Wait => {
+                        tracing::warn!(%machine, %error, "session ended; waiting for Reconnect");
+                        (format!("{error}\nReconnect, or close this window."), None)
+                    }
+                };
+                v.message_with_reconnect(&text).await;
+                match v.wait_for_reconnect(delay, &shared, &machine).await {
+                    Wait::Reconnect => continue,
+                    Wait::Closed => {
+                        shown = true;
+                        break Err(e);
+                    }
+                }
+            }
+        }
+    };
+    if let Some(viewer) = viewer.take() {
+        if restorable && viewer.events.closed {
+            shared.remove_open_tab(&selected);
+        }
+        //= An error the window already showed needs no second showing.
+        viewer.finish(if shown { &Ok(()) } else { &result }).await;
+    }
+    result
+}
+
+/// Automatic reconnects in a row before the window waits for the user, as on
+/// Linux, and the pause before each.
+const MAX_RETRIES: u32 = 5;
+const RETRY_DELAY: Duration = Duration::from_millis(1500);
+
+/// The server speaks another protocol: reconnecting cannot help, so it is
+/// never retried automatically.
+#[derive(Debug)]
+struct Incompatible(String);
+
+impl std::fmt::Display for Incompatible {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "incompatible server: {}", self.0)
+    }
+}
+
+impl std::error::Error for Incompatible {}
+
+/// When a failed session is retried: the Linux client's rule (up to
+/// `MAX_RETRIES`, never an incompatible server), with one difference. Only
+/// a session that got through (its `HelloAck` arrived) starts automatic
+/// retries, so a wrong password or a refused key does not open the SSH
+/// prompt five times; the window waits for Reconnect instead.
+#[derive(Debug, Default)]
+struct Retry {
+    /// Retries since the last session that got through.
+    attempts: u32,
+    /// A session got through since the window last waited for the user.
+    auto: bool,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum Next {
+    Retry { attempt: u32 },
+    Wait,
+}
+
+impl Retry {
+    fn failed(&mut self, established: bool, incompatible: bool) -> Next {
+        if established {
+            self.attempts = 0;
+            self.auto = true;
+        }
+        if self.auto && !incompatible && self.attempts < MAX_RETRIES {
+            self.attempts += 1;
+            Next::Retry {
+                attempt: self.attempts,
+            }
+        } else {
+            self.auto = false;
+            self.attempts = 0;
+            Next::Wait
+        }
+    }
+}
+
+/// How waiting on a dead session's window ended.
+#[derive(Debug, PartialEq, Eq)]
+enum Wait {
+    Reconnect,
+    Closed,
 }
 
 /// How a session ended without an error.
@@ -231,88 +448,219 @@ enum Outcome {
     Reconnect,
 }
 
-/// The viewer window, kept across reconnects: its helper process and the
-/// two halves of its bridge. Only `client_main` (macOS) opens one; tests run
-/// sessions without a window.
+/// One viewer window (a tab), kept across reconnects: the two halves of its
+/// share of the bridge to the viewer helper (see [`Hub`]). Only
+/// `client_main` (macOS) opens one; tests run sessions without a window.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 struct Viewer {
-    child: Option<tokio::process::Child>,
     display: mpsc::Sender<(u8, Vec<u8>)>,
     events: Events,
     /// The helper can decode in hardware (VideoToolbox + Metal).
     gpu: bool,
 }
 
-/// The window's events, with any read ahead of time (while waiting for the
-/// helper's `video_caps`) delivered first.
+/// The window's events, with any read ahead of time delivered first.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 struct Events {
-    rx: mpsc::Receiver<Result<Value>>,
+    //= Unbounded: the hub's router must never wait on one tab, or a tab
+    //= stuck sending video would stall every other tab's events.
+    rx: mpsc::UnboundedReceiver<Result<Value>>,
     pending: std::collections::VecDeque<Result<Value>>,
+    /// The user closed this tab (`closed`), as opposed to quitting Gliff
+    /// (`bye`): its machine is not reopened at the next launch.
+    closed: bool,
+    /// The window can be seen (the last `visible` event); kept across
+    /// reconnects so a background tab stays silent.
+    visible: bool,
 }
 
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 impl Events {
     async fn recv(&mut self) -> Option<Result<Value>> {
-        match self.pending.pop_front() {
+        let ev = match self.pending.pop_front() {
             Some(ev) => Some(ev),
             None => self.rx.recv().await,
+        };
+        if let Some(Ok(v)) = &ev {
+            if v["type"] == "closed" {
+                self.closed = true;
+            }
+            if v["type"] == "visible" {
+                self.visible = v["on"].as_bool() != Some(false);
+            }
+        }
+        ev
+    }
+}
+
+/// The one viewer helper process and its bridge, shared by every window so
+/// that macOS can group them as tabs. Packets to the helper go to the window
+/// named by the last `TARGET` packet (window 0 until one is sent); events
+/// from it carry `"window": id`. Events without one belong to the app:
+/// `new_tab`, `open_settings` and `video_caps` go to [`Hub::app_event`];
+/// `keyboard_layout` goes to every window; `bye` (quit) to both.
+#[cfg(target_os = "macos")]
+struct Hub {
+    _child: tokio::process::Child,
+    out: mpsc::Sender<(u32, u8, Vec<u8>)>,
+    routes: Routes,
+    app: mpsc::UnboundedReceiver<Value>,
+    /// Window 0's events, registered before the first event is read.
+    first: Option<mpsc::UnboundedReceiver<Result<Value>>>,
+    next: u32,
+    gpu: bool,
+}
+
+#[cfg(target_os = "macos")]
+type Routes =
+    Rc<std::cell::RefCell<std::collections::HashMap<u32, mpsc::UnboundedSender<Result<Value>>>>>;
+
+#[cfg(target_os = "macos")]
+impl Hub {
+    /// Start the helper; its first window (id 0) opens with `title`.
+    async fn open(title: &str) -> Result<Self> {
+        let mut child = native::spawn("app", &[title.to_string()])?;
+        let mut rd = child.stdout.take().context("viewer stdout")?;
+        let mut wr = child.stdin.take().context("viewer stdin")?;
+        let (out, mut out_rx) = mpsc::channel::<(u32, u8, Vec<u8>)>(8);
+        tokio::task::spawn_local(async move {
+            let mut target = 0u32;
+            while let Some((window, kind, bytes)) = out_rx.recv().await {
+                if window != target {
+                    native::write(&mut wr, native::TARGET, &window.to_le_bytes()).await?;
+                    target = window;
+                }
+                native::write(&mut wr, kind, &bytes).await?;
+            }
+            Ok::<_, anyhow::Error>(())
+        });
+        let routes: Routes = Default::default();
+        let (first_tx, first) = mpsc::unbounded_channel::<Result<Value>>();
+        routes.borrow_mut().insert(0, first_tx);
+        let (app_tx, mut app) = mpsc::unbounded_channel::<Value>();
+        let router = routes.clone();
+        tokio::task::spawn_local(async move {
+            loop {
+                let ev = async {
+                    let (kind, data) = native::read(&mut rd).await?;
+                    ensure!(kind == native::EVENT, "unexpected UI packet");
+                    Ok::<Value, anyhow::Error>(serde_json::from_slice(&data)?)
+                }
+                .await;
+                let Ok(ev) = ev else {
+                    //= The helper is gone: every window and the app see the end.
+                    router.borrow_mut().clear();
+                    break;
+                };
+                route_event(&router, &app_tx, ev);
+            }
+        });
+        //= The helper's first event says whether it can decode in hardware.
+        let mut gpu = false;
+        match tokio::time::timeout(Duration::from_secs(5), app.recv()).await {
+            Ok(Some(ev)) if ev["type"] == "video_caps" => {
+                gpu = ev["hardware"].as_bool() == Some(true);
+            }
+            _ => tracing::warn!("the viewer did not report its video decode"),
+        }
+        tracing::info!(hardware = gpu, "viewer video decode");
+        Ok(Self {
+            _child: child,
+            out,
+            routes,
+            app,
+            first: Some(first),
+            next: 1,
+            gpu,
+        })
+    }
+
+    /// The window `id` as a [`Viewer`]: window 0 is the one the helper opened
+    /// at launch; others come from [`Hub::new_window`].
+    fn window(&mut self, id: u32) -> Viewer {
+        let rx = match (id, self.first.take()) {
+            (0, Some(rx)) => rx,
+            (_, first) => {
+                self.first = first;
+                let (tx, rx) = mpsc::unbounded_channel::<Result<Value>>();
+                self.routes.borrow_mut().insert(id, tx);
+                rx
+            }
+        };
+        //= Each window keeps its own small queue (frames wait or are dropped
+        //= per window, as before); one task merges them into the bridge.
+        let (display, mut display_rx) = mpsc::channel::<(u8, Vec<u8>)>(2);
+        let out = self.out.clone();
+        tokio::task::spawn_local(async move {
+            while let Some((kind, bytes)) = display_rx.recv().await {
+                if out.send((id, kind, bytes)).await.is_err() {
+                    break;
+                }
+            }
+        });
+        Viewer {
+            display,
+            events: Events {
+                rx,
+                pending: Default::default(),
+                closed: false,
+                visible: true,
+            },
+            gpu: self.gpu,
+        }
+    }
+
+    /// Open another window; macOS adds it as a tab of the front window.
+    async fn new_window(&mut self, title: &str) -> Result<Viewer> {
+        let id = self.next;
+        self.next += 1;
+        let viewer = self.window(id);
+        viewer
+            .command(json!({ "type": "open_window", "title": title }))
+            .await?;
+        Ok(viewer)
+    }
+
+    /// The next app event; `None` once the helper is gone.
+    async fn app_event(&mut self) -> Option<Value> {
+        self.app.recv().await
+    }
+}
+
+/// Where one event from the helper goes (see [`Hub`]). Never waits.
+#[cfg(target_os = "macos")]
+fn route_event(routes: &Routes, app: &mpsc::UnboundedSender<Value>, ev: Value) {
+    let window = ev
+        .get("window")
+        .and_then(Value::as_u64)
+        .and_then(|w| u32::try_from(w).ok());
+    let kind = ev["type"].as_str().unwrap_or_default().to_string();
+    match (window, kind.as_str()) {
+        (Some(id), _) => {
+            let mut routes = routes.borrow_mut();
+            if let Some(tx) = routes.get(&id) {
+                let _ = tx.send(Ok(ev));
+            }
+            if kind == "closed" {
+                routes.remove(&id);
+            }
+        }
+        (None, "keyboard_layout" | "bye") => {
+            for tx in routes.borrow().values() {
+                let _ = tx.send(Ok(ev.clone()));
+            }
+            if kind == "bye" {
+                let _ = app.send(ev);
+            }
+        }
+        (None, _) => {
+            let _ = app.send(ev);
         }
     }
 }
 
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 impl Viewer {
-    #[cfg(target_os = "macos")]
-    async fn open(title: &str) -> Result<Self> {
-        let mut child = native::spawn("app", &[title.to_string()])?;
-        let (display, mut display_rx) = mpsc::channel::<(u8, Vec<u8>)>(2);
-        let (event_tx, events) = mpsc::channel::<Result<Value>>(64);
-        let mut rd = child.stdout.take().context("viewer stdout")?;
-        let mut wr = child.stdin.take().context("viewer stdin")?;
-        tokio::task::spawn_local(async move {
-            while let Some((kind, bytes)) = display_rx.recv().await {
-                native::write(&mut wr, kind, &bytes).await?;
-            }
-            Ok::<_, anyhow::Error>(())
-        });
-        tokio::task::spawn_local(async move {
-            loop {
-                let ev = async {
-                    let (kind, data) = native::read(&mut rd).await?;
-                    ensure!(kind == native::EVENT, "unexpected UI packet");
-                    Ok(serde_json::from_slice(&data)?)
-                }
-                .await;
-                let stopped = ev.is_err();
-                if event_tx.send(ev).await.is_err() || stopped {
-                    break;
-                }
-            }
-        });
-        //= The helper's first event says whether it can decode in hardware.
-        //= An older helper sends none: anything else read here is kept.
-        let mut events = Events {
-            rx: events,
-            pending: Default::default(),
-        };
-        let mut gpu = false;
-        match tokio::time::timeout(Duration::from_secs(5), events.rx.recv()).await {
-            Ok(Some(Ok(ev))) if ev["type"] == "video_caps" => {
-                gpu = ev["hardware"].as_bool() == Some(true);
-            }
-            Ok(Some(other)) => events.pending.push_back(other),
-            Ok(None) | Err(_) => {}
-        }
-        tracing::info!(hardware = gpu, "viewer video decode");
-        Ok(Self {
-            child: Some(child),
-            display,
-            events,
-            gpu,
-        })
-    }
-
     async fn command(&self, value: Value) -> Result<()> {
         self.display
             .send((native::EVENT, serde_json::to_vec(&value)?))
@@ -325,20 +673,70 @@ impl Viewer {
         let _ = self.command(json!({ "message": text })).await;
     }
 
-    /// Show a failure and wait for the user to close the window; then stop
-    /// the helper.
+    /// Replace the picture with text and a Reconnect button.
+    async fn message_with_reconnect(&self, text: &str) {
+        let _ = self
+            .command(json!({ "message": text, "reconnect": true }))
+            .await;
+    }
+
+    /// After a session ended: wait for Reconnect (the button or Machine ▸
+    /// Reconnect), the window closing, or `delay` for an automatic retry.
+    /// Settings and the Machine menu keep working, so a wrong server command
+    /// or screen can be fixed before reconnecting.
+    async fn wait_for_reconnect(
+        &mut self,
+        delay: Option<Duration>,
+        shared: &crate::settings::SharedRef,
+        machine: &str,
+    ) -> Wait {
+        let timer = async {
+            match delay {
+                Some(d) => tokio::time::sleep(d).await,
+                None => std::future::pending().await,
+            }
+        };
+        tokio::pin!(timer);
+        loop {
+            let ev = tokio::select! {
+                _ = &mut timer => return Wait::Reconnect,
+                ev = self.events.recv() => ev,
+            };
+            let Some(Ok(ev)) = ev else {
+                return Wait::Closed;
+            };
+            match ev["type"].as_str() {
+                Some("reconnect") => return Wait::Reconnect,
+                Some("bye" | "closed") => return Wait::Closed,
+                Some("open_settings") => {
+                    let shared = shared.clone();
+                    tokio::task::spawn_local(async move {
+                        if let Err(e) = crate::settings::window(shared).await {
+                            tracing::warn!(error = %e, "settings window failed");
+                        }
+                    });
+                }
+                Some("setting") => {
+                    if let Err(e) = crate::settings::apply_machine_setting(shared, machine, &ev) {
+                        tracing::warn!(error = %e, "menu setting refused");
+                    }
+                }
+                //= Input and resizes for a session that is gone.
+                _ => {}
+            }
+        }
+    }
+
+    /// Show a failure and wait for the user to close the window.
     async fn finish(mut self, result: &Result<()>) {
         if let Err(error) = result {
             self.message(&format!("{error:#}\nClose this window and connect again."))
                 .await;
             while let Some(Ok(event)) = self.events.recv().await {
-                if event["type"] == "bye" {
+                if event["type"] == "bye" || event["type"] == "closed" {
                     break;
                 }
             }
-        }
-        if let Some(mut child) = self.child.take() {
-            let _ = child.kill().await;
         }
     }
 }
@@ -357,6 +755,8 @@ struct Live<'a> {
     screen_locked: bool,
     /// The Machine menu's sound switch, shared across reconnects.
     sound: Rc<Cell<bool>>,
+    /// Set when the server's `HelloAck` arrives: the session got through.
+    established: Rc<Cell<bool>>,
 }
 
 /// A session without a window (integration checks and tests).
@@ -386,6 +786,7 @@ where
     let mut gpu = live.as_ref().is_some_and(|l| l.gpu);
     //= Only a window plays sound; integration runs and tests do not offer it.
     let sound_cell = live.as_ref().map(|l| l.sound.clone());
+    let established = live.as_ref().map(|l| l.established.clone());
     let mut sound = Sound::new(sound_cell.as_ref().is_some_and(|c| c.get()));
     writer
         .write_msg(&ClientMsg::Hello {
@@ -437,6 +838,10 @@ where
         ),
         None => (None, None),
     };
+    //= A tab already in the background starts silent.
+    if let Some(events) = &events {
+        let _ = sound.visible(events.visible);
+    }
     let mut changes = ctx.as_ref().map(|(shared, ..)| shared.subscribe());
     let mut share_clipboard = ctx.as_ref().is_none_or(|(.., opts, _)| opts.clipboard);
     //= The saved switch as last seen, to notice a change from elsewhere.
@@ -511,7 +916,7 @@ where
             result = &mut writes => { result??; bail!("network writer stopped"); }
             ev = async { events.as_mut().unwrap().recv().await }, if events.is_some() => {
                 let ev = ev.context("window closed")??;
-                if ev["type"] == "bye" { out.send((ClientMsg::Bye, Bytes::new())).await?; break; }
+                if ev["type"] == "bye" || ev["type"] == "closed" { out.send((ClientMsg::Bye, Bytes::new())).await?; break; }
                 if ev["type"] == "clipboard" { if share_clipboard { clipboard.local(&ev).await?; } }
                 else if ev["type"] == "paste" { if share_clipboard { clipboard.paste(&ev); } }
                 else if ev["type"] == "open_settings" {
@@ -565,6 +970,10 @@ where
                         out.send((ClientMsg::FrameAck { frame_id, decoded_at_ms: now_ms() }, Bytes::new())).await?;
                     }
                     out.send((ClientMsg::RequestKeyframe, Bytes::new())).await?;
+                }
+                else if ev["type"] == "visible" {
+                    //= Only a tab that can be seen plays its machine's sound.
+                    if let Some(msg) = sound.visible(ev["on"].as_bool() != Some(false)) { out.send((msg, Bytes::new())).await?; }
                 }
                 else if ev["type"] == "sound" {
                     //= Machine ▸ Play Sound: apply now, then save it for both clients.
@@ -636,8 +1045,11 @@ where
                     Ok(msg) => { if share_clipboard { clipboard.peer(msg, payload) } }
                     Err(msg) => match msg {
                         ServerMsg::HelloAck { version, session, features, .. } => {
-                            ensure!(version == PROTOCOL_VERSION, "incompatible server protocol {version}");
+                            if version != PROTOCOL_VERSION {
+                                return Err(Incompatible(format!("server protocol {version}, this client {PROTOCOL_VERSION}")).into());
+                            }
                             got_hello = true;
+                            if let Some(e) = &established { e.set(true); }
                             if visible {
                                 let command = json!({"type":"cursor_mode", "embedded":cursor_in_video(session.headless, &features)});
                                 display_tx.send((native::EVENT, serde_json::to_vec(&command)?)).await?;
@@ -700,7 +1112,8 @@ where
                             ensure!(payload.len() == data_len as usize, "invalid audio payload");
                             sound.frame(seq, &payload);
                         }
-                        ServerMsg::Error { code, message, .. } => bail!("{}: {message}", if is_incompatible(code) { "incompatible server" } else { "server error" }),
+                        ServerMsg::Error { code, message, .. } if is_incompatible(code) => return Err(Incompatible(message).into()),
+                        ServerMsg::Error { message, .. } => bail!("server error: {message}"),
                         _ => {}
                     }
                 }
@@ -851,6 +1264,90 @@ fn server_payload(m: &ServerMsg) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_hub_routes_events_by_window() {
+        let routes: Routes = Default::default();
+        let (t0, mut r0) = mpsc::unbounded_channel();
+        let (t1, mut r1) = mpsc::unbounded_channel();
+        routes.borrow_mut().insert(0, t0);
+        routes.borrow_mut().insert(1, t1);
+        let (app_tx, mut app) = mpsc::unbounded_channel();
+        let next = |rx: &mut mpsc::UnboundedReceiver<Result<Value>>| {
+            rx.try_recv().ok().and_then(Result::ok)
+        };
+        route_event(&routes, &app_tx, json!({"type": "decoded", "window": 1}));
+        assert_eq!(next(&mut r1).unwrap()["type"], "decoded");
+        assert!(next(&mut r0).is_none(), "only the named window");
+        route_event(&routes, &app_tx, json!({"type": "keyboard_layout"}));
+        assert!(
+            next(&mut r0).is_some() && next(&mut r1).is_some(),
+            "every window"
+        );
+        route_event(&routes, &app_tx, json!({"type": "new_tab"}));
+        assert_eq!(app.try_recv().unwrap()["type"], "new_tab");
+        route_event(&routes, &app_tx, json!({"type": "closed", "window": 1}));
+        assert_eq!(next(&mut r1).unwrap()["type"], "closed");
+        assert!(
+            !routes.borrow().contains_key(&1),
+            "a closed tab's route is dropped"
+        );
+        route_event(&routes, &app_tx, json!({"type": "bye"}));
+        assert!(next(&mut r0).is_some());
+        assert_eq!(
+            app.try_recv().unwrap()["type"],
+            "bye",
+            "quitting reaches the app too"
+        );
+        route_event(&routes, &app_tx, json!({"type": "decoded", "window": 9}));
+        assert!(
+            app.try_recv().is_err(),
+            "an unknown window's event is dropped"
+        );
+    }
+
+    #[test]
+    fn a_first_connect_that_fails_waits_for_the_user() {
+        //= A wrong password or refused key must not reopen the SSH prompt.
+        let mut r = Retry::default();
+        assert_eq!(r.failed(false, false), Next::Wait);
+        assert_eq!(r.failed(false, false), Next::Wait);
+    }
+
+    #[test]
+    fn a_dropped_session_retries_up_to_the_limit_then_waits() {
+        let mut r = Retry::default();
+        assert_eq!(r.failed(true, false), Next::Retry { attempt: 1 });
+        for attempt in 2..=MAX_RETRIES {
+            assert_eq!(r.failed(false, false), Next::Retry { attempt });
+        }
+        assert_eq!(r.failed(false, false), Next::Wait);
+        assert_eq!(
+            r.failed(false, false),
+            Next::Wait,
+            "no retries until one gets through"
+        );
+    }
+
+    #[test]
+    fn a_session_that_gets_through_resets_the_count() {
+        let mut r = Retry::default();
+        r.failed(true, false);
+        r.failed(false, false);
+        assert_eq!(r.failed(true, false), Next::Retry { attempt: 1 });
+    }
+
+    #[test]
+    fn an_incompatible_server_is_never_retried() {
+        let mut r = Retry::default();
+        assert_eq!(r.failed(true, true), Next::Wait);
+        let e: anyhow::Error = Incompatible("protocol 2".into()).into();
+        assert!(e
+            .context("ssh session")
+            .downcast_ref::<Incompatible>()
+            .is_some());
+    }
 
     #[test]
     fn audio_payloads_are_skipped_not_parsed() {

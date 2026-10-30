@@ -10,6 +10,8 @@ pub const H264: u8 = 3;
 pub const ENCODE: u8 = 4;
 /// Coded video for the viewer's hardware decoder; see [`video_packet`].
 pub const VIDEO: u8 = 5;
+/// Viewer bridge: the window (u32 LE) the packets after this one are for.
+pub const TARGET: u8 = 6;
 pub const MAX_PACKET: usize = 64 * 1024 * 1024;
 
 pub async fn read<R: AsyncRead + Unpin>(rd: &mut R) -> Result<(u8, Vec<u8>)> {
