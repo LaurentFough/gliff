@@ -169,9 +169,9 @@ Support today:
   ```sh
   gh repo edit LaurentFough/gliff --default-branch acrogenesis/macos-client-host
   ```
-- [ ] Delete the merged branches on the fork (only you can; all seven are contained in the working branch):
+- [ ] Delete the merged branches on the fork (only you can; all nine are contained in the working branch):
   ```sh
-  git push <fork-remote> --delete feature/macos-gpu-video macos-settings merge/pr-98 merge/pr-80 feature/macos-audio feature/macos-reconnect feature/macos-tabs
+  git push <fork-remote> --delete feature/macos-gpu-video macos-settings merge/pr-98 merge/pr-80 feature/macos-audio feature/macos-reconnect feature/macos-tabs feature/macos-picker-machines feature/machines-and-auto-reconnect
   ```
 - [x] Rename remotes in Claude's clone (`origin` = the fork, `acrogenesis` = acrogenesis); do the same in your clones if you like.
 
