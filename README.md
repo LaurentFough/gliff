@@ -29,7 +29,7 @@ This fork ([LaurentFough/gliff](https://github.com/LaurentFough/gliff)) builds o
 
 ### Fork features
 
-- **Tabs on the Mac**: every connection is a native macOS tab in one viewer. The tab bar's **+** or File ▸ New Tab adds a machine; tabs stay connected, only the visible one plays sound, and open tabs reopen at launch. *(Tested; Window ▸ Merge All Windows was missing, now added, retest pending.)*
+- **Tabs on the Mac**: every connection is a native macOS tab in one viewer. The tab bar's **+** or File ▸ New Tab adds a machine; tabs stay connected, only the visible one plays sound, and open tabs reopen at launch. *(Tested.)*
 - **Known machines in the connection window**: a sidebar lists every machine you have connected to (searchable, **+** to add one, **−** to forget one), and the SSH Address field autocompletes from them, at launch and for File ▸ New Tab. *(Tested: list and autocomplete; + and − pending.)*
 - **Per-machine auto-reconnect**: Machine ▸ Reconnect Automatically, or Reconnect in Settings (`auto_reconnect`). Off, the machine is not reopened at launch and a dropped session waits for Reconnect; the Linux client honours it too. *(New; testing pending.)*
 - **Reconnect on the Mac**: a dropped or failed session shows a **Reconnect** button; sessions that had connected retry automatically (5 × 1.5 s, as on Linux), without repeating SSH prompts. *(Tested.)*
@@ -48,8 +48,7 @@ This fork ([LaurentFough/gliff](https://github.com/LaurentFough/gliff)) builds o
 |---|---|
 | Linux host → Mac client | Tested: GPU video, sound, host mute |
 | Mac tabs: several connections at once | Tested (2026-10-30) |
-| Mac tabs: sound, clipboard, Machine menu, restore at launch | Tested (2026-10-30) |
-| Mac tabs: Window ▸ Merge All Windows | Fixed; retest pending |
+| Mac tabs: sound, clipboard, Machine menu, Window menu, restore at launch | Tested (2026-10-30) |
 | Mac reconnect | Tested (2026-10-30) |
 | Linux host → Linux client sound | Not retested on the merged branch |
 | Sound from a Mac host | Not built yet |
