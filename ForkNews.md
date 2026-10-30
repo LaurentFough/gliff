@@ -46,7 +46,7 @@ A quick look at what this fork adds. The README carries the same list; [ToDone.m
 
 ## Screenshots
 
-The new features are outlined in blue. Host names are placeholders.
+The new features are outlined in blue.
 
 **Tabs:** two machines in one window; **+** or File ▸ New Tab adds another.
 
@@ -56,7 +56,7 @@ The new features are outlined in blue. Host names are placeholders.
 
 <img src="docs/images/macos-settings-reconnect.png" width="784" alt="Gliff Settings with the Reconnect automatically row">
 
-**Machine menu** (a mockup drawn to match the menu in `Gliff.swift`; regenerate with `docs/images/src/render.py`): Play Sound, Reconnect and Reconnect Automatically.
+**'Machine' menu:** Play Sound, Reconnect and Reconnect Automatically.
 
 <img src="docs/images/macos-machine-menu.png" width="760" alt="Machine menu: Mirror Screen, Private Screen, Share Clipboard, Play Sound, Reconnect, Reconnect Automatically">
 

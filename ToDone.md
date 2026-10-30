@@ -183,6 +183,9 @@ Support today:
 
 Newest first. Format: `### YYYY-MM-DD — summary (commit)`, then a line or two.
 
+### 2026-10-30 — Fix: screenshots not shown
+`.gitignore` ignores `*.png`, so the three images were never committed; `docs/images/*.png` is now an exception. Screenshots captions shortened.
+
 ### 2026-10-30 — Screenshots in the README and ForkNews
 Tabs and Settings ▸ Reconnect screenshots (host names, IPs and the home path replaced with placeholders, EXIF dropped), and a Machine menu mockup drawn to match `Gliff.swift` (`docs/images/src/`). New features outlined in 2 pt blue. Same Screenshots section in both files.
 
