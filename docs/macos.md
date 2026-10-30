@@ -214,8 +214,15 @@ logical display coordinates. macOS hosts mirror physical screens and reject
 ## Current differences from Linux
 
 - Native AppKit window with one connection per window. The Linux client's
-  recent-host tabs, Omarchy theme and automatic reconnection are not yet in
-  the macOS client. Settings changes that need a new session do reconnect.
+  recent-host tabs and Omarchy theme are not yet in the macOS client.
+  Settings changes that need a new session reconnect in the same window.
+- A session that fails or drops shows its error with a **Reconnect** button
+  (or Machine ▸ Reconnect). A session that had connected is retried
+  automatically, as on Linux: up to 5 times, 1.5 s apart. A first connection
+  that fails waits for Reconnect instead, so a wrong password or refused key
+  does not open the SSH prompt again and again; an incompatible server is
+  never retried. Settings and the Machine menu stay usable meanwhile, so a
+  wrong server command or screen can be fixed first.
 - The Mac viewer decodes in hardware: VideoToolbox decodes the main and
   auxiliary H.264 streams at the same time, a Metal kernel recombines them into
   full 4:4:4 colour (a port of the Vulkan recombine, from upstream PR #5), and

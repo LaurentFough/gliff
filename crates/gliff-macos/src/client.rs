@@ -151,6 +151,11 @@ pub fn client_main() -> Result<()> {
         //= The sound switch for this visit: kept across reconnects, so a
         //= `--no-audio` run the user unmutes stays unmuted.
         let sound_wanted = Rc::new(Cell::new(!cli.no_audio && !shared.muted()));
+        //= A failed or dropped session: retried automatically after one that
+        //= connected, else the window waits for Reconnect (see `Retry`).
+        let mut retry = Retry::default();
+        //= The window already showed the error and the user closed it.
+        let mut shown = false;
         let mut viewer = match cli.check_frames {
             None => {
                 Some(Viewer::open(&format!("Gliff — {host} · Shift+Esc releases keyboard")).await?)
@@ -161,6 +166,7 @@ pub fn client_main() -> Result<()> {
         //= session reconnects inside it.
         let result = loop {
             let opts = shared.resolve(&machine, &cli_layer);
+            let established = Rc::new(Cell::new(false));
             let live = viewer.as_mut().map(|viewer| Live {
                 //= `--video cpu` or a saved CPU decode keeps the CPU path.
                 gpu: viewer.gpu && opts.decode != gliff_settings::Video::Cpu,
@@ -171,6 +177,7 @@ pub fn client_main() -> Result<()> {
                 opts: opts.clone(),
                 screen_locked,
                 sound: sound_wanted.clone(),
+                established: established.clone(),
             });
             let outcome = if let Some(addr) = &cli.connect {
                 match tokio::net::TcpStream::connect(addr).await {
@@ -212,14 +219,104 @@ pub fn client_main() -> Result<()> {
                     }
                 }
                 Ok(Outcome::Done) => break Ok(()),
-                Err(e) => break Err(e),
+                Err(e) => {
+                    //= Integration runs fail at once; a window offers a reconnect.
+                    let Some(v) = viewer.as_mut() else { break Err(e) };
+                    let incompatible = e.downcast_ref::<Incompatible>().is_some();
+                    let error = format!("{e:#}");
+                    let (text, delay) = match retry.failed(established.get(), incompatible) {
+                        Next::Retry { attempt } => {
+                            tracing::warn!(%machine, %error, attempt, "session ended; reconnecting");
+                            (
+                                format!("{error}\nReconnecting… (attempt {attempt} of {MAX_RETRIES})"),
+                                Some(RETRY_DELAY),
+                            )
+                        }
+                        Next::Wait => {
+                            tracing::warn!(%machine, %error, "session ended; waiting for Reconnect");
+                            (format!("{error}\nReconnect, or close this window."), None)
+                        }
+                    };
+                    v.message_with_reconnect(&text).await;
+                    match v.wait_for_reconnect(delay, &shared, &machine).await {
+                        Wait::Reconnect => continue,
+                        Wait::Closed => {
+                            shown = true;
+                            break Err(e);
+                        }
+                    }
+                }
             }
         };
         if let Some(viewer) = viewer.take() {
-            viewer.finish(&result).await;
+            //= An error the window already showed needs no second showing.
+            viewer.finish(if shown { &Ok(()) } else { &result }).await;
         }
         result
     })
+}
+
+/// Automatic reconnects in a row before the window waits for the user, as on
+/// Linux, and the pause before each.
+const MAX_RETRIES: u32 = 5;
+const RETRY_DELAY: Duration = Duration::from_millis(1500);
+
+/// The server speaks another protocol: reconnecting cannot help, so it is
+/// never retried automatically.
+#[derive(Debug)]
+struct Incompatible(String);
+
+impl std::fmt::Display for Incompatible {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "incompatible server: {}", self.0)
+    }
+}
+
+impl std::error::Error for Incompatible {}
+
+/// When a failed session is retried: the Linux client's rule (up to
+/// `MAX_RETRIES`, never an incompatible server), with one difference. Only
+/// a session that got through (its `HelloAck` arrived) starts automatic
+/// retries, so a wrong password or a refused key does not open the SSH
+/// prompt five times; the window waits for Reconnect instead.
+#[derive(Debug, Default)]
+struct Retry {
+    /// Retries since the last session that got through.
+    attempts: u32,
+    /// A session got through since the window last waited for the user.
+    auto: bool,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum Next {
+    Retry { attempt: u32 },
+    Wait,
+}
+
+impl Retry {
+    fn failed(&mut self, established: bool, incompatible: bool) -> Next {
+        if established {
+            self.attempts = 0;
+            self.auto = true;
+        }
+        if self.auto && !incompatible && self.attempts < MAX_RETRIES {
+            self.attempts += 1;
+            Next::Retry {
+                attempt: self.attempts,
+            }
+        } else {
+            self.auto = false;
+            self.attempts = 0;
+            Next::Wait
+        }
+    }
+}
+
+/// How waiting on a dead session's window ended.
+#[derive(Debug, PartialEq, Eq)]
+enum Wait {
+    Reconnect,
+    Closed,
 }
 
 /// How a session ended without an error.
@@ -325,6 +422,60 @@ impl Viewer {
         let _ = self.command(json!({ "message": text })).await;
     }
 
+    /// Replace the picture with text and a Reconnect button.
+    async fn message_with_reconnect(&self, text: &str) {
+        let _ = self
+            .command(json!({ "message": text, "reconnect": true }))
+            .await;
+    }
+
+    /// After a session ended: wait for Reconnect (the button or Machine ▸
+    /// Reconnect), the window closing, or `delay` for an automatic retry.
+    /// Settings and the Machine menu keep working, so a wrong server command
+    /// or screen can be fixed before reconnecting.
+    async fn wait_for_reconnect(
+        &mut self,
+        delay: Option<Duration>,
+        shared: &crate::settings::SharedRef,
+        machine: &str,
+    ) -> Wait {
+        let timer = async {
+            match delay {
+                Some(d) => tokio::time::sleep(d).await,
+                None => std::future::pending().await,
+            }
+        };
+        tokio::pin!(timer);
+        loop {
+            let ev = tokio::select! {
+                _ = &mut timer => return Wait::Reconnect,
+                ev = self.events.recv() => ev,
+            };
+            let Some(Ok(ev)) = ev else {
+                return Wait::Closed;
+            };
+            match ev["type"].as_str() {
+                Some("reconnect") => return Wait::Reconnect,
+                Some("bye") => return Wait::Closed,
+                Some("open_settings") => {
+                    let shared = shared.clone();
+                    tokio::task::spawn_local(async move {
+                        if let Err(e) = crate::settings::window(shared).await {
+                            tracing::warn!(error = %e, "settings window failed");
+                        }
+                    });
+                }
+                Some("setting") => {
+                    if let Err(e) = crate::settings::apply_machine_setting(shared, machine, &ev) {
+                        tracing::warn!(error = %e, "menu setting refused");
+                    }
+                }
+                //= Input and resizes for a session that is gone.
+                _ => {}
+            }
+        }
+    }
+
     /// Show a failure and wait for the user to close the window; then stop
     /// the helper.
     async fn finish(mut self, result: &Result<()>) {
@@ -357,6 +508,8 @@ struct Live<'a> {
     screen_locked: bool,
     /// The Machine menu's sound switch, shared across reconnects.
     sound: Rc<Cell<bool>>,
+    /// Set when the server's `HelloAck` arrives: the session got through.
+    established: Rc<Cell<bool>>,
 }
 
 /// A session without a window (integration checks and tests).
@@ -386,6 +539,7 @@ where
     let mut gpu = live.as_ref().is_some_and(|l| l.gpu);
     //= Only a window plays sound; integration runs and tests do not offer it.
     let sound_cell = live.as_ref().map(|l| l.sound.clone());
+    let established = live.as_ref().map(|l| l.established.clone());
     let mut sound = Sound::new(sound_cell.as_ref().is_some_and(|c| c.get()));
     writer
         .write_msg(&ClientMsg::Hello {
@@ -636,8 +790,11 @@ where
                     Ok(msg) => { if share_clipboard { clipboard.peer(msg, payload) } }
                     Err(msg) => match msg {
                         ServerMsg::HelloAck { version, session, features, .. } => {
-                            ensure!(version == PROTOCOL_VERSION, "incompatible server protocol {version}");
+                            if version != PROTOCOL_VERSION {
+                                return Err(Incompatible(format!("server protocol {version}, this client {PROTOCOL_VERSION}")).into());
+                            }
                             got_hello = true;
+                            if let Some(e) = &established { e.set(true); }
                             if visible {
                                 let command = json!({"type":"cursor_mode", "embedded":cursor_in_video(session.headless, &features)});
                                 display_tx.send((native::EVENT, serde_json::to_vec(&command)?)).await?;
@@ -700,7 +857,8 @@ where
                             ensure!(payload.len() == data_len as usize, "invalid audio payload");
                             sound.frame(seq, &payload);
                         }
-                        ServerMsg::Error { code, message, .. } => bail!("{}: {message}", if is_incompatible(code) { "incompatible server" } else { "server error" }),
+                        ServerMsg::Error { code, message, .. } if is_incompatible(code) => return Err(Incompatible(message).into()),
+                        ServerMsg::Error { message, .. } => bail!("server error: {message}"),
                         _ => {}
                     }
                 }
@@ -851,6 +1009,48 @@ fn server_payload(m: &ServerMsg) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_first_connect_that_fails_waits_for_the_user() {
+        //= A wrong password or refused key must not reopen the SSH prompt.
+        let mut r = Retry::default();
+        assert_eq!(r.failed(false, false), Next::Wait);
+        assert_eq!(r.failed(false, false), Next::Wait);
+    }
+
+    #[test]
+    fn a_dropped_session_retries_up_to_the_limit_then_waits() {
+        let mut r = Retry::default();
+        assert_eq!(r.failed(true, false), Next::Retry { attempt: 1 });
+        for attempt in 2..=MAX_RETRIES {
+            assert_eq!(r.failed(false, false), Next::Retry { attempt });
+        }
+        assert_eq!(r.failed(false, false), Next::Wait);
+        assert_eq!(
+            r.failed(false, false),
+            Next::Wait,
+            "no retries until one gets through"
+        );
+    }
+
+    #[test]
+    fn a_session_that_gets_through_resets_the_count() {
+        let mut r = Retry::default();
+        r.failed(true, false);
+        r.failed(false, false);
+        assert_eq!(r.failed(true, false), Next::Retry { attempt: 1 });
+    }
+
+    #[test]
+    fn an_incompatible_server_is_never_retried() {
+        let mut r = Retry::default();
+        assert_eq!(r.failed(true, true), Next::Wait);
+        let e: anyhow::Error = Incompatible("protocol 2".into()).into();
+        assert!(e
+            .context("ssh session")
+            .downcast_ref::<Incompatible>()
+            .is_some());
+    }
 
     #[test]
     fn audio_payloads_are_skipped_not_parsed() {

@@ -129,7 +129,7 @@ Support today:
 - [ ] Sound from a Mac host (ScreenCaptureKit audio capture + #80's Opus encoder).
 - [ ] A warning when "Private screen" is chosen with a Mac host.
 - [ ] Tabs on the Mac (Linux has them since upstream #23). Native macOS window tabs only group windows of one process, and each Mac connection is its own viewer process today. Options: (1) one viewer process hosting every connection as a window, grouped by macOS tabs; (2) move the Mac viewer onto PR #5's in-process client core (`gliff-client` + `gliff-ffi`), shared with the iOS plan.
-- [ ] Reconnect for dead sessions on the Mac: today a failed or dropped session shows "Close this window and connect again". Add a Reconnect button in that window (and Machine ▸ Reconnect while it shows), and optionally reconnect automatically as the Linux client does.
+- [ ] Reconnect for dead sessions on the Mac (built on `feature/macos-reconnect`, awaiting test): today a failed or dropped session shows "Close this window and connect again". Add a Reconnect button in that window (and Machine ▸ Reconnect while it shows), and optionally reconnect automatically as the Linux client does.
 - [ ] Viewer and client CPU use and frame rate in a live GPU session (Activity Monitor).
 
 ### Repo housekeeping
@@ -151,6 +151,9 @@ Support today:
 ## Log
 
 Newest first. Format: `### YYYY-MM-DD — summary (commit)`, then a line or two.
+
+### 2026-10-29 — Mac: reconnect dead sessions (`feature/macos-reconnect`)
+A failed or dropped session shows its error with a Reconnect button. Sessions that had connected retry automatically (5 × 1.5 s, as on Linux); a failed first connect waits, so SSH prompts do not repeat; incompatible servers are never retried (typed `Incompatible` error). Settings and the Machine menu work while waiting. `Retry` rule with unit tests; docs/macos.md.
 
 ### 2026-10-29 — Follow-ups: Mac tabs, reconnect for dead sessions
 Added to Follow-ups. Mac tabs need one process for all connections, or PR #5's in-process core.

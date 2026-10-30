@@ -993,6 +993,17 @@ final class RemoteView: NSView {
     var released = false
     var hovering = false
     var message = "Connecting…"
+    // Shown under the message when a session failed or dropped; sends "reconnect".
+    let reconnectButton = NSButton(title: "Reconnect", target: nil, action: nil)
+    func showReconnect(_ show: Bool) {
+        if show { placeReconnect() }
+        if reconnectButton.isHidden == show { reconnectButton.isHidden = !show }
+    }
+    func placeReconnect() {
+        reconnectButton.sizeToFit()
+        let lines = Double(max(1, message.components(separatedBy: "\n").count))
+        reconnectButton.frame.origin = NSPoint(x: 24, y: bounds.height / 2 + lines * 20 + 12)
+    }
     var tracking: NSTrackingArea?
     override var acceptsFirstResponder: Bool { true }
     override var isFlipped: Bool { true }
@@ -1029,7 +1040,7 @@ final class RemoteView: NSView {
         CATransaction.commit()
         if show { presenter.draw() }
     }
-    override func layout() { super.layout(); placeGPU() }
+    override func layout() { super.layout(); placeGPU(); if !reconnectButton.isHidden { placeReconnect() } }
     override func viewDidChangeBackingProperties() { super.viewDidChangeBackingProperties(); placeGPU() }
     override func draw(_ dirty: NSRect) {
         NSColor.black.setFill(); bounds.fill()
@@ -1161,6 +1172,9 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
         machineMenu.addItem(NSMenuItem.separator())
         let reconnect = machineMenu.addItem(withTitle: "Reconnect", action: #selector(App.reconnect), keyEquivalent: "")
         reconnect.target = self
+        view.reconnectButton.target = self; view.reconnectButton.action = #selector(App.reconnect)
+        view.reconnectButton.bezelStyle = .rounded; view.reconnectButton.isHidden = true
+        view.addSubview(view.reconnectButton)
         NSApplication.shared.mainMenu = menu
         let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1100, height: 720), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
         w.title = CommandLine.arguments.dropFirst(2).first ?? "Gliff"
@@ -1200,6 +1214,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     if let message = cmd["message"] as? String {
                         self.view.message = message; self.view.image = nil
                         self.view.presenter?.current = nil; self.view.gpuSize = nil; self.view.needsDisplay = true
+                        self.view.showReconnect(cmd["reconnect"] as? Bool == true)
                     }
                     if let text = cmd["clipboard"] as? String { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(text, forType: .string) }
                 }
@@ -1224,6 +1239,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
     func showGPU(_ frame: GPUFrame) {
         if view.image != nil { view.image = nil }
+        view.showReconnect(false)
         view.presenter?.current = frame
         let size = CGSize(width: frame.texture.width, height: frame.texture.height)
         if view.gpuSize != size { view.gpuSize = size; view.needsDisplay = true } else { view.presenter?.draw() }
@@ -1264,6 +1280,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
         guard w > 0, h > 0, s > 0, w * h * 4 == data.count - 12, let provider = CGDataProvider(data: data.subdata(in: 12..<data.count) as CFData) else { return }
         view.image = CGImage(width: w, height: h, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: w * 4, space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipFirst.rawValue).union(.byteOrder32Little), provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent)
         view.scale = Double(s)/1000; view.needsDisplay = true
+        view.showReconnect(false)
         if view.gpuSize != nil { view.presenter?.current = nil; view.gpuSize = nil }
         if !painted { painted = true; diagnostic("Gliff displayed first frame: \(w)x\(h)") }
     }
