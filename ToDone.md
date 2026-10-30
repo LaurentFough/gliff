@@ -100,7 +100,7 @@ Merged into the working branch on 2026-10-29, still on the fork until deleted (s
 - The Mac viewer plays it through #80's `gliff-audio` (Opus, jitter buffer, cpal on CoreAudio). **Machine ▸ Play Sound** is the same top-level `muted` key as the Linux speaker button; `--no-audio` starts muted. Oversized packets are refused.
 - `gliff-server --mute-local-audio`: the host's speakers are muted while the client plays its sound, following a new default output, and restored on sound off, session end, or a crash (watchdog). PipeWire path only. Set it as the machine's server command.
 
-### Mac tabs and reconnect (merged 2026-10-29; several connections in tabs tested 2026-10-30)
+### Mac tabs and reconnect (merged 2026-10-29; tested 2026-10-30)
 
 - **Tabs:** one viewer process hosts every connection as a native macOS tab. The tab bar's + or File ▸ New Tab opens the connection window; Window menu tab commands; every tab stays connected; only visible tabs play sound; the clipboard and Machine menu follow the active tab; open tabs reopen at launch (`[[open_tabs]]`), closing a tab forgets it.
 - **Reconnect:** a failed or dropped session shows its error with a Reconnect button (and Machine ▸ Reconnect). Sessions that had connected retry automatically, 5 × 1.5 s as on Linux; a failed first connect waits, so SSH prompts do not repeat; incompatible servers are never retried.
@@ -129,8 +129,9 @@ Support today:
 
 - [ ] #98's settings on the Linux client.
 - [x] Mac tabs: several machines connected at once, each in its own tab (tested 2026-10-30).
-- [ ] Mac tabs, the rest: switching tabs moves sound to the visible one; drag a tab out and Merge All Windows; the Machine menu follows the active tab; clipboard to the active tab's machine; quit with two tabs and relaunch (both reopen); close one tab, quit, relaunch (only the other).
-- [ ] Mac reconnect, tabled 2026-10-29: stop `gliff-server` mid-session (expect "Reconnecting… (attempt n of 5)", then recovery); a wrong address (error + Reconnect button, no repeated SSH prompts); Machine ▸ Reconnect while the error shows.
+- [x] Mac tabs (tested 2026-10-30): sound follows the visible tab, and stays off for a hidden tab across a reconnect and while minimised; drag a tab out; the Machine menu follows the active tab; clipboard to the active tab's machine; quit with two tabs and relaunch (both reopen); close one, quit, relaunch (only the other).
+- [ ] Mac tabs: Window ▸ Merge All Windows was missing (AppKit does not add the tab commands to a menu built in code); the Window menu now lists them (Show Previous/Next Tab, Move Tab to New Window, Merge All Windows, Show Tab Bar). Retest T5.
+- [x] Mac reconnect (tested 2026-10-30): a dropped session retries and recovers; after 5 attempts the error and Reconnect button, then Reconnect works; a failed first connect waits with no retries or repeated prompts; fixing the server command in Settings then Reconnect connects; other tabs keep streaming meanwhile.
 
 ### Follow-ups
 
@@ -162,6 +163,9 @@ Support today:
 ## Log
 
 Newest first. Format: `### YYYY-MM-DD — summary (commit)`, then a line or two.
+
+### 2026-10-30 — Mac tabs and reconnect tested; Window menu gains the tab commands
+Tabs T1–T4 and T6–T9 and reconnect R1–R5 passed. T5 failed: no Window ▸ Merge All Windows, because AppKit does not add its tab commands to a menu built in code. The Window menu now lists Show Previous/Next Tab (⌘{ ⌘}), Move Tab to New Window, Merge All Windows and Show Tab Bar; retest pending.
 
 ### 2026-10-30 — Mac tabs: several connections at once tested
 Several machines connected at the same time, each in its own tab, work as implemented. ForkNews.md and the README's fork features and status now say so; the remaining tab checks (sound following the visible tab, drag and merge, Machine menu, clipboard, restore at launch) and Mac reconnect stay under Deferred testing.

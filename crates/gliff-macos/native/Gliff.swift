@@ -1235,11 +1235,20 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
         machineMenu.addItem(NSMenuItem.separator())
         let reconnect = machineMenu.addItem(withTitle: "Reconnect", action: #selector(App.reconnect), keyEquivalent: "")
         reconnect.target = self
-        // The Window menu: AppKit adds the tab commands (Show Tab Bar, Merge
-        // All Windows, Move Tab to New Window) and the window list.
+        // The Window menu: Minimize, the tab commands, and the window list
+        // (AppKit fills that in, as windowsMenu).
         let windowItem = NSMenuItem(); menu.addItem(windowItem)
         let windowMenu = NSMenu(title: "Window"); windowItem.submenu = windowMenu
         windowMenu.addItem(withTitle: "Minimize", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
+        // AppKit does not add the tab commands to a menu built in code, so they
+        // are listed here. Target nil: each goes to the key window (a tab).
+        windowMenu.addItem(NSMenuItem.separator())
+        windowMenu.addItem(withTitle: "Show Previous Tab", action: #selector(NSWindow.selectPreviousTab(_:)), keyEquivalent: "{")
+        windowMenu.addItem(withTitle: "Show Next Tab", action: #selector(NSWindow.selectNextTab(_:)), keyEquivalent: "}")
+        windowMenu.addItem(withTitle: "Move Tab to New Window", action: #selector(NSWindow.moveTabToNewWindow(_:)), keyEquivalent: "")
+        windowMenu.addItem(withTitle: "Merge All Windows", action: #selector(NSWindow.mergeAllWindows(_:)), keyEquivalent: "")
+        windowMenu.addItem(withTitle: "Show Tab Bar", action: #selector(NSWindow.toggleTabBar(_:)), keyEquivalent: "")
+        windowMenu.addItem(NSMenuItem.separator())
         NSApplication.shared.mainMenu = menu
         NSApplication.shared.windowsMenu = windowMenu
         makeWindow(first, title: CommandLine.arguments.dropFirst(2).first ?? "Gliff")
