@@ -140,6 +140,7 @@ Support today:
 - [x] Tabs on the Mac: merged 2026-10-29 (one viewer process for every connection); testing tabled, see Deferred testing.
 - [x] Reconnect for dead sessions on the Mac: merged 2026-10-29; testing tabled, see Deferred testing.
 - [ ] Viewer and client CPU use and frame rate in a live GPU session (Activity Monitor).
+- [ ] An iOS/iPadOS client: plan, effort and open decisions in [docs/ios-ipados-plan.md](docs/ios-ipados-plan.md) (Phase 0 spike first).
 
 ### Repo housekeeping
 
@@ -160,6 +161,9 @@ Support today:
 ## Log
 
 Newest first. Format: `### YYYY-MM-DD — summary (commit)`, then a line or two.
+
+### 2026-10-29 — Project `.gitignore`; iOS plan in docs (`907e2ed`)
+`.gitignore` grouped for this workspace: Rust/cargo (Cargo.lock stays tracked), Python, Swift/Xcode, logs, macOS (`.DS_Store` and friends), editors, packaging, and local scratch (`/patch/`, `*.patch`). The old `patch/` files are not committed: each is already in history as a commit (signing, `plutil`, cargo paths, the ssh test), or belongs to the abandoned objc2 `gliff-mac` prototype. Added `docs/ios-ipados-plan.md` (the iOS/iPadOS plan doc, with frontmatter) and a follow-up for it.
 
 ### 2026-10-29 — ForkNews.md, and the README's "New in this fork"
 The short list of what the fork adds (upstream PRs, its own features, status), now including Mac tabs and reconnect. The README carries the same list near the top, links ForkNews.md and ToDone.md, and its fork notes gain Tabs and Reconnect; "one connection per window" is gone.
