@@ -407,30 +407,22 @@ pub async fn window(shared: SharedRef) -> Result<()> {
 
 #[cfg(target_os = "macos")]
 async fn run_window(shared: &Shared) -> Result<()> {
-    use crate::native;
-    let mut child = native::spawn("settings", &[])?;
-    let mut rd = child.stdout.take().context("settings window stdout")?;
-    let mut wr = child.stdin.take().context("settings window stdin")?;
-    native::write(
-        &mut wr,
-        native::EVENT,
-        &serde_json::to_vec(&shared.state())?,
-    )
-    .await?;
+    //= Inside the viewer when one runs (a window of the same app), else a
+    //= helper process; see crate::panel.
+    let mut panel = crate::panel::Panel::open("settings", &[]).await?;
+    panel.send(&shared.state()).await?;
     let mut changes = shared.subscribe();
     let result = async {
         loop {
             tokio::select! {
-                packet = native::read(&mut rd) => {
-                    let Ok((kind, bytes)) = packet else { break };
-                    ensure!(kind == native::EVENT, "unexpected settings packet");
-                    let ev: Value = serde_json::from_slice(&bytes)?;
+                ev = panel.recv() => {
+                    let Ok(ev) = ev else { break };
                     match ev["type"].as_str() {
                         Some("settings_edit") => {
                             if let Err(e) = apply_edit(shared, &ev) {
                                 tracing::warn!(error = %e, "settings edit refused");
                                 let msg = json!({"type": "settings_error", "message": format!("{e:#}")});
-                                native::write(&mut wr, native::EVENT, &serde_json::to_vec(&msg)?).await?;
+                                panel.send(&msg).await?;
                             }
                         }
                         Some("settings_close") => break,
@@ -440,14 +432,14 @@ async fn run_window(shared: &Shared) -> Result<()> {
                 //= Edits from here or the viewer's menu: show them.
                 changed = changes.changed() => {
                     if changed.is_err() { break; }
-                    native::write(&mut wr, native::EVENT, &serde_json::to_vec(&shared.state())?).await?;
+                    panel.send(&shared.state()).await?;
                 }
             }
         }
         Ok(())
     }
     .await;
-    let _ = child.kill().await;
+    drop(panel);
     result
 }
 

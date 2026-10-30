@@ -47,7 +47,8 @@ The standalone connection window follows the Mac's appearance and accent color. 
 between fields, Return connects, and Escape cancels; changing focus does not
 start a connection.
 It opens at the minimum size that fits its controls. The computer list grows
-to show up to four rows, then scrolls; discovery preserves a window you enlarge.
+to show up to four rows, then scrolls; discovery preserves a window you enlarge,
+and the list takes the extra height when you make the window taller.
 The app asks for Local Network access on macOS versions that require it;
 enable Gliff under System Settings → Privacy & Security → Local Network.
 
@@ -67,6 +68,9 @@ Gliff keeps per-machine options in `~/.config/gliff/config.toml`
 (`$XDG_CONFIG_HOME/gliff/config.toml` when set), the same file and format as
 the Linux client: `[defaults]` for every machine, `[overrides."user@host"]`
 for one. Open **Settings…** (⌘,) from the connection window or the viewer.
+While the viewer is open, Settings is one of its windows (same Dock icon,
+⌘-Tab entry and menu bar), and ⌘, brings an open one forward instead of
+opening another.
 
 | Option | What it does | When it changes |
 |---|---|---|
@@ -256,7 +260,8 @@ logical display coordinates. macOS hosts mirror physical screens and reject
 
 - **Tabs.** Each connection is a native macOS window tab: the tab bar's
   **+** or File ▸ New Tab (⌘T while the pointer is off the picture) opens the
-  connection window for another machine; drag a tab out for its own window,
+  connection window for another machine, as a sheet on the front tab (it is
+  part of the viewer, not a separate app); drag a tab out for its own window,
   or Window ▸ Merge All Windows to gather them. Every tab stays connected;
   only a tab you can see plays sound (its host stops recording otherwise),
   and the Mac's clipboard is offered to the active tab's machine. The tabs

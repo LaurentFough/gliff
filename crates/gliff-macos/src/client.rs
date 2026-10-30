@@ -531,13 +531,14 @@ struct Hub {
     app: mpsc::UnboundedReceiver<Value>,
     /// Window 0's events, registered before the first event is read.
     first: Option<mpsc::UnboundedReceiver<Result<Value>>>,
-    next: u32,
+    /// The next window id; shared with the connection and settings windows
+    /// opened in this viewer (crate::panel).
+    next: Rc<Cell<u32>>,
     gpu: bool,
 }
 
 #[cfg(target_os = "macos")]
-type Routes =
-    Rc<std::cell::RefCell<std::collections::HashMap<u32, mpsc::UnboundedSender<Result<Value>>>>>;
+use crate::panel::Routes;
 
 #[cfg(target_os = "macos")]
 impl Hub {
@@ -572,8 +573,10 @@ impl Hub {
                 }
                 .await;
                 let Ok(ev) = ev else {
-                    //= The helper is gone: every window and the app see the end.
+                    //= The helper is gone: every window and the app see the end,
+                    //= and new panels open as their own processes again.
                     router.borrow_mut().clear();
+                    crate::panel::set_viewer(None);
                     break;
                 };
                 route_event(&router, &app_tx, ev);
@@ -588,13 +591,20 @@ impl Hub {
             _ => tracing::warn!("the viewer did not report its video decode"),
         }
         tracing::info!(hardware = gpu, "viewer video decode");
+        //= From now on the connection and settings windows open in here.
+        let next = Rc::new(Cell::new(1));
+        crate::panel::set_viewer(Some(crate::panel::ViewerHost {
+            out: out.clone(),
+            routes: routes.clone(),
+            next: next.clone(),
+        }));
         Ok(Self {
             _child: child,
             out,
             routes,
             app,
             first: Some(first),
-            next: 1,
+            next,
             gpu,
         })
     }
@@ -636,8 +646,8 @@ impl Hub {
 
     /// Open another window; macOS adds it as a tab of the front window.
     async fn new_window(&mut self, title: &str) -> Result<Viewer> {
-        let id = self.next;
-        self.next += 1;
+        let id = self.next.get();
+        self.next.set(id + 1);
         let viewer = self.window(id);
         viewer
             .command(json!({ "type": "open_window", "title": title }))

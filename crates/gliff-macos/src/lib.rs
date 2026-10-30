@@ -5,6 +5,8 @@ pub mod discovery;
 pub mod keymap;
 pub mod keys;
 pub mod native;
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub mod panel;
 pub mod settings;
 
 #[cfg(any(target_os = "macos", test))]
