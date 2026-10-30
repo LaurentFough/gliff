@@ -38,9 +38,10 @@ This fork ([LaurentFough/gliff](https://github.com/LaurentFough/gliff)) builds o
 - **Host speaker mute**: `gliff-server --mute-local-audio` mutes the Linux host's speakers while the client plays, and restores them on stop, disconnect or crash.
 - **Shared settings**: a `gliff-settings` crate; both clients read and write `~/.config/gliff/config.toml`. On the Mac: a settings window (⌘,) and a Machine menu.
 - **Local signing**: no paid Apple Developer account needed (a self-signed `gliff-local` identity), so privacy permissions survive rebuilds.
-- **Makefile**: one front end for `bin/` and `scripts/`. `make macos` builds, signs, installs and verifies; `make install` on Arch; also `make check` and `make video-check`.
+- **Makefile**: one front end for `bin/` and `scripts/`. `make macos` builds, signs, installs and verifies; `make install` on Arch; also `make check`, `make video-check` and `make distclean`; a project-wide `.gitignore`.
 - **Checks**: `make video-check` checks GPU output against the CPU decoder and benchmarks both; the ssh login-shell test no longer depends on your shell setup.
 - **Fixes**: Mac install and signing (`plutil`, a custom cargo `target-dir`); the client ignores stray sound packets from a host.
+- **Planned**: an iOS/iPadOS client; see [docs/ios-ipados-plan.md](docs/ios-ipados-plan.md).
 
 ### Status
 
@@ -50,6 +51,9 @@ This fork ([LaurentFough/gliff](https://github.com/LaurentFough/gliff)) builds o
 | Mac tabs: several connections at once | Tested (2026-10-30) |
 | Mac tabs: sound, clipboard, Machine menu, Window menu, restore at launch | Tested (2026-10-30) |
 | Mac reconnect | Tested (2026-10-30) |
+| Known machines (sidebar, + / −, autocomplete) | Tested (2026-10-30) |
+| Per-machine auto-reconnect | Tested on the Mac; Linux pending |
+| Mac discovery (Bonjour) | Not finding hosts; pinned |
 | Linux host → Linux client sound | Not retested on the merged branch |
 | Sound from a Mac host | Not built yet |
 
@@ -343,12 +347,26 @@ gliff 0.4.1).
   ▸ New Tab opens the connection window for another machine. Every tab stays
   connected, only a visible tab plays sound, the clipboard and Machine menu
   follow the active tab, and open tabs reopen at launch (`[[open_tabs]]`).
-  See [macOS support](docs/macos.md).
+  The Window menu lists the tab commands (Show Previous/Next Tab, Move Tab to
+  New Window, Merge All Windows, Show Tab Bar). See
+  [macOS support](docs/macos.md).
 - **Reconnect.** A failed or dropped session shows its error with a
   **Reconnect** button. A session that had connected retries automatically,
   5 times 1.5 s apart, as on Linux; a failed first connection waits, so a
   wrong password does not reopen the SSH prompt; an incompatible server is
   never retried.
+- **Per-machine auto-reconnect.** A shared `auto_reconnect` setting (default
+  on), switched with Machine ▸ Reconnect Automatically or the Reconnect row
+  in Settings. Off, the machine is not reopened at launch and a dropped
+  session waits for Reconnect; the Linux client honours it too. Changing it
+  never reconnects a session.
+- **Known machines in the connection window.** A sidebar lists every
+  machine in `config.toml`'s `machines`, newest first, with a search field;
+  choosing one fills the address and its screen, double-click connects, **+**
+  adds the typed address and **−** forgets a machine (its settings and its
+  tab to reopen too, as the Linux client's Forget). The SSH Address field
+  completes from the same list as you type. At launch and for File ▸ New Tab.
+  See [macOS support](docs/macos.md#known-machines-and-autocomplete).
 - **Per-machine settings.** #98's settings model is a shared
   `gliff-settings` crate, so both clients read and write the same
   `~/.config/gliff/config.toml`. The Mac has a settings window (⌘,), a
@@ -386,8 +404,11 @@ gliff 0.4.1).
 ### Build and checks
 
 - **Makefile**: one front end for `bin/` and `scripts/`, including the
-  `make macos` pipeline, `make verify` and `make video-check`; see
+  `make macos` pipeline, `make verify`, `make video-check` and `make
+  distclean` (removes everything `.gitignore` ignores, after asking); see
   [Make targets](#make-targets).
+- **Project `.gitignore`**: Rust/cargo, Python, Swift/Xcode, logs, macOS
+  clutter (`.DS_Store`), editors, packaging and local scratch (`patch/`).
 - **ToDone.md**: a running report of this fork's state, pending work and a
   log of each commit or merge. **ForkNews.md**: the short list of what the
   fork adds, also at the top of this README.
@@ -404,5 +425,7 @@ gliff 0.4.1).
   and Hyprland do, and what is tested where.
 - [docs/development.md](docs/development.md): building, running on one
   machine, and the tests.
+- [docs/ios-ipados-plan.md](docs/ios-ipados-plan.md): this fork's plan for an
+  iOS/iPadOS client (scope, effort, open decisions).
 
 gliff is released under the MIT license.

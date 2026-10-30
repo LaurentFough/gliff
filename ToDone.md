@@ -160,7 +160,7 @@ Support today:
 - [x] Auto-reconnect on the Mac (tested 2026-10-30): Machine ▸ Reconnect Automatically off skips the launch reopen and drop retries; Settings ▸ Reconnect matches.
 - [ ] Auto-reconnect on Linux: a machine with `auto_reconnect = false` is not reopened and not retried.
 - [ ] Linux settings window: show `auto_reconnect`.
-- [ ] Discovery on the Mac shows nothing (reported 2026-10-30). `dns-sd -B _gliff._tcp local.` on the Mac lists nothing either, so no advertisement reaches the Mac: the cause is the host (gliff-discovery, Avahi, firewall UDP 5353) or the network (different LAN, Tailscale/VPN). Next: the host-side checks, and whether the Mac sees any mDNS from that host.
+- [ ] **Pinned (2026-10-30), to resolve later:** Discovery on the Mac shows nothing (reported 2026-10-30). `dns-sd -B _gliff._tcp local.` on the Mac lists nothing either, so no advertisement reaches the Mac: the cause is the host (gliff-discovery, Avahi, firewall UDP 5353) or the network (different LAN, Tailscale/VPN). Next: the host-side checks, and whether the Mac sees any mDNS from that host.
 - [ ] An iOS/iPadOS client: plan, effort and open decisions in [docs/ios-ipados-plan.md](docs/ios-ipados-plan.md) (Phase 0 spike first).
 
 ### Repo housekeeping
@@ -182,6 +182,9 @@ Support today:
 ## Log
 
 Newest first. Format: `### YYYY-MM-DD — summary (commit)`, then a line or two.
+
+### 2026-10-30 — README and ForkNews brought up to date
+README fork notes gain known machines, per-machine auto-reconnect, the Window menu's tab commands, `make distclean`, the project `.gitignore` and a link to the iOS plan. The shared list and status table (README and ForkNews.md) add the same. Discovery pinned.
 
 ### 2026-10-30 — Merge known machines and per-machine auto-reconnect into the working branch
 No-fast-forward merge of `feature/machines-and-auto-reconnect` (which holds `feature/macos-picker-machines`): the connection window's known-machines sidebar with + / − and autocomplete, and the shared `auto_reconnect` setting. Both tested on the Mac. Discovery: `dns-sd` on the Mac sees no `_gliff._tcp` either, so the advertisements never reach it.

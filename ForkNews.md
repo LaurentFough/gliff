@@ -39,9 +39,10 @@ A quick look at what this fork adds. The README carries the same list; [ToDone.m
 - **Host speaker mute**: `gliff-server --mute-local-audio` mutes the Linux host's speakers while the client plays, and restores them on stop, disconnect or crash.
 - **Shared settings**: a `gliff-settings` crate; both clients read and write `~/.config/gliff/config.toml`. On the Mac: a settings window (⌘,) and a Machine menu.
 - **Local signing**: no paid Apple Developer account needed (a self-signed `gliff-local` identity), so privacy permissions survive rebuilds.
-- **Makefile**: one front end for `bin/` and `scripts/`. `make macos` builds, signs, installs and verifies; `make install` on Arch; also `make check` and `make video-check`.
+- **Makefile**: one front end for `bin/` and `scripts/`. `make macos` builds, signs, installs and verifies; `make install` on Arch; also `make check`, `make video-check` and `make distclean`; a project-wide `.gitignore`.
 - **Checks**: `make video-check` checks GPU output against the CPU decoder and benchmarks both; the ssh login-shell test no longer depends on your shell setup.
 - **Fixes**: Mac install and signing (`plutil`, a custom cargo `target-dir`); the client ignores stray sound packets from a host.
+- **Planned**: an iOS/iPadOS client; see [docs/ios-ipados-plan.md](docs/ios-ipados-plan.md).
 
 ## Status
 
@@ -51,6 +52,9 @@ A quick look at what this fork adds. The README carries the same list; [ToDone.m
 | Mac tabs: several connections at once | Tested (2026-10-30) |
 | Mac tabs: sound, clipboard, Machine menu, Window menu, restore at launch | Tested (2026-10-30) |
 | Mac reconnect | Tested (2026-10-30) |
+| Known machines (sidebar, + / −, autocomplete) | Tested (2026-10-30) |
+| Per-machine auto-reconnect | Tested on the Mac; Linux pending |
+| Mac discovery (Bonjour) | Not finding hosts; pinned |
 | Linux host → Linux client sound | Not retested on the merged branch |
 | Sound from a Mac host | Not built yet |
 
