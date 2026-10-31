@@ -146,6 +146,8 @@ pub fn client_main() -> Result<()> {
         //= One viewer process for every connection, so macOS can group
         //= their windows as tabs.
         let mut hub = Hub::open(&tab_title(&cli, &initial[0])).await?;
+        //= App-wide options (Settings ▸ General) now and after every change.
+        hub.follow_app_settings(shared.clone());
         let mut visits = Vec::new();
         for (i, selected) in initial.into_iter().enumerate() {
             let viewer = if i == 0 {
@@ -653,6 +655,26 @@ impl Hub {
             .command(json!({ "type": "open_window", "title": title }))
             .await?;
         Ok(viewer)
+    }
+
+    /// Keep the viewer's app-wide options (`app_settings`, e.g. quitting
+    /// when the last window closes) in step with the saved settings.
+    fn follow_app_settings(&self, shared: crate::settings::SharedRef) {
+        let out = self.out.clone();
+        tokio::task::spawn_local(async move {
+            let mut changes = shared.subscribe();
+            loop {
+                let Ok(bytes) = serde_json::to_vec(&crate::settings::app_settings(&shared)) else {
+                    break;
+                };
+                //= Any window id will do: the viewer handles it app-wide.
+                if out.send((0, native::EVENT, bytes)).await.is_err()
+                    || changes.changed().await.is_err()
+                {
+                    break;
+                }
+            }
+        });
     }
 
     /// The next app event; `None` once the helper is gone.

@@ -89,6 +89,40 @@ protocol PanelWindow: AnyObject {
 //= Set by the viewer: bring its settings window forward when one is open
 //= (true), so Settings… never opens a second one.
 var focusOpenSettings: () -> Bool = { false }
+//= Gliff ▸ About Gliff, in every Gliff window's menu (viewer, connection
+//= window, settings). Version and build come from the client
+//= (GLIFF_VERSION, GLIFF_BUILD; see native::spawn), else the app bundle.
+final class About: NSObject {
+    static let shared = About()
+    static var version: String {
+        ProcessInfo.processInfo.environment["GLIFF_VERSION"]
+            ?? Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "unknown"
+    }
+    static var build: String {
+        ProcessInfo.processInfo.environment["GLIFF_BUILD"]
+            ?? Bundle.main.infoDictionary?["GliffBuildID"] as? String ?? "unknown"
+    }
+    @objc func show(_ sender: Any?) {
+        let small = NSFont.systemFont(ofSize: 11)
+        let credits = NSMutableAttributedString(string: "Remote desktop for Hyprland and macOS over SSH.\n", attributes: [.font: small, .foregroundColor: NSColor.secondaryLabelColor])
+        credits.append(NSAttributedString(string: "github.com/LaurentFough/gliff", attributes: [.font: small, .link: URL(string: "https://github.com/LaurentFough/gliff")!]))
+        credits.append(NSAttributedString(string: "\nBased on omacom/gliff (MIT License).", attributes: [.font: small, .foregroundColor: NSColor.secondaryLabelColor]))
+        let paragraph = NSMutableParagraphStyle(); paragraph.alignment = .center
+        credits.addAttribute(.paragraphStyle, value: paragraph, range: NSRange(location: 0, length: credits.length))
+        NSApplication.shared.orderFrontStandardAboutPanel(options: [
+            .applicationName: "Gliff",
+            .applicationVersion: About.version,
+            .version: "build \(About.build)",
+            .credits: credits,
+        ])
+        NSApplication.shared.activate(ignoringOtherApps: true)
+    }
+}
+func aboutMenuItem() -> NSMenuItem {
+    let item = NSMenuItem(title: "About Gliff", action: #selector(About.show(_:)), keyEquivalent: "")
+    item.target = About.shared
+    return item
+}
 //= The standard Edit menu (target nil: the focused text field), so Cut,
 //= Copy, Paste and Select All work in the address and server-command fields.
 func editMenuItem() -> NSMenuItem {
@@ -1214,6 +1248,11 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
     // The connection and settings windows the client opened in this
     // process (open_panel), by id; same lock as tabs.
     private var panels: [UInt32: PanelWindow] = [:]
+    // Settings ▸ General ▸ Quit Gliff when its last window closes
+    // (quit_on_last_window, from app_settings). Off: Gliff stays open with
+    // no windows; File ▸ New Tab or the Dock icon opens the connection window.
+    var quitOnLastWindow = false
+    var reconnectItem: NSMenuItem?
     // Reader thread only: the window the next packets are for (kind 6).
     private var target: UInt32 = 0
     // The tab that last became key: the Machine menu and the local clipboard
@@ -1250,6 +1289,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
         event(["type": "video_caps", "hardware": first.gpu != nil])
         let menu = NSMenu(); let appItem = NSMenuItem(); menu.addItem(appItem)
         let appMenu = NSMenu(); appItem.submenu = appMenu
+        appMenu.addItem(aboutMenuItem()); appMenu.addItem(NSMenuItem.separator())
         let hosting = appMenu.addItem(withTitle: "Enable Remote Control…", action: #selector(App.requestHostPermissions), keyEquivalent: "")
         hosting.target = self
         let settings = appMenu.addItem(withTitle: "Settings…", action: #selector(App.openSettings), keyEquivalent: ",")
@@ -1272,7 +1312,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
         soundItem.target = self; soundItem.isEnabled = false; machineMenu.addItem(soundItem)
         machineMenu.addItem(NSMenuItem.separator())
         let reconnect = machineMenu.addItem(withTitle: "Reconnect", action: #selector(App.reconnect), keyEquivalent: "")
-        reconnect.target = self
+        reconnect.target = self; reconnectItem = reconnect
         autoReconnectItem.target = self; machineMenu.addItem(autoReconnectItem)
         // The Window menu: Minimize, the tab commands, and the window list
         // (AppKit fills that in, as windowsMenu).
@@ -1344,6 +1384,11 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let id = target
         if kind == 2 {
             let cmd = json(data)
+            // App-wide settings, whichever window was targeted last.
+            if cmd["type"] as? String == "app_settings" {
+                DispatchQueue.main.async { self.quitOnLastWindow = cmd["quit_on_last_window"] as? Bool == true }
+                return
+            }
             if cmd["type"] as? String == "open_window" {
                 let tab = Tab(id: id)
                 addTab(tab)
@@ -1393,7 +1438,11 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
             tabsLock.lock(); panels[id] = picker; tabsLock.unlock()
             picker.build()
             guard let w = picker.window else { forget(); return }
-            if let parent = keyTab?.window, parent.isVisible, !parent.isMiniaturized, parent.attachedSheet == nil {
+            // A sheet over a tab that shows a connected machine; otherwise
+            // (no tab, or its session failed, dropped or is still
+            // connecting) a window of its own, like Settings.
+            if let tab = keyTab, tab.view?.hasPicture == true, let parent = tab.window,
+               parent.isVisible, !parent.isMiniaturized, parent.attachedSheet == nil {
                 parent.beginSheet(w)
             } else {
                 w.center(); w.makeKeyAndOrderFront(nil)
@@ -1474,6 +1523,11 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if !tab.painted { tab.painted = true; diagnostic("Gliff displayed first frame: \(w)x\(h)") }
     }
 
+    /// No tab is open (Quit on last window off): nothing for the Machine menu.
+    func disableMachineMenu() {
+        for item in [mirrorItem, privateItem, clipboardItem, soundItem, autoReconnectItem] { item.isEnabled = false }
+        reconnectItem?.isEnabled = false
+    }
     /// The Machine menu for the active tab's session.
     func showMachineState(_ cmd: [String: Any]) {
         let privateScreen = cmd["screen"] as? String == "private"
@@ -1481,6 +1535,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
         mirrorItem.state = privateScreen ? .off : .on
         privateItem.state = privateScreen ? .on : .off
         mirrorItem.isEnabled = !locked; privateItem.isEnabled = !locked
+        clipboardItem.isEnabled = true; autoReconnectItem.isEnabled = true; reconnectItem?.isEnabled = true
         mirrorItem.toolTip = locked ? "--output names the screen for this connection" : nil; privateItem.toolTip = mirrorItem.toolTip
         clipboardItem.state = cmd["clipboard"] as? Bool != false ? .on : .off
         autoReconnectItem.state = cmd["auto_reconnect"] as? Bool != false ? .on : .off
@@ -1542,17 +1597,23 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // Closing the last window quits (applicationWillTerminate says bye
         // to all), and its machine reopens next time; closing one tab of
         // several forgets that machine.
-        guard tabCount > 1 else {
-            // A settings window may still be open: quit anyway, as with no
-            // other window (applicationShouldTerminateAfterLastWindowClosed).
+        if tabCount <= 1 && quitOnLastWindow {
+            // Quit, even with a settings window still open; this machine
+            // reopens at the next launch (no "closed", so its tab is kept).
             DispatchQueue.main.async { NSApplication.shared.terminate(nil) }
             return
         }
-        tabsLock.lock(); tabs[tab.id] = nil; tabsLock.unlock()
+        tabsLock.lock(); tabs[tab.id] = nil; let left = tabs.count; tabsLock.unlock()
         tab.gpu?.onFrame = nil
         event(["type": "closed"], window: tab.id)
+        if left == 0 { disableMachineMenu() }
     }
-    func applicationShouldTerminateAfterLastWindowClosed(_ app: NSApplication) -> Bool { true }
+    func applicationShouldTerminateAfterLastWindowClosed(_ app: NSApplication) -> Bool { quitOnLastWindow }
+    // The Dock icon with no window open: offer the connection window.
+    func applicationShouldHandleReopen(_ app: NSApplication, hasVisibleWindows: Bool) -> Bool {
+        if !hasVisibleWindows && tabCount == 0 { event(["type": "new_tab"]) }
+        return true
+    }
     func applicationWillTerminate(_ note: Notification) {
         DistributedNotificationCenter.default().removeObserver(self)
         tabsLock.lock(); let all = Array(tabs.values); tabsLock.unlock()
@@ -1722,6 +1783,7 @@ final class ComputerPicker: NSObject, PanelWindow, NSApplicationDelegate, NSWind
     func applicationDidFinishLaunching(_ note: Notification) {
         let menu = NSMenu(); let item = NSMenuItem(); menu.addItem(item)
         let appMenu = NSMenu(); item.submenu = appMenu
+        appMenu.addItem(aboutMenuItem()); appMenu.addItem(NSMenuItem.separator())
         let permission = appMenu.addItem(withTitle: "Enable Remote Control…", action: #selector(hostPermissions), keyEquivalent: "")
         permission.target = self
         let settingsItem = appMenu.addItem(withTitle: "Settings…", action: #selector(openSettings), keyEquivalent: ",")
@@ -2158,6 +2220,8 @@ final class SettingsWindow: NSObject, PanelWindow, NSApplicationDelegate, NSWind
     let reconnectBox = NSButton(checkboxWithTitle: "Reconnect automatically", target: nil, action: nil)
     let reconnectOrigin = NSTextField(labelWithString: "")
     let reconnectReset = NSButton(title: "Reset", target: nil, action: nil)
+    // General: options for Gliff itself, not a machine (state["app"]).
+    let quitBox = NSButton(checkboxWithTitle: "Quit Gliff when its last window closes", target: nil, action: nil)
     let serverBin = NSTextField(string: "")
     let screenOrigin = NSTextField(labelWithString: "")
     let clipboardOrigin = NSTextField(labelWithString: "")
@@ -2210,6 +2274,7 @@ final class SettingsWindow: NSObject, PanelWindow, NSApplicationDelegate, NSWind
         let menu = NSMenu()
         let appItem = NSMenuItem(); menu.addItem(appItem)
         let appMenu = NSMenu(); appItem.submenu = appMenu
+        appMenu.addItem(aboutMenuItem()); appMenu.addItem(NSMenuItem.separator())
         appMenu.addItem(withTitle: "Close Settings", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
         appMenu.addItem(withTitle: "Quit Gliff", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         // An Edit menu, so Cut/Copy/Paste work in the server command field.
@@ -2240,11 +2305,11 @@ final class SettingsWindow: NSObject, PanelWindow, NSApplicationDelegate, NSWind
     }
     /// The window and its controls; showing it is the caller's.
     func build() {
-        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 780, height: 420), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
+        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 780, height: 540), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
         w.title = "Gliff Settings"; w.delegate = self
         // A window of its own, never a tab of the viewer.
         w.tabbingMode = .disallowed; w.isReleasedWhenClosed = false
-        w.contentMinSize = NSSize(width: 700, height: 360)
+        w.contentMinSize = NSSize(width: 700, height: 500)
         let view = w.contentView!
 
         search.placeholderString = "Search machines"; search.delegate = self
@@ -2286,9 +2351,19 @@ final class SettingsWindow: NSObject, PanelWindow, NSApplicationDelegate, NSWind
         pathLabel.preferredMaxLayoutWidth = 480
         errorLabel.font = NSFont.systemFont(ofSize: 12); errorLabel.textColor = .systemRed
         errorLabel.preferredMaxLayoutWidth = 480
-        let form = NSStackView(views: [heading, scopeNote, display, clip, again, server, rule, errorLabel, NSView(), pathLabel])
+        quitBox.target = self; quitBox.action = #selector(quitChanged)
+        quitBox.setAccessibilityLabel("Quit Gliff when its last window closes")
+        let general = label("General")
+        general.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
+        let quitHelp = label("For Gliff, not one machine. Off: Gliff stays open with no windows; File ▸ New Tab or the Dock icon opens the connection window.", secondary: true)
+        quitHelp.lineBreakMode = .byWordWrapping; quitHelp.maximumNumberOfLines = 3; quitHelp.preferredMaxLayoutWidth = 480
+        let rule2 = NSBox(); rule2.boxType = .separator
+        let generalStack = NSStackView(views: [general, quitBox, quitHelp])
+        generalStack.orientation = .vertical; generalStack.alignment = .leading; generalStack.spacing = 4
+        let form = NSStackView(views: [heading, scopeNote, display, clip, again, server, rule, rule2, generalStack, errorLabel, NSView(), pathLabel])
         form.orientation = .vertical; form.alignment = .leading; form.spacing = 14
         form.translatesAutoresizingMaskIntoConstraints = false
+        rule2.widthAnchor.constraint(equalTo: form.widthAnchor).isActive = true
         view.addSubview(sidebar); view.addSubview(form)
         NSLayoutConstraint.activate([
             sidebar.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 16),
@@ -2350,6 +2425,7 @@ final class SettingsWindow: NSObject, PanelWindow, NSApplicationDelegate, NSWind
         let r = effective("auto_reconnect")
         reconnectBox.state = r.value as? Bool == false ? .off : .on
         reconnectOrigin.stringValue = r.origin; reconnectReset.isHidden = !r.here
+        quitBox.state = (state["app"] as? [String: Any])?["quit_on_last_window"] as? Bool == true ? .on : .off
         let b = effective("server_bin")
         serverBin.placeholderString = inherited("server_bin").0 as? String ?? "gliff-server"
         // Do not replace text the user is typing.
@@ -2366,6 +2442,11 @@ final class SettingsWindow: NSObject, PanelWindow, NSApplicationDelegate, NSWind
     @objc func screenChanged(_ sender: Any?) { if !updating { edit("screen", screen.indexOfSelectedItem == 1 ? "private" : "mirror") } }
     @objc func clipboardChanged(_ sender: Any?) { if !updating { edit("clipboard", clipboardBox.state == .on) } }
     @objc func reconnectChanged(_ sender: Any?) { if !updating { edit("auto_reconnect", reconnectBox.state == .on) } }
+    @objc func quitChanged(_ sender: Any?) {
+        guard !updating else { return }
+        errorLabel.stringValue = ""
+        send(["type": "settings_edit", "scope": "app", "field": "quit_on_last_window", "value": quitBox.state == .on])
+    }
     @objc func serverChanged(_ sender: Any?) {
         guard !updating else { return }
         let text = serverBin.stringValue.trimmingCharacters(in: .whitespaces)

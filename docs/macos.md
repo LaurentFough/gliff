@@ -62,6 +62,11 @@ Or run:
 The Linux host needs Gliff installed and a running Hyprland session. The
 `--headless` option creates a private screen there and follows the Mac window.
 
+**About.** Gliff ▸ About Gliff shows the version and the build: the commit
+it was built from (`-dirty` when it had uncommitted changes) and the
+architecture, e.g. `build 4be6c38a1f arm64`. An installer can set the build
+ID with `GLIFF_BUILD_ID` at build time.
+
 ## Settings
 
 Gliff keeps per-machine options in `~/.config/gliff/config.toml`
@@ -78,6 +83,7 @@ opening another.
 | Clipboard | Share the clipboard in both directions | at once |
 | Reconnect | Reopen the machine at launch if it was open at quit, and retry a dropped session (`auto_reconnect`, default on) | at the next launch or failure |
 | Server command | The command started over SSH, e.g. `gliff-server --low-bandwidth` | reconnects the machine |
+| General ▸ Quit Gliff when its last window closes | For the app, not a machine (`quit_on_last_window`, default off). Off: closing the last tab leaves Gliff running with no windows; File ▸ New Tab (⌘T) or clicking the Dock icon opens the connection window. On: closing the last tab quits, and that machine reopens at the next launch | at once |
 
 **All Machines** sets the defaults; selecting a machine sets only that
 machine, and **Reset** hands an option back to the defaults. Each row says
@@ -260,8 +266,10 @@ logical display coordinates. macOS hosts mirror physical screens and reject
 
 - **Tabs.** Each connection is a native macOS window tab: the tab bar's
   **+** or File ▸ New Tab (⌘T while the pointer is off the picture) opens the
-  connection window for another machine, as a sheet on the front tab (it is
-  part of the viewer, not a separate app); drag a tab out for its own window,
+  connection window for another machine (part of the viewer, not a separate
+  app): a sheet over the front tab when that tab shows a connected machine,
+  otherwise a window of its own, like Settings (no tab open, or the front
+  tab's session is connecting, failed or dropped); drag a tab out for its own window,
   or Window ▸ Merge All Windows to gather them. Every tab stays connected;
   only a tab you can see plays sound (its host stops recording otherwise),
   and the Mac's clipboard is offered to the active tab's machine. The tabs

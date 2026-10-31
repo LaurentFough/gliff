@@ -170,6 +170,20 @@ impl Shared {
         self.store.borrow().muted()
     }
 
+    /// The Mac app quits when its last window closes (off by default).
+    pub fn quit_on_last_window(&self) -> bool {
+        self.store.borrow().quit_on_last_window()
+    }
+
+    /// Save it; announced like any other change.
+    pub fn set_quit_on_last_window(&self, on: bool) {
+        if self.quit_on_last_window() == on {
+            return;
+        }
+        self.store.borrow_mut().set_quit_on_last_window(on);
+        self.save_and_announce();
+    }
+
     /// Save the sound switch; announced like any other change.
     pub fn set_muted(&self, muted: bool) {
         if self.muted() == muted {
@@ -263,7 +277,28 @@ pub fn state_json(store: &Store) -> Value {
         },
         "defaults": layer_json(&store.defaults()),
         "machines": machines,
+        //= Settings ▸ General: options for the app, not a machine.
+        "app": {"quit_on_last_window": store.quit_on_last_window()},
     })
+}
+
+/// The viewer's app-wide options (sent at launch and after every change).
+pub fn app_settings(shared: &Shared) -> Value {
+    json!({"type": "app_settings", "quit_on_last_window": shared.quit_on_last_window()})
+}
+
+/// An edit to Settings ▸ General (`"scope": "app"`).
+fn apply_app_edit(shared: &Shared, ev: &Value) -> Result<()> {
+    match ev["field"].as_str() {
+        Some("quit_on_last_window") => {
+            let on = ev["value"]
+                .as_bool()
+                .context("quit_on_last_window must be true or false")?;
+            shared.set_quit_on_last_window(on);
+            Ok(())
+        }
+        _ => bail!("unknown app setting"),
+    }
 }
 
 /// Set (`Some`) or clear (`None`) one offered option in a layer, from a
@@ -312,6 +347,9 @@ fn set_field(s: &mut Settings, field: Field, value: Option<&Value>) -> Result<()
 /// Apply a `settings_edit` event from the settings window:
 /// `{"scope": "defaults"|"machine", "machine": name, "field": key, "value": v|null}`.
 pub fn apply_edit(shared: &Shared, ev: &Value) -> Result<()> {
+    if ev["scope"] == "app" {
+        return apply_app_edit(shared, ev);
+    }
     let field = ev["field"]
         .as_str()
         .and_then(Field::from_name)
@@ -609,5 +647,22 @@ mod tests {
         sh.forget("m@h");
         assert!(sh.resolve("m@h", &Settings::default()).clipboard);
         assert!(sh.state()["machines"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn the_general_section_sets_quit_on_last_window() {
+        let shared = shared();
+        assert_eq!(shared.state()["app"]["quit_on_last_window"], false);
+        let changes = shared.subscribe();
+        let edit = json!({"scope": "app", "field": "quit_on_last_window", "value": true});
+        apply_edit(&shared, &edit).unwrap();
+        assert!(shared.quit_on_last_window());
+        assert!(changes.has_changed().unwrap(), "announced to the viewer");
+        assert_eq!(app_settings(&shared)["quit_on_last_window"], true);
+        assert_eq!(shared.state()["app"]["quit_on_last_window"], true);
+        let bad = json!({"scope": "app", "field": "quit_on_last_window", "value": "yes"});
+        assert!(apply_edit(&shared, &bad).is_err());
+        let unknown = json!({"scope": "app", "field": "dock_icon", "value": true});
+        assert!(apply_edit(&shared, &unknown).is_err());
     }
 }

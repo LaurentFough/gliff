@@ -39,11 +39,19 @@ Timer.scheduledTimer(withTimeInterval:0.4,repeats:false) { _ in
         viewer.openPanel(8,["type":"open_panel","kind":"choose","args":["private"]])
         let chooser=viewer.panel(8) as! ComputerPicker
         precondition(chooser.window!.isVisible && chooser.screenOverride=="private","The connection window did not open in the viewer")
+        // With no connected tab, New Tab's window is a window of its own.
+        precondition(chooser.window!.sheetParent==nil,"The connection window became a sheet with no connected tab")
         chooser.handle(["type":"close_panel"])
         precondition(viewer.panel(8)==nil && !chooser.window!.isVisible,"close_panel left the connection window open")
         settings.window!.close()
         precondition(viewer.panel(7)==nil,"A closed settings window was not forgotten")
-        diagnostic("PANELS PASS: settings and connection windows open inside the viewer, come forward and close")
+        // Quit on last window: off by default, then follows app_settings.
+        precondition(!viewer.applicationShouldTerminateAfterLastWindowClosed(app),"Quit on last window must default to off")
+        viewer.quitOnLastWindow=true
+        precondition(viewer.applicationShouldTerminateAfterLastWindowClosed(app),"Quit on last window was not honoured")
+        precondition(settings.quitBox.title.contains("last window"),"Settings lacks the General quit option")
+        precondition(aboutMenuItem().target === About.shared && !About.version.isEmpty && !About.build.isEmpty,"About Gliff is not wired")
+        diagnostic("PANELS PASS: settings and connection windows open inside the viewer, come forward and close; quit on last window; About")
         exit(0)
     }
     let window=picker.window!
