@@ -680,10 +680,7 @@ impl Hub {
         let out = self.out.clone();
         tokio::task::spawn_local(async move {
             let mut changes = shared.subscribe();
-            loop {
-                let Ok(bytes) = serde_json::to_vec(&crate::settings::app_settings(&shared)) else {
-                    break;
-                };
+            while let Ok(bytes) = serde_json::to_vec(&crate::settings::app_settings(&shared)) {
                 //= Any window id will do: the viewer handles it app-wide.
                 if out.send((0, native::EVENT, bytes)).await.is_err()
                     || changes.changed().await.is_err()
