@@ -1,8 +1,28 @@
 #!/bin/sh
+#= Install gliff from this checkout: the Mac app on macOS (bin/install-macos),
+#= the Arch package elsewhere (makepkg). On Arch an unchanged clean build is
+#= not rebuilt: the installed package's build ID (/usr/share/gliff/build-id)
+#= is compared with the checkout's. GLIFF_FORCE=1 rebuilds anyway.
+#= Extra arguments go to makepkg (Linux) or bin/install-macos.
+#= Version: 2.0.0
 set -eu
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 if [ "$(uname -s)" = Darwin ]; then
     exec "$ROOT/bin/install-macos" "$@"
 fi
+. "$ROOT/bin/lib/linux-install.sh"
+gliff_require_arch
+GLIFF_BUILD_ID=$(gliff_build_id "$ROOT")
+GLIFF_INSTALLED=$(gliff_installed_build)
+case "$GLIFF_BUILD_ID" in
+    *-dirty+*|unknown+*) gliff_log info "building $GLIFF_BUILD_ID (uncommitted changes or no git: always rebuilt)" ;;
+    *)
+        if [ "${GLIFF_FORCE:-0}" != 1 ] && [ "$GLIFF_INSTALLED" = "$GLIFF_BUILD_ID" ]; then
+            gliff_log info "gliff $GLIFF_BUILD_ID is already installed; nothing to build (FORCE=1 rebuilds)"
+            exit 0
+        fi
+        gliff_log info "building $GLIFF_BUILD_ID (installed: ${GLIFF_INSTALLED:-none})" ;;
+esac
+export GLIFF_BUILD_ID
 cd "$ROOT/pkgbuild"
 makepkg -fsi "$@"

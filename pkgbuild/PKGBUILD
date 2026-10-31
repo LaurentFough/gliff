@@ -62,4 +62,9 @@ package() {
   install -Dm644 pkgbuild/gliff.desktop "$pkgdir/usr/share/applications/gliff.desktop"
   install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
   install -Dm644 docs/hardware-quirks.md "$pkgdir/usr/share/doc/$pkgname/hardware-quirks.md"
+  # Which build this is (COMMIT[-dirty]+ARCH, bin/lib/build-id.sh): bin/install
+  # skips an unchanged build, and bin/install-linux-package reports it.
+  # GLIFF_BUILD_ID comes from bin/install or bin/package-linux.
+  install -d "$pkgdir/usr/share/gliff"
+  printf '%s\n' "${GLIFF_BUILD_ID:-unknown+$CARCH}" > "$pkgdir/usr/share/gliff/build-id"
 }

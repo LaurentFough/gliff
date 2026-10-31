@@ -1,0 +1,68 @@
+#!/bin/sh
+#= Publish a `make package` Arch package as a GitHub release of the fork, so
+#= other Arch/Omarchy machines install it with `make install-release`
+#= (bin/install-linux-release).
+#= Usage: bin/release-linux [--tag TAG] [PATH/gliff-*-linux-*.pkg.tar.zst]
+#= Without a package it runs bin/package-linux first. The build must come
+#= from a clean, pushed commit: the release points at it. The tag defaults to
+#= linux-COMMIT12; an existing release with that tag gets the assets
+#= replaced. Releases are marked pre-release (development builds, unsigned
+#= packages; integrity comes from the SHA-256 file).
+#= Repository: GLIFF_RELEASE_REPO (default LaurentFough/gliff). Needs the
+#= GitHub CLI, signed in (gh auth login).
+#= Version: 1.0.0
+set -eu
+ROOT="$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)"
+. "$ROOT/bin/lib/linux-install.sh"
+gliff_require_arch
+GLIFF_RELEASE_REPO="${GLIFF_RELEASE_REPO:-LaurentFough/gliff}"
+usage() { echo 'Usage: bin/release-linux [--tag TAG] [PATH/gliff-*-linux-*.pkg.tar.zst]' >&2; exit 1; }
+GLIFF_TAG=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --tag) [ $# -ge 2 ] || usage; GLIFF_TAG="$2"; shift ;;
+        -h|--help) usage ;;
+        -*) printf 'Unknown option %s\n' "$1" >&2; usage ;;
+        *) break ;;
+    esac
+    shift
+done
+[ $# -le 1 ] || usage
+command -v gh >/dev/null 2>&1 || { gliff_log err "needs the GitHub CLI: sudo pacman -S github-cli, then gh auth login"; exit 1; }
+gh auth status >/dev/null 2>&1 || { gliff_log err "the GitHub CLI is not signed in: gh auth login"; exit 1; }
+
+GLIFF_BUILD_ID=$(gliff_build_id "$ROOT")
+case "$GLIFF_BUILD_ID" in
+    *-dirty+*|unknown+*) gliff_log err "the checkout is $GLIFF_BUILD_ID: commit and push first, so the release matches a commit"; exit 1 ;;
+esac
+GLIFF_COMMIT=$(git -C "$ROOT" rev-parse HEAD)
+gh api "repos/$GLIFF_RELEASE_REPO/commits/$GLIFF_COMMIT" >/dev/null 2>&1 || {
+    gliff_log err "commit $(printf %s "$GLIFF_COMMIT" | cut -c1-12) is not on $GLIFF_RELEASE_REPO yet: push it first"; exit 1; }
+if [ $# -eq 1 ]; then
+    GLIFF_PKG="$1"
+else
+    "$ROOT/bin/package-linux"
+    GLIFF_PKG=$(ls -t "$ROOT"/target/linux/gliff-*-linux-"$(uname -m)"-*.pkg.tar.* 2>/dev/null | grep -v '\.sha256$' | head -n 1)
+fi
+[ -f "$GLIFF_PKG" ] && [ -f "$GLIFF_PKG.sha256" ] || { gliff_log err "need ${GLIFF_PKG:-the package} and its .sha256 (make package writes both)"; exit 1; }
+#= The package must be this checkout's build, or the release would point at
+#= the wrong commit.
+GLIFF_PKG_ID=$(gliff_pkg_build "$GLIFF_PKG")
+[ "$GLIFF_PKG_ID" = "$GLIFF_BUILD_ID" ] || {
+    gliff_log err "the package is build ${GLIFF_PKG_ID:-unknown}, the checkout is $GLIFF_BUILD_ID: package this commit (make package) or check out the package's"; exit 1; }
+GLIFF_TAG="${GLIFF_TAG:-linux-$(printf %s "$GLIFF_COMMIT" | cut -c1-12)}"
+GLIFF_NOTES="Gliff for Arch Linux / Omarchy, build $GLIFF_BUILD_ID (development package, unsigned; check the SHA-256).
+
+Install on another Arch or Omarchy machine ($(gliff_pkg_field "$GLIFF_PKG" arch)), from a checkout:
+
+    make install-release TAG=$GLIFF_TAG
+
+or download both files and run \`make install-package PKG=$(basename -- "$GLIFF_PKG")\`. pacman installs the runtime dependencies."
+if gh release view "$GLIFF_TAG" --repo "$GLIFF_RELEASE_REPO" >/dev/null 2>&1; then
+    gh release upload "$GLIFF_TAG" "$GLIFF_PKG" "$GLIFF_PKG.sha256" --repo "$GLIFF_RELEASE_REPO" --clobber
+    gliff_log info "updated release $GLIFF_TAG on $GLIFF_RELEASE_REPO"
+else
+    gh release create "$GLIFF_TAG" "$GLIFF_PKG" "$GLIFF_PKG.sha256" --repo "$GLIFF_RELEASE_REPO" \
+        --target "$GLIFF_COMMIT" --prerelease --title "Gliff for Arch/Omarchy ($GLIFF_BUILD_ID)" --notes "$GLIFF_NOTES"
+    gliff_log info "published release $GLIFF_TAG on $GLIFF_RELEASE_REPO"
+fi

@@ -17,13 +17,15 @@
 #=   APP                      output of `make app` (default target/macos/Gliff.app)
 #=   SIGN_MODE                development | release, for `make app`
 #=   OUT                      output directory for `make package*`
+#=   ZIP / PKG                the package for `make install-package` / `release-upload` (macOS ZIP / Arch package)
+#=   TAG, REPO, FORCE=1       release tag, GitHub repository, reinstall the same build
 #=   SSH_PORT                 port for `make discovery`
 #=   GLIFF_CODESIGN_IDENTITY  signing fingerprint (else auto-detected; see docs/macos.md)
 #=   GLIFF_NOTARY_PROFILE     notarytool keychain profile (release packaging only)
 #=   CHECK=1                  `make macos`: run scripts/check.sh before installing
 #=   SIGNING=0                `make macos`: skip creating the gliff-local identity
 
-MAKEFILE_VERSION := 0.4.0
+MAKEFILE_VERSION := 0.5.0
 
 #= bash for pipefail, so `cmd | tee log` fails when cmd fails. Present on
 #= macOS (/bin/bash 3.2) and every Linux this repo targets. make 3.81
@@ -242,31 +244,47 @@ app: ## Build a signed Gliff.app at APP without installing (bin/build-macos-app)
 	$(Q)mkdir -p "$$(dirname "$(APP)")"
 	$(call run,app,bin/build-macos-app "$(APP)" $(SIGN_MODE))
 
-install: ## Install: ~/Applications/Gliff.app on macOS (skips an unchanged build; FORCE=1 rebuilds), makepkg on Arch
+install: ## Install from this checkout: the Mac app, or makepkg on Arch (both skip an unchanged build; FORCE=1 rebuilds)
 	$(call run,install,GLIFF_FORCE=$(FORCE) bin/install $(ARGS))
 
-package: ## Ad-hoc signed test ZIP + SHA-256 (bin/package-macos --development)
-	$(call need_os,Darwin,package)
+#= Build once, install on other machines. The package and its .sha256 travel
+#= together (AirDrop, scp, a shared folder, or a GitHub release). macOS: a
+#= ZIP the receiving Mac re-signs with its own identity. Arch/Omarchy: a
+#= pacman package (no Rust needed on the receiving machine).
+package: ## Build once for other machines: Mac ZIP (ad-hoc) or Arch package, + SHA-256 (OUT=)
+ifeq ($(OS),Darwin)
 	$(call run,package,bin/package-macos --development $(OUT))
+else
+	$(call need_tool,makepkg,Arch Linux or Omarchy)
+	$(call run,package,bin/package-linux $(OUT))
+endif
 
-#= Build once, install on other Macs. The ZIP and its .sha256 travel together
-#= (AirDrop, scp, a shared folder, or a GitHub release); the receiving Mac
-#= re-signs the app with its own identity.
-install-package: ## Install a ZIP from make package (ZIP=path; checks SHA-256, re-signs locally; FORCE=1)
-	$(call need_os,Darwin,install-package)
+install-package: ## Install a make package file (ZIP= on macOS, PKG= on Arch; checks SHA-256; FORCE=1)
+ifeq ($(OS),Darwin)
 	$(Q)[ -n "$(ZIP)" ] || { echo "usage: make install-package ZIP=path/gliff-…-macos-arm64-development.zip" >&2; exit 1; }
 	$(call run,install-package,bin/install-macos-package $(if $(filter 1,$(FORCE)),--force) "$(ZIP)")
 	$(Q)$(MAKE) --no-print-directory verify
+else
+	$(Q)[ -n "$(PKG)" ] || { echo "usage: make install-package PKG=path/gliff-…-linux-x86_64-….pkg.tar.zst" >&2; exit 1; }
+	$(call run,install-package,bin/install-linux-package $(if $(filter 1,$(FORCE)),--force) "$(PKG)")
+endif
 
-release-upload: ## Publish this commit's package as a GitHub release (TAG=, ZIP=, REPO=; needs gh)
-	$(call need_os,Darwin,release-upload)
+release-upload: ## Publish this commit's package as a GitHub release (TAG=, ZIP=/PKG=, REPO=; needs gh)
+ifeq ($(OS),Darwin)
 	$(call need_tool,gh,brew install gh && gh auth login)
 	$(call run,release-upload,$(if $(REPO),GLIFF_RELEASE_REPO="$(REPO)") bin/release-macos $(if $(TAG),--tag "$(TAG)") $(ZIP))
+else
+	$(call need_tool,gh,sudo pacman -S github-cli && gh auth login)
+	$(call run,release-upload,$(if $(REPO),GLIFF_RELEASE_REPO="$(REPO)") bin/release-linux $(if $(TAG),--tag "$(TAG)") $(PKG))
+endif
 
-install-release: ## Download and install a Mac release (TAG=, default newest macos-*; REPO=; FORCE=1)
-	$(call need_os,Darwin,install-release)
+install-release: ## Download and install a release (TAG=, default newest macos-* or linux-*; REPO=; FORCE=1)
+ifeq ($(OS),Darwin)
 	$(call run,install-release,$(if $(REPO),GLIFF_RELEASE_REPO="$(REPO)") bin/install-macos-release $(if $(filter 1,$(FORCE)),--force) $(TAG))
 	$(Q)$(MAKE) --no-print-directory verify
+else
+	$(call run,install-release,$(if $(REPO),GLIFF_RELEASE_REPO="$(REPO)") bin/install-linux-release $(if $(filter 1,$(FORCE)),--force) $(TAG))
+endif
 
 package-release: ## Notarized ZIP; needs Developer ID + GLIFF_NOTARY_PROFILE (bin/package-macos)
 	$(call need_os,Darwin,package-release)

@@ -196,8 +196,8 @@ Support today:
 ### Build and release
 
 - [x] #3 (tested and merged 2026-10-31): build-once installs on `feature/macos-install-reuse` (`make install` twice, the second skips; a change then `make install` rebuilds; About Gliff shows the same build ID as `GliffBuildID`; `make package` → `make install-package` on a second Mac; `make release-upload` → `make install-release`), then merge.
-- [ ] Intel Macs: a universal (arm64 + x86_64) package, or per-architecture releases.
-- [ ] Linux: prebuilt packages to copy between machines (today each machine builds with `makepkg`).
+- [ ] Intel Macs: a universal (arm64 + x86_64) package, or per-architecture releases. Deferred (2026-10-31): no Intel Mac on macOS to test with (the Intel Mac runs Omarchy, so it is covered by the Linux packages).
+- [ ] Linux prebuilt packages, on `feature/linux-packages` (testing pending): `make package` on an Arch/Omarchy machine; `make install` twice (the second skips); `make install-package PKG=…` on a second machine; `make release-upload` → `make install-release`.
 - [ ] Releases from CI: attach the macOS runners' packages to `macos-*` releases instead of building locally.
 
 ### Ideas (not decided)
@@ -225,6 +225,9 @@ Support today:
 ## Log
 
 Newest first. Format: `### YYYY-MM-DD — summary (commit)`, then a line or two.
+
+### 2026-10-31 — Build once, install on other Arch/Omarchy machines (`feature/linux-packages`)
+Intel Mac builds deferred (that Mac runs Omarchy). New: `bin/package-linux` (pacman package with `/usr/share/gliff/build-id`, renamed `gliff-VER-linux-ARCH-COMMIT.pkg.tar.zst`, plus `.sha256`), `bin/install-linux-package` (checksum, name, arch, skip same build, `sudo pacman -U`), `bin/release-linux` / `bin/install-linux-release` (`linux-COMMIT` pre-releases via gh, curl fallback); `bin/install` skips an unchanged clean build on Arch; `gliff_build_id` moved to `bin/lib/build-id.sh` (shared), Linux helpers in `bin/lib/linux-install.sh`; PKGBUILD writes the build ID; Makefile 0.5.0 dispatches `package` / `install-package` / `release-upload` / `install-release` by OS (`PKG=` on Arch). README procedure and targets updated. Shell syntax checked here; not run on Arch yet.
 
 ### 2026-10-31 — Merge `feature/macos-install-reuse` (build once, install on other Macs)
 #3 tested on the Mac: `make install` skips an unchanged build, `make package` / `make install-package`, `make release-upload` / `make install-release`. README: an "Other Macs: build once" procedure under Install and a fork note; docs/macos.md: notes (the other Mac needs a clone, checking the build ID, removing a release). No-fast-forward merge into the working branch; delete the branch on the fork when convenient.
