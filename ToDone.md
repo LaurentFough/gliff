@@ -189,6 +189,9 @@ Support today:
 
 Newest first. Format: `### YYYY-MM-DD — summary (commit)`, then a line or two.
 
+### 2026-10-31 — `feature/macos-panels-in-viewer`: automated checks pass on the Mac
+`scripts/check.sh` (fmt, clippy, tests, native checks) and `scripts/macos-picker-check.py` pass (after `91d146b`, clippy `while_let_loop`). Hand tests pending: New Tab sheet/window, About, Quit on last window, Connect from Settings.
+
 ### 2026-10-31 — New Tab rule corrected; Connect from Settings (`feature/macos-panels-in-viewer`)
 New Tab's sheet/window rule inverted as requested: a sheet over a tab without a live session; a window over a connected tab or with no tab. Settings gains Connect (and double-click on a machine), sent as the app event `connect_machine`; the client opens a new tab with the machine's settings.
 
