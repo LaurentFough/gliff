@@ -35,16 +35,17 @@ The log is newest first, and each entry names the commit.
 | Working branch | `acrogenesis/macos-client-host` (see Log for the latest commit) |
 | Pushed to | `LaurentFough/gliff` only (never acrogenesis or omacom) |
 | Ahead of acrogenesis' branch | see `git rev-list --count origin/acrogenesis/macos-client-host..HEAD` |
-| Last updated | 2026-10-30 |
+| Last updated | 2026-10-31 |
 
 ### Branches on the fork
 
 | Branch | Contents | Status |
 |---|---|---|
-| `acrogenesis/macos-client-host` | #47 base, signing and install fixes, Makefile, #98, Mac settings, GPU video, #80 sound, Mac sound, host mute, Mac reconnect, Mac tabs, ToDone.md | working branch |
+| `acrogenesis/macos-client-host` | #47 base, signing and install fixes, Makefile, #98, Mac settings, GPU video, #80 sound, Mac sound, host mute, Mac reconnect, Mac tabs, known machines, auto-reconnect, one app (panels), quit on last window, About, screenshots, plan docs, ToDone.md | working branch |
+| `feature/macos-install-reuse` | Build once, install on other Macs (build ID, `install-package`, `release-upload` / `install-release`) | **open**: waiting for your test (#3), then merge |
 | `main` | upstream, untouched | — |
 
-Merged into the working branch on 2026-10-29, still on the fork until deleted (see Repo housekeeping): `feature/macos-gpu-video`, `macos-settings`, `merge/pr-98`, `merge/pr-80`, `feature/macos-audio`, `feature/macos-reconnect`, `feature/macos-tabs`.
+Merged into the working branch (2026-10-29 to 2026-10-31), still on the fork until deleted (see Repo housekeeping): `feature/macos-gpu-video`, `macos-settings`, `merge/pr-98`, `merge/pr-80`, `feature/macos-audio`, `feature/macos-reconnect`, `feature/macos-tabs`, `feature/macos-picker-machines`, `feature/machines-and-auto-reconnect`, `feature/macos-panels-in-viewer`.
 
 ## Upstream PRs
 
@@ -119,9 +120,25 @@ Merged into the working branch on 2026-10-29, still on the fork until deleted (s
 - Off: not reopened at launch, and a dropped session waits for Reconnect (Mac: the error says so; Linux: "click the tab to reconnect"). Changing it never reconnects a session, on either client.
 - Mac: Machine ▸ Reconnect Automatically (checkbox) and a Reconnect row in Settings. Linux honours it; its settings window does not show it yet.
 
+### One app on the Mac (merged 2026-10-31; tested)
+
+- Settings and File ▸ New Tab open inside the viewer (`crate::panel`, `open_panel` / `close_panel`, routed by window id like tabs): one Dock icon, ⌘-Tab entry and menu bar. The connection window at launch (no viewer yet) is still its own process.
+- New Tab: a sheet over a tab without a live session; its own window over a connected tab or with no tab. ⌘, brings an open Settings forward; the viewer has an Edit menu.
+- Settings ▸ **Connect** (or double-click a machine) opens it in a new tab (`connect_machine`).
+- The connection window's nearby list takes a taller window's height.
+- Settings ▸ General ▸ **Quit Gliff when its last window closes** (`quit_on_last_window`, default off); off, Gliff stays open and ⌘T or the Dock icon opens the connection window.
+- Gliff ▸ **About Gliff**: version and build ID (commit, `-dirty`, arch; `GLIFF_BUILD_ID` overrides).
+
+### Discovery, checks and screenshots
+
+- Discovery needs `gliff-discovery` on each host: the Arch package says so after install; `docs/macos.md` leads with it.
+- `scripts/check.sh` stops early when Rust is older than `rust-version` (1.87), with how to update.
+- README / ForkNews screenshots (`docs/images/`): connection window, tabs, Settings ▸ Reconnect, Machine menu mockup (`docs/images/src/`), features outlined in red.
+
 ### Docs
 
 - `ForkNews.md` (the short list of what the fork adds, also near the top of the README), README fork notes, `docs/macos.md`, `docs/settings.md`, and the crate list in `docs/architecture.md`.
+- Future-feature plans in `docs/feature-future/`: the iOS/iPadOS client and several clients on one desktop.
 - In the macGliff project: ADR 0001, the GPU video decision with its results.
 
 ## Pending
@@ -170,15 +187,33 @@ Support today:
 - [ ] An iOS/iPadOS client: plan, effort and open decisions in [docs/feature-future/ios-ipados-plan.md](docs/feature-future/ios-ipados-plan.md) (Phase 0 spike first).
 - [ ] Several clients on one desktop: plan, levels and open decisions in [docs/feature-future/multi-client-plan.md](docs/feature-future/multi-client-plan.md) (Level 0 test first; for later).
 
+### Build and release
+
+- [ ] #3: test build-once installs on `feature/macos-install-reuse` (`make install` twice, the second skips; a change then `make install` rebuilds; `make package` → `make install-package` on a second Mac; `make release-upload` → `make install-release`), then merge.
+- [ ] Intel Macs: a universal (arm64 + x86_64) package, or per-architecture releases.
+- [ ] Linux: prebuilt packages to copy between machines (today each machine builds with `makepkg`).
+- [ ] Releases from CI: attach the macOS runners' packages to `macos-*` releases instead of building locally.
+
+### Ideas (not decided)
+
+- [ ] Tailnet machines in the connection window (Tailscale peers, for hosts mDNS cannot reach).
+- [ ] Settings ▸ Connect: switch to the machine's open tab instead of opening a second one.
+- [ ] Connect in the stand-alone Settings window at launch (opened from the launch connection window; today only inside the viewer).
+- [ ] Open the launch connection window inside the viewer too, so Gliff is one process from the start.
+- [ ] Screenshots still missing: the address autocomplete, the Reconnect button on a dropped session, the File and Window menus' tab commands.
+- [ ] Screenshots: a second (lighter or dashed) outline for older fork features (the Settings window itself, Mirror/Private Screen, Share Clipboard).
+- [ ] Build ID: `-dirty` can lag until the next commit or Swift change (build.rs watches HEAD, not the index).
+- [ ] Several clients on one desktop, Level 0 test and then Levels 1–2 (see the plan above).
+
 ### Repo housekeeping
 
 - [ ] Make `acrogenesis/macos-client-host` the fork's default branch (only you can):
   ```sh
   gh repo edit LaurentFough/gliff --default-branch acrogenesis/macos-client-host
   ```
-- [ ] Delete the merged branches on the fork (only you can; all nine are contained in the working branch):
+- [ ] Delete the merged branches on the fork (only you can; all ten are contained in the working branch):
   ```sh
-  git push <fork-remote> --delete feature/macos-gpu-video macos-settings merge/pr-98 merge/pr-80 feature/macos-audio feature/macos-reconnect feature/macos-tabs feature/macos-picker-machines feature/machines-and-auto-reconnect
+  git push origin --delete feature/macos-gpu-video macos-settings merge/pr-98 merge/pr-80 feature/macos-audio feature/macos-reconnect feature/macos-tabs feature/macos-picker-machines feature/machines-and-auto-reconnect feature/macos-panels-in-viewer
   ```
 - [x] Rename remotes in Claude's clone (`origin` = the fork, `acrogenesis` = acrogenesis); do the same in your clones if you like.
 
@@ -189,6 +224,9 @@ Support today:
 ## Log
 
 Newest first. Format: `### YYYY-MM-DD — summary (commit)`, then a line or two.
+
+### 2026-10-31 — ToDone audit
+State and branch tables brought up to date (open `feature/macos-install-reuse`; ten merged branches to delete). Features added gains one app on the Mac, quit on last window, About, discovery hint, the Rust version check and screenshots. Pending gains Build and release (#3, Intel, Linux packages, CI releases, previously only on the install branch) and Ideas (Tailnet list, Connect to an open tab, Connect at launch, launch window in the viewer, missing screenshots, secondary outlines, build ID lag, multi-client levels).
 
 ### 2026-10-31 — Plan docs moved to `docs/feature-future/`
 `ios-ipados-plan.md` and `multi-client-plan.md` now live in `docs/feature-future/`; links in the README, ForkNews, the backlog and their frontmatter `url` updated (older log entries keep the paths of their day).
