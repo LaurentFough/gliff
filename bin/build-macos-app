@@ -33,6 +33,13 @@ export MACOSX_DEPLOYMENT_TARGET=13.0
 # a build.target-dir or build.target in ~/.cargo/config.toml (or
 # CARGO_TARGET_DIR / CARGO_BUILD_TARGET) moves them. Diagnostics still go to
 # the terminal; only the JSON artifact records are captured.
+# What is being built: commit, uncommitted changes, architecture. Exported
+# so crates/gliff-macos/build.rs embeds the same ID that goes into
+# Info.plist (About Gliff shows it); install-macos skips a rebuild when the
+# installed app already is this build.
+. "$ROOT/bin/lib/macos-install.sh"
+GLIFF_BUILD_ID=$(gliff_build_id "$ROOT")
+export GLIFF_BUILD_ID
 GLIFF_ARTIFACTS=$(mktemp "${TMPDIR:-/tmp}/gliff-artifacts.XXXXXX")
 cargo build --release --locked -p gliff -p gliff-server \
     --message-format=json-render-diagnostics >"$GLIFF_ARTIFACTS"
@@ -58,10 +65,6 @@ cp "$GLIFF_CLIENT_BIN" "$GLIFF_SERVER_BIN" "$GLIFF_APP/Contents/MacOS/"
 cp crates/gliff-macos/resources/Gliff.icns LICENSE NOTICE "$GLIFF_APP/Contents/Resources/"
 "$GLIFF_SERVER_BIN" --install-native "$GLIFF_APP/Contents/MacOS/gliff-native"
 GLIFF_VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
-# What was built: commit, uncommitted changes, architecture. install-macos
-# skips a rebuild when the installed app already is this build.
-. "$ROOT/bin/lib/macos-install.sh"
-GLIFF_BUILD_ID=$(gliff_build_id "$ROOT")
 cat > "$GLIFF_APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

@@ -1,7 +1,7 @@
 use std::{env, path::PathBuf, process::Command};
 
-//= build.rs v1.1.0 — the native Swift helper (macOS) and GLIFF_BUILD, the
-//= build ID shown in Gliff ▸ About Gliff: `<commit>[-dirty] <arch>`, or
+//= build.rs v1.2.0 — the native Swift helper (macOS) and GLIFF_BUILD, the
+//= build ID shown in Gliff ▸ About Gliff: `<commit>[-dirty]+<arch>`, or
 //= GLIFF_BUILD_ID when an installer sets it, or "unknown" without git.
 fn build_id() -> String {
     if let Ok(id) = env::var("GLIFF_BUILD_ID") {
@@ -17,15 +17,23 @@ fn build_id() -> String {
             .filter(|o| o.status.success())
             .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
     };
-    let arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
-    match git(&["rev-parse", "--short=10", "HEAD"]) {
+    //= The same form as bin/lib/macos-install.sh (gliff_build_id), so an
+    //= installer's ID and this fallback look alike: COMMIT[-dirty]+ARCH.
+    let arch = match env::var("CARGO_CFG_TARGET_ARCH")
+        .unwrap_or_default()
+        .as_str()
+    {
+        "aarch64" => "arm64".to_string(),
+        other => other.to_string(),
+    };
+    match git(&["rev-parse", "--short=12", "HEAD"]) {
         Some(commit) if !commit.is_empty() => {
             //= Tracked changes only; untracked files do not mark a build dirty.
             let dirty = git(&["status", "--porcelain", "--untracked-files=no"])
                 .is_some_and(|s| !s.is_empty());
-            format!("{commit}{} {arch}", if dirty { "-dirty" } else { "" })
+            format!("{commit}{}+{arch}", if dirty { "-dirty" } else { "" })
         }
-        _ => format!("unknown {arch}"),
+        _ => format!("unknown+{arch}"),
     }
 }
 

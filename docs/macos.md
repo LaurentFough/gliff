@@ -64,7 +64,7 @@ The Linux host needs Gliff installed and a running Hyprland session. The
 
 **About.** Gliff ▸ About Gliff shows the version and the build: the commit
 it was built from (`-dirty` when it had uncommitted changes) and the
-architecture, e.g. `build 4be6c38a1f arm64`. An installer can set the build
+architecture, e.g. `build 0707147a1b2c+arm64` (the same ID as the app's `GliffBuildID`, which `make install` compares). An installer can set the build
 ID with `GLIFF_BUILD_ID` at build time.
 
 ## Settings

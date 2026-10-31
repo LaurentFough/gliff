@@ -196,7 +196,7 @@ Support today:
 
 ### Build and release
 
-- [ ] #3: test build-once installs on `feature/macos-install-reuse` (`make install` twice, the second skips; a change then `make install` rebuilds; `make package` → `make install-package` on a second Mac; `make release-upload` → `make install-release`), then merge.
+- [ ] #3: test build-once installs on `feature/macos-install-reuse` (`make install` twice, the second skips; a change then `make install` rebuilds; About Gliff shows the same build ID as `GliffBuildID`; `make package` → `make install-package` on a second Mac; `make release-upload` → `make install-release`), then merge.
 - [ ] Intel Macs: a universal (arm64 + x86_64) package, or per-architecture releases.
 - [ ] Linux: prebuilt packages to copy between machines (today each machine builds with `makepkg`).
 - [ ] Releases from CI: attach the macOS runners' packages to `macos-*` releases instead of building locally.
@@ -226,6 +226,9 @@ Support today:
 ## Log
 
 Newest first. Format: `### YYYY-MM-DD — summary (commit)`, then a line or two.
+
+### 2026-10-31 — `feature/macos-install-reuse` brought up to date; one build ID
+Merged the working branch into it (conflicts in README, ForkNews, ToDone resolved). `bin/build-macos-app` now computes the build ID before `cargo build` and exports it as `GLIFF_BUILD_ID`, so About Gliff and `Info.plist`'s `GliffBuildID` are the same string; build.rs's own fallback uses the same form (`COMMIT[-dirty]+ARCH`, 12-digit commit, `arm64`).
 
 ### 2026-10-31 — Fork housekeeping done; Rust toolchain pinned (`adf8813`)
 Default branch is now `acrogenesis/macos-client-host`; the ten merged branches are gone from the fork (left: the working branch, `main`, `feature/macos-install-reuse`, `archive/gliff-mac-objc2`). `rust-toolchain.toml` (LaurentFough) pins 1.99.0 for rustup users. Upstream: omacom/main has nothing the fork lacks (last: 0.4.1, 2026-10-24); acrogenesis' branch has nothing new.
