@@ -43,7 +43,7 @@ This fork ([LaurentFough/gliff](https://github.com/LaurentFough/gliff)) builds o
 - **Makefile**: one front end for `bin/` and `scripts/`. `make macos` builds, signs, installs and verifies; `make install` on Arch; also `make check`, `make video-check` and `make distclean`; a project-wide `.gitignore`.
 - **Checks**: `make video-check` checks GPU output against the CPU decoder and benchmarks both; the ssh login-shell test no longer depends on your shell setup.
 - **Fixes**: Mac install and signing (`plutil`, a custom cargo `target-dir`); the client ignores stray sound packets from a host.
-- **Planned**: an iOS/iPadOS client; see [docs/ios-ipados-plan.md](docs/ios-ipados-plan.md).
+- **Planned**: an iOS/iPadOS client; see [docs/ios-ipados-plan.md](docs/ios-ipados-plan.md). Several clients on one desktop (hardening, view-only, a shared stream); see [docs/multi-client-plan.md](docs/multi-client-plan.md).
 
 ### Screenshots
 
@@ -466,5 +466,7 @@ gliff 0.4.1).
   machine, and the tests.
 - [docs/ios-ipados-plan.md](docs/ios-ipados-plan.md): this fork's plan for an
   iOS/iPadOS client (scope, effort, open decisions).
+- [docs/multi-client-plan.md](docs/multi-client-plan.md): this fork's plan for
+  several clients on one desktop (what works today, levels of work, decisions).
 
 gliff is released under the MIT license.

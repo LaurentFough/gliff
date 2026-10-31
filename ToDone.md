@@ -168,6 +168,7 @@ Support today:
 - [ ] Linux settings window: show `auto_reconnect`.
 - [x] Discovery on the Mac (resolved 2026-10-30): the hosts were not running the `gliff-discovery` user service. `gliff-enable-discovery` on each host fixes it; the package now says so after install, and docs/macos.md leads with it.
 - [ ] An iOS/iPadOS client: plan, effort and open decisions in [docs/ios-ipados-plan.md](docs/ios-ipados-plan.md) (Phase 0 spike first).
+- [ ] Several clients on one desktop: plan, levels and open decisions in [docs/multi-client-plan.md](docs/multi-client-plan.md) (Level 0 test first; for later).
 
 ### Repo housekeeping
 
@@ -188,6 +189,9 @@ Support today:
 ## Log
 
 Newest first. Format: `### YYYY-MM-DD — summary (commit)`, then a line or two.
+
+### 2026-10-31 — Plan doc: several clients on one desktop
+`docs/multi-client-plan.md`: what already works (one server per connection), what breaks (`--mute-local-audio` restore, pointer contention, no viewer notice), levels 0–3 with estimates, a Level 0 checklist and the decisions. Linked from the README, ForkNews and the backlog; for later.
 
 ### 2026-10-31 — Merge `feature/macos-panels-in-viewer` into the working branch
 All hand tests passed (New Tab sheet/window, About, Quit on last window on and off, Connect from Settings). No-fast-forward merge; README fork notes, the shared list and status table (README and ForkNews.md) updated.

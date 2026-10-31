@@ -44,7 +44,7 @@ A quick look at what this fork adds. The README carries the same list; [ToDone.m
 - **Makefile**: one front end for `bin/` and `scripts/`. `make macos` builds, signs, installs and verifies; `make install` on Arch; also `make check`, `make video-check` and `make distclean`; a project-wide `.gitignore`.
 - **Checks**: `make video-check` checks GPU output against the CPU decoder and benchmarks both; the ssh login-shell test no longer depends on your shell setup.
 - **Fixes**: Mac install and signing (`plutil`, a custom cargo `target-dir`); the client ignores stray sound packets from a host.
-- **Planned**: an iOS/iPadOS client; see [docs/ios-ipados-plan.md](docs/ios-ipados-plan.md).
+- **Planned**: an iOS/iPadOS client; see [docs/ios-ipados-plan.md](docs/ios-ipados-plan.md). Several clients on one desktop (hardening, view-only, a shared stream); see [docs/multi-client-plan.md](docs/multi-client-plan.md).
 
 ## Screenshots
 
