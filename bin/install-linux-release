@@ -1,0 +1,52 @@
+#!/bin/sh
+#= Download an Arch package published by bin/release-linux and install it
+#= with bin/install-linux-package (checksum, name, architecture, pacman -U).
+#= Usage: bin/install-linux-release [--force] [TAG]
+#= Without TAG: the newest release whose tag starts with linux- (needs the
+#= GitHub CLI). With TAG, plain curl works too, for public repositories.
+#= Repository: GLIFF_RELEASE_REPO (default LaurentFough/gliff).
+#= Version: 1.0.0
+set -eu
+ROOT="$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)"
+. "$ROOT/bin/lib/linux-install.sh"
+gliff_require_arch
+GLIFF_RELEASE_REPO="${GLIFF_RELEASE_REPO:-LaurentFough/gliff}"
+usage() { echo 'Usage: bin/install-linux-release [--force] [TAG]' >&2; exit 1; }
+GLIFF_PASS=""
+GLIFF_TAG=""
+for arg in "$@"; do
+    case "$arg" in
+        --force) GLIFF_PASS="--force" ;;
+        -h|--help) usage ;;
+        -*) printf 'Unknown option %s\n' "$arg" >&2; usage ;;
+        *) [ -z "$GLIFF_TAG" ] || usage; GLIFF_TAG="$arg" ;;
+    esac
+done
+GLIFF_ARCH=$(uname -m)
+GLIFF_DL=$(mktemp -d "${TMPDIR:-/tmp}/gliff-release.XXXXXX")
+trap 'rm -rf "$GLIFF_DL"' EXIT
+trap 'exit 1' HUP INT TERM
+GLIFF_GLOB="gliff-*-linux-$GLIFF_ARCH-*.pkg.tar.*"
+if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
+    if [ -z "$GLIFF_TAG" ]; then
+        GLIFF_TAG=$(gh release list --repo "$GLIFF_RELEASE_REPO" --limit 50 --json tagName \
+            --jq '[.[] | select(.tagName | startswith("linux-"))][0].tagName // empty')
+        [ -n "$GLIFF_TAG" ] || { gliff_log err "no linux- release on $GLIFF_RELEASE_REPO yet (make release-upload on the build machine)"; exit 1; }
+    fi
+    gliff_log info "downloading $GLIFF_TAG from $GLIFF_RELEASE_REPO"
+    gh release download "$GLIFF_TAG" --repo "$GLIFF_RELEASE_REPO" --dir "$GLIFF_DL" --pattern "$GLIFF_GLOB"
+else
+    [ -n "$GLIFF_TAG" ] || { gliff_log err "without a signed-in GitHub CLI, name the release: make install-release TAG=linux-…"; exit 1; }
+    gliff_log info "downloading $GLIFF_TAG from $GLIFF_RELEASE_REPO (curl)"
+    curl -fsSL "https://api.github.com/repos/$GLIFF_RELEASE_REPO/releases/tags/$GLIFF_TAG" |
+        grep -o '"browser_download_url": *"[^"]*"' | sed 's/.*"\(https[^"]*\)"/\1/' |
+        grep -E "/gliff-[^/]*-linux-$GLIFF_ARCH-[^/]*\.pkg\.tar\.[^/]*$" > "$GLIFF_DL/urls" || true
+    [ -s "$GLIFF_DL/urls" ] || { gliff_log err "release $GLIFF_TAG has no $GLIFF_ARCH package"; exit 1; }
+    while read -r url; do
+        curl -fsSL -o "$GLIFF_DL/$(basename -- "$url")" "$url"
+    done < "$GLIFF_DL/urls"
+fi
+GLIFF_PKG=$(ls "$GLIFF_DL"/gliff-*-linux-"$GLIFF_ARCH"-*.pkg.tar.* 2>/dev/null | grep -v '\.sha256$' | head -n 1)
+[ -n "$GLIFF_PKG" ] || { gliff_log err "release $GLIFF_TAG has no $GLIFF_ARCH package"; exit 1; }
+# shellcheck disable=SC2086
+"$ROOT/bin/install-linux-package" $GLIFF_PASS "$GLIFF_PKG"

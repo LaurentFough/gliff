@@ -2,22 +2,13 @@
 #= Shared by bin/install-macos, bin/install-macos-package and
 #= bin/install-macos-release: the build ID, the signing identity choice,
 #= signing an app bundle, and the safe swap into ~/Applications.
-#= Source it; it defines functions and sets nothing else.
+#= Source it after setting ROOT; it defines functions and sets nothing else.
 #= Version: 1.0.0
 
 GLIFF_DEST_APP="${GLIFF_DEST_APP:-$HOME/Applications/Gliff.app}"
 
-#= gliff_build_id ROOT: what a build of the checkout at ROOT would be, as
-#= COMMIT[-dirty]+ARCH (e.g. 0707147a1b2c+arm64). "unknown" outside git.
-#= Untracked files are ignored: cargo builds only what tracked code uses.
-gliff_build_id() {
-    _arch=$(uname -m)
-    _commit=$(git -C "$1" rev-parse --short=12 HEAD 2>/dev/null) || { printf 'unknown+%s\n' "$_arch"; return; }
-    if [ -n "$(git -C "$1" status --porcelain --untracked-files=no 2>/dev/null)" ]; then
-        _commit="$_commit-dirty"
-    fi
-    printf '%s+%s\n' "$_commit" "$_arch"
-}
+#= gliff_build_id: shared with the Linux scripts (bin/lib/build-id.sh).
+. "$ROOT/bin/lib/build-id.sh"
 
 #= gliff_plist_value APP KEY: a string from APP's Info.plist, or nothing.
 gliff_plist_value() {

@@ -1,0 +1,41 @@
+#!/bin/sh
+#= Install a package from bin/package-linux (make package) on another
+#= Arch/Omarchy machine: checks the SHA-256, the package name and the
+#= architecture, skips the build that is already installed, then pacman -U
+#= as root (sudo, doas or su: GLIFF_AUTH, else makepkg.conf's PACMAN_AUTH).
+#= Usage: bin/install-linux-package [--force] PATH/gliff-*-linux-*.pkg.tar.zst
+#= The .sha256 file must sit next to the package.
+#= Version: 1.1.0
+set -eu
+ROOT="$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)"
+. "$ROOT/bin/lib/linux-install.sh"
+gliff_require_arch
+usage() { echo 'Usage: bin/install-linux-package [--force] PATH/gliff-*-linux-*.pkg.tar.zst' >&2; exit 1; }
+GLIFF_FORCE_INSTALL=0
+case "${1:-}" in --force) GLIFF_FORCE_INSTALL=1; shift ;; -h|--help) usage ;; esac
+[ "$#" -eq 1 ] || usage
+GLIFF_PKG=$1
+[ -f "$GLIFF_PKG" ] || { gliff_log err "no such file: $GLIFF_PKG"; exit 1; }
+[ -f "$GLIFF_PKG.sha256" ] || { gliff_log err "missing $GLIFF_PKG.sha256 (copy it with the package)"; exit 1; }
+GLIFF_DIR=$(CDPATH='' cd -- "$(dirname -- "$GLIFF_PKG")" && pwd)
+GLIFF_FILE=$(basename -- "$GLIFF_PKG")
+#= The checksum file names the package as it was written; check the file
+#= we have under that name's contents.
+GLIFF_WANT=$(cut -d' ' -f1 < "$GLIFF_PKG.sha256")
+GLIFF_HAVE=$(sha256sum "$GLIFF_DIR/$GLIFF_FILE" | cut -d' ' -f1)
+[ -n "$GLIFF_WANT" ] && [ "$GLIFF_WANT" = "$GLIFF_HAVE" ] || { gliff_log err "SHA-256 mismatch: the package is damaged or not the one the checksum is for"; exit 1; }
+[ "$(gliff_pkg_field "$GLIFF_PKG" pkgname)" = gliff ] || { gliff_log err "not a gliff package"; exit 1; }
+GLIFF_ARCH=$(gliff_pkg_field "$GLIFF_PKG" arch)
+[ "$GLIFF_ARCH" = "$(uname -m)" ] || [ "$GLIFF_ARCH" = any ] || { gliff_log err "the package is for $GLIFF_ARCH, this machine is $(uname -m)"; exit 1; }
+GLIFF_BUILD_ID=$(gliff_pkg_build "$GLIFF_PKG")
+GLIFF_INSTALLED=$(gliff_installed_build)
+if [ "$GLIFF_FORCE_INSTALL" != 1 ] && [ -n "$GLIFF_BUILD_ID" ] && [ "$GLIFF_INSTALLED" = "$GLIFF_BUILD_ID" ]; then
+    gliff_log info "gliff $GLIFF_BUILD_ID is already installed (--force or FORCE=1 reinstalls)"
+    exit 0
+fi
+gliff_log info "installing gliff ${GLIFF_BUILD_ID:-unknown build} (installed: ${GLIFF_INSTALLED:-none})"
+#= pacman resolves the runtime dependencies from the configured repositories.
+#= As root through sudo, doas or su (gliff_root; GLIFF_AUTH picks one).
+gliff_root pacman -U "$GLIFF_DIR/$GLIFF_FILE"
+gliff_log info "installed: $(gliff_installed_build)"
+printf 'To let clients on this LAN find this desktop: gliff-enable-discovery\n'

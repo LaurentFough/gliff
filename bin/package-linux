@@ -1,0 +1,40 @@
+#!/bin/sh
+#= Build the Arch package once, to install on other Arch/Omarchy machines
+#= without Rust (bin/install-linux-package, or a GitHub release through
+#= bin/release-linux). Nothing is installed here.
+#= Usage: bin/package-linux [OUTPUT_DIRECTORY]   (default target/linux)
+#= Writes gliff-VERSION-linux-ARCH-COMMIT.pkg.tar.zst and its .sha256; the
+#= package carries its build ID in /usr/share/gliff/build-id.
+#= Version: 1.1.0
+set -eu
+ROOT="$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)"
+. "$ROOT/bin/lib/linux-install.sh"
+gliff_require_arch
+command -v makepkg >/dev/null 2>&1 || { gliff_log err "needs makepkg (pacman)"; exit 1; }
+[ "$#" -le 1 ] || { echo 'Usage: bin/package-linux [OUTPUT_DIRECTORY]' >&2; exit 1; }
+mkdir -p "${1:-$ROOT/target/linux}"
+GLIFF_OUTPUT="$(CDPATH='' cd -- "${1:-$ROOT/target/linux}" && pwd)"
+GLIFF_BUILD_ID=$(gliff_build_id "$ROOT")
+export GLIFF_BUILD_ID
+GLIFF_STAGE=$(mktemp -d "${TMPDIR:-/tmp}/gliff-pkg.XXXXXX")
+trap 'rm -rf "$GLIFF_STAGE"' EXIT
+trap 'exit 1' HUP INT TERM
+gliff_log info "packaging $GLIFF_BUILD_ID"
+#= PKGDEST keeps the result out of pkgbuild/; -s installs missing build
+#= dependencies (through makepkg.conf's PACMAN_AUTH, sudo by default), -f
+#= rebuilds an existing version. GLIFF_MAKEPKG_ARGS adds makepkg options.
+# shellcheck disable=SC2086
+(cd "$ROOT/pkgbuild" && PKGDEST="$GLIFF_STAGE" makepkg -fs --noconfirm ${GLIFF_MAKEPKG_ARGS:-})
+GLIFF_BUILT=$(ls "$GLIFF_STAGE"/gliff-*.pkg.tar.* 2>/dev/null | grep -v -- '-debug-' | head -n 1)
+[ -n "$GLIFF_BUILT" ] || { gliff_log err "makepkg did not produce a package"; exit 1; }
+[ "$(gliff_pkg_build "$GLIFF_BUILT")" = "$GLIFF_BUILD_ID" ] || { gliff_log err "the package lacks build ID $GLIFF_BUILD_ID"; exit 1; }
+GLIFF_VERSION=$(gliff_pkg_field "$GLIFF_BUILT" pkgver)
+GLIFF_ARCH=$(gliff_pkg_field "$GLIFF_BUILT" arch)
+GLIFF_COMMIT=${GLIFF_BUILD_ID%%+*}
+GLIFF_EXT=${GLIFF_BUILT##*.pkg.tar}
+#= The commit in the name keeps builds of one version apart; pacman reads the
+#= package's own metadata, not its file name.
+GLIFF_NAME="gliff-$GLIFF_VERSION-linux-$GLIFF_ARCH-$GLIFF_COMMIT.pkg.tar$GLIFF_EXT"
+mv "$GLIFF_BUILT" "$GLIFF_OUTPUT/$GLIFF_NAME"
+(cd "$GLIFF_OUTPUT" && sha256sum "$GLIFF_NAME" > "$GLIFF_NAME.sha256")
+printf 'Packaged %s/%s\n' "$GLIFF_OUTPUT" "$GLIFF_NAME"

@@ -42,6 +42,7 @@ This fork ([LaurentFough/gliff](https://github.com/LaurentFough/gliff)) builds o
 - **Local signing**: no paid Apple Developer account needed (a self-signed `gliff-local` identity), so privacy permissions survive rebuilds.
 - **Makefile**: one front end for `bin/` and `scripts/`. `make macos` builds, signs, installs and verifies; `make install` on Arch; also `make check`, `make video-check` and `make distclean`; a project-wide `.gitignore`.
 - **Build once, install on other Macs**: `make install` skips an unchanged build (a build ID in the app); `make install-package` installs a ZIP from another Mac and re-signs it locally; `make release-upload` / `make install-release` carry it through GitHub Releases. Apple Silicon. *(Tested.)*
+- **Build once, install on other Arch/Omarchy machines**: the same `make package` / `install-package` / `release-upload` / `install-release` with a pacman package (`PKG=`, `linux-COMMIT` releases); `make install` skips an unchanged build. *(Tested.)*
 - **Checks**: `make video-check` checks GPU output against the CPU decoder and benchmarks both; the ssh login-shell test no longer depends on your shell setup.
 - **Fixes**: Mac install and signing (`plutil`, a custom cargo `target-dir`); the client ignores stray sound packets from a host.
 - **Planned**: an iOS/iPadOS client; see [docs/feature-future/ios-ipados-plan.md](docs/feature-future/ios-ipados-plan.md). Several clients on one desktop (hardening, view-only, a shared stream); see [docs/feature-future/multi-client-plan.md](docs/feature-future/multi-client-plan.md).
@@ -218,6 +219,30 @@ bin/install
 ```
 
 This uses the current checkout, including fixes newer than the last release.
+`bin/install` (or `make install`) skips an unchanged build: the package
+records its build ID in `/usr/share/gliff/build-id`; `FORCE=1` rebuilds.
+
+**Other Arch/Omarchy machines: build once.** Build the package on one
+machine and install it on the others without Rust (they need a clone of this
+repository for the `make` targets, and pacman fetches the runtime
+dependencies):
+
+```
+# Build machine                              # Other machine
+make package                                 make install-package PKG=path/to/gliff-…-linux-x86_64-….pkg.tar.zst
+make release-upload   # needs gh             make install-release            # newest linux-* release
+```
+
+`make package` writes `target/linux/gliff-VERSION-linux-ARCH-COMMIT.pkg.tar.zst`
+and its `.sha256`; `install-package` checks the checksum, the package name and
+the architecture, skips a build that is already installed (`FORCE=1`
+reinstalls) and runs `pacman -U` as root: through `GLIFF_AUTH` (e.g.
+`GLIFF_AUTH=doas`), else `PACMAN_AUTH` from `makepkg.conf`, else sudo, doas
+or su. Releases go to the fork as
+pre-releases tagged `linux-COMMIT`, next to the Mac's `macos-COMMIT`
+(`REPO=owner/name` for another repository; remove one with
+`gh release delete linux-COMMIT --cleanup-tag`). Afterwards, run
+`gliff-enable-discovery` on a host that should be found on the LAN.
 
 To build from source, see [docs/development.md](docs/development.md).
 
@@ -238,16 +263,16 @@ exit status.
 | `make check` / `make fix` | `scripts/check.sh` / `scripts/check.sh --fix` |
 | `make test` | `cargo test --workspace --locked` |
 | `make e2e` | `scripts/e2e.sh` (Linux, inside Hyprland) |
-| `make install` | `bin/install`: the Mac app on macOS, `makepkg` on Arch |
+| `make install` | `bin/install`: the Mac app on macOS, `makepkg` on Arch; both skip an unchanged build (`FORCE=1`) |
 | `make macos` | macOS: `signing`, `check` with `CHECK=1`, `install`, `verify` |
 | `make signing` / `make signing-show` | `bin/setup-macos-signing` / its `--show` |
 | `make app` | `bin/build-macos-app` into `target/macos/Gliff.app` (`APP=`, `SIGN_MODE=`) |
 | `make verify` | checks the installed app's signature and `~/.local/bin` links |
 | `make video-check` | checks the viewer's GPU video and compares GPU and CPU decode times (`ARGS="--cases 1080p-444"`) |
-| `make package` | `bin/package-macos --development`: ad-hoc signed ZIP and checksum (`OUT=`) |
-| `make install-package` | installs a `make package` ZIP from another Mac (`ZIP=`): checks the SHA-256, re-signs with this Mac's identity (`FORCE=1`) |
-| `make release-upload` | publishes this commit's package as a GitHub release `macos-COMMIT` (`TAG=`, `ZIP=`, `REPO=`; needs `gh`) |
-| `make install-release` | downloads and installs a Mac release (`TAG=`, default the newest; `REPO=`, `FORCE=1`) |
+| `make package` | macOS: `bin/package-macos --development`, an ad-hoc signed ZIP; Arch: `bin/package-linux`, a pacman package; each with its checksum (`OUT=`) |
+| `make install-package` | installs a `make package` file from another machine (`ZIP=` on macOS, re-signed locally; `PKG=` on Arch, `pacman -U`): checks the SHA-256 (`FORCE=1`) |
+| `make release-upload` | publishes this commit's package as a GitHub release, `macos-COMMIT` or `linux-COMMIT` (`TAG=`, `ZIP=`/`PKG=`, `REPO=`; needs `gh`) |
+| `make install-release` | downloads and installs the newest release for this system (`TAG=`, `REPO=`, `FORCE=1`) |
 | `make package-release` | `bin/package-macos`: Developer ID, notarized (`GLIFF_NOTARY_PROFILE`) |
 | `make icon` | `bin/export-macos-icon` |
 | `make dev` / `make install-dev` | `bin/dev` / `bin/install-dev` (Linux) |
@@ -466,6 +491,14 @@ gliff 0.4.1).
   `make macos` pipeline, `make verify`, `make video-check` and `make
   distclean` (removes everything `.gitignore` ignores, after asking); see
   [Make targets](#make-targets).
+- **Build once, install on other Arch/Omarchy machines**: `make package`
+  builds a pacman package with its build ID (`/usr/share/gliff/build-id`),
+  `make install-package PKG=` installs it elsewhere (SHA-256, name and
+  architecture checked), `make release-upload` / `make install-release`
+  use `linux-COMMIT` GitHub releases, and `make install` skips an unchanged
+  build, as on the Mac. `bin/package-linux`, `bin/install-linux-package`,
+  `bin/release-linux`, `bin/install-linux-release`; shared
+  `bin/lib/build-id.sh` and `bin/lib/linux-install.sh`.
 - **Build once, install on other Macs**: a build ID in the app
   (`GliffBuildID`, the same as About Gliff's) lets `make install` skip an
   unchanged build; `make install-package` installs a `make package` ZIP
