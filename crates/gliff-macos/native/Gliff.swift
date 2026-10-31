@@ -75,6 +75,69 @@ func json(_ data: Data) -> [String: Any] {
     (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? [:]
 }
 
+//= A window the client opens for a task: the connection window
+//= (ComputerPicker) or the settings window (SettingsWindow). Run alone
+//= ("choose", "settings" modes) it is its own app with its own menu; inside
+//= the viewer ("open_panel") it is one of the viewer's windows, with the id
+//= the client gave it: events carry that id and commands for it arrive
+//= after a TARGET packet naming it.
+protocol PanelWindow: AnyObject {
+    var window: NSWindow? { get }
+    /// A command from the client, on the main thread.
+    func handle(_ cmd: [String: Any])
+}
+//= Set by the viewer: bring its settings window forward when one is open
+//= (true), so Settings… never opens a second one.
+var focusOpenSettings: () -> Bool = { false }
+//= Gliff ▸ About Gliff, in every Gliff window's menu (viewer, connection
+//= window, settings). Version and build come from the client
+//= (GLIFF_VERSION, GLIFF_BUILD; see native::spawn), else the app bundle.
+final class About: NSObject {
+    static let shared = About()
+    static var version: String {
+        ProcessInfo.processInfo.environment["GLIFF_VERSION"]
+            ?? Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "unknown"
+    }
+    static var build: String {
+        ProcessInfo.processInfo.environment["GLIFF_BUILD"]
+            ?? Bundle.main.infoDictionary?["GliffBuildID"] as? String ?? "unknown"
+    }
+    @objc func show(_ sender: Any?) {
+        let small = NSFont.systemFont(ofSize: 11)
+        let credits = NSMutableAttributedString(string: "Remote desktop for Hyprland and macOS over SSH.\n", attributes: [.font: small, .foregroundColor: NSColor.secondaryLabelColor])
+        credits.append(NSAttributedString(string: "github.com/LaurentFough/gliff", attributes: [.font: small, .link: URL(string: "https://github.com/LaurentFough/gliff")!]))
+        credits.append(NSAttributedString(string: "\nBased on omacom/gliff (MIT License).", attributes: [.font: small, .foregroundColor: NSColor.secondaryLabelColor]))
+        let paragraph = NSMutableParagraphStyle(); paragraph.alignment = .center
+        credits.addAttribute(.paragraphStyle, value: paragraph, range: NSRange(location: 0, length: credits.length))
+        NSApplication.shared.orderFrontStandardAboutPanel(options: [
+            .applicationName: "Gliff",
+            .applicationVersion: About.version,
+            .version: "build \(About.build)",
+            .credits: credits,
+        ])
+        NSApplication.shared.activate(ignoringOtherApps: true)
+    }
+}
+func aboutMenuItem() -> NSMenuItem {
+    let item = NSMenuItem(title: "About Gliff", action: #selector(About.show(_:)), keyEquivalent: "")
+    item.target = About.shared
+    return item
+}
+//= The standard Edit menu (target nil: the focused text field), so Cut,
+//= Copy, Paste and Select All work in the address and server-command fields.
+func editMenuItem() -> NSMenuItem {
+    let item = NSMenuItem()
+    let menu = NSMenu(title: "Edit"); item.submenu = menu
+    menu.addItem(withTitle: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
+    menu.addItem(withTitle: "Redo", action: Selector(("redo:")), keyEquivalent: "Z")
+    menu.addItem(NSMenuItem.separator())
+    menu.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+    menu.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+    menu.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+    menu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+    return item
+}
+
 // Read a Unicode layout without selecting it or changing the user's input source.
 // Keep the actual Mac symbols, including Option levels and dead keys, rather
 // than guessing an XKB layout from the input source's display name.
@@ -1175,12 +1238,21 @@ final class Tab {
     }
     var shareClipboard: Bool { state["clipboard"] as? Bool != false }
     var playSound: Bool { state["sound"] as? Bool != false }
+    var autoReconnect: Bool { state["auto_reconnect"] as? Bool != false }
 }
 
 final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
     // Every open window, by id; read on the bridge reader thread too.
     private let tabsLock = NSLock()
     private var tabs: [UInt32: Tab] = [:]
+    // The connection and settings windows the client opened in this
+    // process (open_panel), by id; same lock as tabs.
+    private var panels: [UInt32: PanelWindow] = [:]
+    // Settings ▸ General ▸ Quit Gliff when its last window closes
+    // (quit_on_last_window, from app_settings). Off: Gliff stays open with
+    // no windows; File ▸ New Tab or the Dock icon opens the connection window.
+    var quitOnLastWindow = false
+    var reconnectItem: NSMenuItem?
     // Reader thread only: the window the next packets are for (kind 6).
     private var target: UInt32 = 0
     // The tab that last became key: the Machine menu and the local clipboard
@@ -1193,6 +1265,9 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
     let clipboardItem = NSMenuItem(title: "Share Clipboard", action: #selector(App.toggleClipboard), keyEquivalent: "")
     // Machine > Play Sound: the shared mute switch; enabled when the host sends sound.
     let soundItem = NSMenuItem(title: "Play Sound", action: #selector(App.toggleSound), keyEquivalent: "")
+    // Machine > Reconnect Automatically: the machine's auto_reconnect setting
+    // (reopen at launch, retry a dropped session).
+    let autoReconnectItem = NSMenuItem(title: "Reconnect Automatically", action: #selector(App.toggleAutoReconnect), keyEquivalent: "")
 
     func tab(_ id: UInt32) -> Tab? { tabsLock.lock(); defer { tabsLock.unlock() }; return tabs[id] }
     func tab(for window: NSWindow?) -> Tab? {
@@ -1202,6 +1277,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
     var keyTab: Tab? { tab(for: NSApp.keyWindow) ?? tab(activeTab) }
     var tabCount: Int { tabsLock.lock(); defer { tabsLock.unlock() }; return tabs.count }
+    func panel(_ id: UInt32) -> PanelWindow? { tabsLock.lock(); defer { tabsLock.unlock() }; return panels[id] }
     /// Register a tab; any thread (scripts/macos-input-check.py builds one by hand).
     func addTab(_ tab: Tab) { tabsLock.lock(); tabs[tab.id] = tab; tabsLock.unlock() }
 
@@ -1213,6 +1289,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
         event(["type": "video_caps", "hardware": first.gpu != nil])
         let menu = NSMenu(); let appItem = NSMenuItem(); menu.addItem(appItem)
         let appMenu = NSMenu(); appItem.submenu = appMenu
+        appMenu.addItem(aboutMenuItem()); appMenu.addItem(NSMenuItem.separator())
         let hosting = appMenu.addItem(withTitle: "Enable Remote Control…", action: #selector(App.requestHostPermissions), keyEquivalent: "")
         hosting.target = self
         let settings = appMenu.addItem(withTitle: "Settings…", action: #selector(App.openSettings), keyEquivalent: ",")
@@ -1224,6 +1301,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let newTab = fileMenu.addItem(withTitle: "New Tab", action: #selector(App.newWindowForTab(_:)), keyEquivalent: "t")
         newTab.target = self
         fileMenu.addItem(withTitle: "Close Tab", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
+        menu.addItem(editMenuItem())
         let machineItem = NSMenuItem(); menu.addItem(machineItem)
         let machineMenu = NSMenu(title: "Machine"); machineItem.submenu = machineMenu
         // Enabled state is set from machine_state (screen_locked), not validation.
@@ -1234,17 +1312,28 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
         soundItem.target = self; soundItem.isEnabled = false; machineMenu.addItem(soundItem)
         machineMenu.addItem(NSMenuItem.separator())
         let reconnect = machineMenu.addItem(withTitle: "Reconnect", action: #selector(App.reconnect), keyEquivalent: "")
-        reconnect.target = self
-        // The Window menu: AppKit adds the tab commands (Show Tab Bar, Merge
-        // All Windows, Move Tab to New Window) and the window list.
+        reconnect.target = self; reconnectItem = reconnect
+        autoReconnectItem.target = self; machineMenu.addItem(autoReconnectItem)
+        // The Window menu: Minimize, the tab commands, and the window list
+        // (AppKit fills that in, as windowsMenu).
         let windowItem = NSMenuItem(); menu.addItem(windowItem)
         let windowMenu = NSMenu(title: "Window"); windowItem.submenu = windowMenu
         windowMenu.addItem(withTitle: "Minimize", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
+        // AppKit does not add the tab commands to a menu built in code, so they
+        // are listed here. Target nil: each goes to the key window (a tab).
+        windowMenu.addItem(NSMenuItem.separator())
+        windowMenu.addItem(withTitle: "Show Previous Tab", action: #selector(NSWindow.selectPreviousTab(_:)), keyEquivalent: "{")
+        windowMenu.addItem(withTitle: "Show Next Tab", action: #selector(NSWindow.selectNextTab(_:)), keyEquivalent: "}")
+        windowMenu.addItem(withTitle: "Move Tab to New Window", action: #selector(NSWindow.moveTabToNewWindow(_:)), keyEquivalent: "")
+        windowMenu.addItem(withTitle: "Merge All Windows", action: #selector(NSWindow.mergeAllWindows(_:)), keyEquivalent: "")
+        windowMenu.addItem(withTitle: "Show Tab Bar", action: #selector(NSWindow.toggleTabBar(_:)), keyEquivalent: "")
+        windowMenu.addItem(NSMenuItem.separator())
         NSApplication.shared.mainMenu = menu
         NSApplication.shared.windowsMenu = windowMenu
         makeWindow(first, title: CommandLine.arguments.dropFirst(2).first ?? "Gliff")
         NSApplication.shared.activate(ignoringOtherApps: true)
         clipboard.localWindow = { [weak self] in self?.keyTab?.id }
+        focusOpenSettings = { [weak self] in self?.focusSettings() ?? false }
         clipboard.start()
         keyboardLayoutChanged(nil)
         DistributedNotificationCenter.default().addObserver(self, selector: #selector(keyboardLayoutChanged(_:)), name: Notification.Name(kTISNotifySelectedKeyboardInputSourceChanged as String), object: nil)
@@ -1295,6 +1384,11 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let id = target
         if kind == 2 {
             let cmd = json(data)
+            // App-wide settings, whichever window was targeted last.
+            if cmd["type"] as? String == "app_settings" {
+                DispatchQueue.main.async { self.quitOnLastWindow = cmd["quit_on_last_window"] as? Bool == true }
+                return
+            }
             if cmd["type"] as? String == "open_window" {
                 let tab = Tab(id: id)
                 addTab(tab)
@@ -1302,6 +1396,13 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 DispatchQueue.main.async { self.makeWindow(tab, title: title) }
                 return
             }
+            if cmd["type"] as? String == "open_panel" {
+                // Synchronously, so the panel is registered before its first
+                // command (read next on this thread) looks it up.
+                DispatchQueue.main.sync { self.openPanel(id, cmd) }
+                return
+            }
+            if let panel = panel(id) { DispatchQueue.main.async { panel.handle(cmd) }; return }
             // A closed tab's last packets.
             guard let tab = tab(id) else { return }
             if clipboard.receive(cmd, window: id) { return }
@@ -1320,6 +1421,53 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
             let schedule = !tab.drawing; tab.drawing = true; tab.pendingLock.unlock()
             if schedule { DispatchQueue.main.async { autoreleasepool { self.drawPending(tab) } } }
         }
+    }
+
+    /// The connection window (kind "choose") or the settings window (kind
+    /// "settings") as a window of this app: the connection window is a sheet
+    /// on the front tab, so it opens over the viewer and moves with it.
+    func openPanel(_ id: UInt32, _ cmd: [String: Any]) {
+        let forget: () -> Void = { [weak self] in
+            guard let self = self else { return }
+            self.tabsLock.lock(); self.panels[id] = nil; self.tabsLock.unlock()
+        }
+        switch cmd["kind"] as? String ?? "" {
+        case "choose":
+            let picker = ComputerPicker(screenOverride: (cmd["args"] as? [String])?.first)
+            picker.panelID = id; picker.onFinish = forget
+            tabsLock.lock(); panels[id] = picker; tabsLock.unlock()
+            picker.build()
+            guard let w = picker.window else { forget(); return }
+            // Over a tab with no live session (connecting, failed or
+            // dropped) the connection window is a sheet on that tab; over a
+            // connected tab, or with no tab, it is a window of its own, like
+            // Settings, so the live session stays usable.
+            if let tab = keyTab, tab.view?.hasPicture == false, let parent = tab.window,
+               parent.isVisible, !parent.isMiniaturized, parent.attachedSheet == nil {
+                parent.beginSheet(w)
+            } else {
+                w.center(); w.makeKeyAndOrderFront(nil)
+            }
+            w.makeFirstResponder(picker.address)
+        case "settings":
+            let settings = SettingsWindow()
+            settings.panelID = id; settings.onFinish = forget
+            tabsLock.lock(); panels[id] = settings; tabsLock.unlock()
+            settings.build()
+            settings.window?.center(); settings.window?.makeKeyAndOrderFront(nil)
+        default:
+            diagnostic("Gliff: unknown panel \(cmd["kind"] ?? "")")
+            event(["type": "settings_close"], window: id)
+            return
+        }
+        NSApplication.shared.activate(ignoringOtherApps: true)
+    }
+    /// Bring an open settings window forward; false when none is open.
+    func focusSettings() -> Bool {
+        tabsLock.lock(); let open = panels.values.first { $0 is SettingsWindow }; tabsLock.unlock()
+        guard let w = open?.window else { return false }
+        w.makeKeyAndOrderFront(nil); NSApplication.shared.activate(ignoringOtherApps: true)
+        return true
     }
 
     /// A JSON command for one tab, on the main thread.
@@ -1376,6 +1524,11 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if !tab.painted { tab.painted = true; diagnostic("Gliff displayed first frame: \(w)x\(h)") }
     }
 
+    /// No tab is open (Quit on last window off): nothing for the Machine menu.
+    func disableMachineMenu() {
+        for item in [mirrorItem, privateItem, clipboardItem, soundItem, autoReconnectItem] { item.isEnabled = false }
+        reconnectItem?.isEnabled = false
+    }
     /// The Machine menu for the active tab's session.
     func showMachineState(_ cmd: [String: Any]) {
         let privateScreen = cmd["screen"] as? String == "private"
@@ -1383,8 +1536,10 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
         mirrorItem.state = privateScreen ? .off : .on
         privateItem.state = privateScreen ? .on : .off
         mirrorItem.isEnabled = !locked; privateItem.isEnabled = !locked
+        clipboardItem.isEnabled = true; autoReconnectItem.isEnabled = true; reconnectItem?.isEnabled = true
         mirrorItem.toolTip = locked ? "--output names the screen for this connection" : nil; privateItem.toolTip = mirrorItem.toolTip
         clipboardItem.state = cmd["clipboard"] as? Bool != false ? .on : .off
+        autoReconnectItem.state = cmd["auto_reconnect"] as? Bool != false ? .on : .off
         let sound = cmd["sound"] as? Bool
         soundItem.state = sound != false ? .on : .off
         let available = cmd["sound_available"] as? Bool == true
@@ -1393,10 +1548,11 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
     // Menu commands go to the active tab's session.
     func toKeyTab(_ value: [String: Any]) { if let tab = keyTab { event(value, window: tab.id) } else { event(value) } }
-    @objc func openSettings() { toKeyTab(["type": "open_settings"]) }
+    @objc func openSettings() { if !focusSettings() { toKeyTab(["type": "open_settings"]) } }
     @objc func mirrorScreen() { toKeyTab(["type": "setting", "field": "screen", "value": "mirror"]) }
     @objc func privateScreen() { toKeyTab(["type": "setting", "field": "screen", "value": "private"]) }
     @objc func toggleClipboard() { toKeyTab(["type": "setting", "field": "clipboard", "value": !(keyTab?.shareClipboard ?? true)]) }
+    @objc func toggleAutoReconnect() { toKeyTab(["type": "setting", "field": "auto_reconnect", "value": !(keyTab?.autoReconnect ?? true)]) }
     @objc func toggleSound() { toKeyTab(["type": "sound", "on": !(keyTab?.playSound ?? true)]) }
     @objc func reconnect() { toKeyTab(["type": "reconnect"]) }
     @objc func reconnectClicked(_ sender: NSButton) {
@@ -1442,12 +1598,23 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // Closing the last window quits (applicationWillTerminate says bye
         // to all), and its machine reopens next time; closing one tab of
         // several forgets that machine.
-        guard tabCount > 1 else { return }
-        tabsLock.lock(); tabs[tab.id] = nil; tabsLock.unlock()
+        if tabCount <= 1 && quitOnLastWindow {
+            // Quit, even with a settings window still open; this machine
+            // reopens at the next launch (no "closed", so its tab is kept).
+            DispatchQueue.main.async { NSApplication.shared.terminate(nil) }
+            return
+        }
+        tabsLock.lock(); tabs[tab.id] = nil; let left = tabs.count; tabsLock.unlock()
         tab.gpu?.onFrame = nil
         event(["type": "closed"], window: tab.id)
+        if left == 0 { disableMachineMenu() }
     }
-    func applicationShouldTerminateAfterLastWindowClosed(_ app: NSApplication) -> Bool { true }
+    func applicationShouldTerminateAfterLastWindowClosed(_ app: NSApplication) -> Bool { quitOnLastWindow }
+    // The Dock icon with no window open: offer the connection window.
+    func applicationShouldHandleReopen(_ app: NSApplication, hasVisibleWindows: Bool) -> Bool {
+        if !hasVisibleWindows && tabCount == 0 { event(["type": "new_tab"]) }
+        return true
+    }
     func applicationWillTerminate(_ note: Notification) {
         DistributedNotificationCenter.default().removeObserver(self)
         tabsLock.lock(); let all = Array(tabs.values); tabsLock.unlock()
@@ -1547,7 +1714,7 @@ final class ComputerPickerRow: NSTableRowView {
     }
 }
 
-final class ComputerPicker: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTableViewDataSource, NSTableViewDelegate, NSTextFieldDelegate {
+final class ComputerPicker: NSObject, PanelWindow, NSApplicationDelegate, NSWindowDelegate, NSTableViewDataSource, NSTableViewDelegate, NSTextFieldDelegate, NSSearchFieldDelegate {
     let nearby = NearbyComputers()
     let table = NSTableView()
     let address = NSTextField(string: "")
@@ -1577,6 +1744,20 @@ final class ComputerPicker: NSObject, NSApplicationDelegate, NSWindowDelegate, N
     // which is also saved (moved) on Connect.
     var sessionScreens: [String: String] = [:]
     var legacyUsed = false
+    // Known machines (the config's machines list, newest first): the sidebar
+    // lists them, filtered by its search field, and the SSH Address field
+    // completes from them as you type. lastTyped is the address as typed, so
+    // deleting a completion does not bring it back.
+    var machines: [String] = []
+    var shownMachines: [String] = []
+    let machineSearch = NSSearchField()
+    let machineTable = NSTableView()
+    let removeMachine = NSButton()
+    var lastTyped = ""
+    //= Inside the viewer: this window's id, and what to do once it is done
+    //= (the viewer forgets it). nil: the "choose" helper process.
+    var panelID: UInt32?
+    var onFinish: (() -> Void)?
     init(screenOverride: String? = nil, preferences: UserDefaults? = nil) {
         self.screenOverride = screenOverride
         if let preferences = preferences { self.preferences = preferences }
@@ -1595,18 +1776,40 @@ final class ComputerPicker: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         stack.translatesAutoresizingMaskIntoConstraints = false
         return stack
     }
+    /// An event for the client: tagged with the window id inside the viewer.
+    func send(_ value: [String: Any]) {
+        if let id = panelID { event(value, window: id) } else { event(value) }
+    }
+    /// The "choose" helper process: its own menu, window and command reader.
     func applicationDidFinishLaunching(_ note: Notification) {
         let menu = NSMenu(); let item = NSMenuItem(); menu.addItem(item)
         let appMenu = NSMenu(); item.submenu = appMenu
+        appMenu.addItem(aboutMenuItem()); appMenu.addItem(NSMenuItem.separator())
         let permission = appMenu.addItem(withTitle: "Enable Remote Control…", action: #selector(hostPermissions), keyEquivalent: "")
         permission.target = self
         let settingsItem = appMenu.addItem(withTitle: "Settings…", action: #selector(openSettings), keyEquivalent: ",")
         settingsItem.target = self
         appMenu.addItem(NSMenuItem.separator())
         appMenu.addItem(withTitle: "Quit Gliff", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        menu.addItem(editMenuItem())
         NSApplication.shared.mainMenu = menu
+        build()
+        guard let w = window else { return }
+        w.center(); w.makeKeyAndOrderFront(nil); w.makeFirstResponder(address)
+        NSApplication.shared.activate(ignoringOtherApps: true)
+        // The parent can close/inspect this chooser without making a connection.
+        readCommands(onClose: { [weak self] in self?.cancel(nil) }) { [weak self] _, data in
+            let cmd = json(data)
+            DispatchQueue.main.async { self?.handle(cmd) }
+        }
+    }
+    /// The window and its controls; showing it is the caller's (the helper
+    /// centres it; the viewer attaches it to the front tab as a sheet).
+    func build() {
         let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 600, height: 340), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
         w.title = "Gliff"; w.delegate = self
+        // Never merged into the viewer's tab group.
+        w.tabbingMode = .disallowed; w.isReleasedWhenClosed = false
         w.backgroundColor = .windowBackgroundColor
         w.titlebarAppearsTransparent = true
         let view = w.contentView!
@@ -1668,13 +1871,66 @@ final class ComputerPicker: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         settingsButton.setAccessibilityLabel("Settings")
         let actions = stack([settingsButton, NSView(), cancel, connect], .horizontal, 8)
         let content = stack([heading, list, statusRow, fields, screenRow, actions], .vertical, 12)
+        // A taller window gives the nearby-computers list the extra height:
+        // every other row hugs its content; the list hugs least and its
+        // height (listHeight) is only a minimum.
+        content.distribution = .fill
+        for row in [heading, statusRow, fields, screenRow, actions] { row.setContentHuggingPriority(.defaultHigh, for: .vertical) }
+        list.setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: .vertical)
         view.addSubview(content)
+        // The sidebar: known machines, as in the settings window. It takes the
+        // content's height, so it never changes how tall the window is.
+        machineSearch.placeholderString = "Search machines"
+        machineSearch.setAccessibilityLabel("Search known machines")
+        machineSearch.delegate = self
+        machineSearch.translatesAutoresizingMaskIntoConstraints = false
+        let machineColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("machine"))
+        machineColumn.title = "Machines"; machineColumn.width = 196; machineTable.addTableColumn(machineColumn)
+        machineTable.columnAutoresizingStyle = .firstColumnOnlyAutoresizingStyle
+        machineTable.frame = NSRect(x: 0, y: 0, width: 220, height: 60); machineTable.autoresizingMask = [.width]
+        machineTable.headerView = nil; machineTable.style = .sourceList; machineTable.rowHeight = 26
+        machineTable.delegate = self; machineTable.dataSource = self
+        machineTable.target = self; machineTable.doubleAction = #selector(ComputerPicker.connect(_:))
+        machineTable.setAccessibilityLabel("Known Machines")
+        let machineScroll = NSScrollView()
+        machineScroll.translatesAutoresizingMaskIntoConstraints = false
+        machineScroll.hasVerticalScroller = true; machineScroll.borderType = .noBorder
+        machineScroll.drawsBackground = false
+        machineScroll.documentView = machineTable
+        let sidebar = NSVisualEffectView()
+        sidebar.material = .sidebar; sidebar.blendingMode = .withinWindow
+        sidebar.wantsLayer = true; sidebar.layer?.cornerRadius = 8; sidebar.layer?.masksToBounds = true
+        sidebar.translatesAutoresizingMaskIntoConstraints = false
+        // + adds what is in SSH Address; − forgets the selected machine.
+        let addMachine = NSButton(image: NSImage(systemSymbolName: "plus", accessibilityDescription: "Add Machine")!, target: self, action: #selector(addMachine(_:)))
+        addMachine.bezelStyle = .inline; addMachine.toolTip = "Add the SSH address to your machines"
+        removeMachine.title = ""; removeMachine.imagePosition = .imageOnly
+        removeMachine.image = NSImage(systemSymbolName: "minus", accessibilityDescription: "Remove Machine")
+        removeMachine.target = self; removeMachine.action = #selector(removeMachine(_:))
+        removeMachine.bezelStyle = .inline; removeMachine.toolTip = "Forget the selected machine and its settings"
+        removeMachine.isEnabled = false
+        let machineButtons = stack([addMachine, removeMachine], .horizontal, 4)
+        sidebar.addSubview(machineSearch); sidebar.addSubview(machineScroll); sidebar.addSubview(machineButtons)
+        view.addSubview(sidebar)
         for row in [heading, list, statusRow, fields, screenRow, actions] { row.translatesAutoresizingMaskIntoConstraints = false }
-        let listHeight = list.heightAnchor.constraint(equalToConstant: 66)
+        let listHeight = list.heightAnchor.constraint(greaterThanOrEqualToConstant: 66)
         self.listHeight = listHeight
         NSLayoutConstraint.activate([
-            view.widthAnchor.constraint(greaterThanOrEqualToConstant: 600),
-            content.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 20),
+            view.widthAnchor.constraint(greaterThanOrEqualToConstant: 840),
+            sidebar.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 12),
+            sidebar.topAnchor.constraint(equalTo: view.topAnchor, constant: 12),
+            sidebar.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -12),
+            sidebar.widthAnchor.constraint(equalToConstant: 220),
+            machineSearch.leadingAnchor.constraint(equalTo: sidebar.leadingAnchor, constant: 10),
+            machineSearch.trailingAnchor.constraint(equalTo: sidebar.trailingAnchor, constant: -10),
+            machineSearch.topAnchor.constraint(equalTo: sidebar.topAnchor, constant: 10),
+            machineScroll.leadingAnchor.constraint(equalTo: sidebar.leadingAnchor),
+            machineScroll.trailingAnchor.constraint(equalTo: sidebar.trailingAnchor),
+            machineScroll.topAnchor.constraint(equalTo: machineSearch.bottomAnchor, constant: 8),
+            machineScroll.bottomAnchor.constraint(equalTo: machineButtons.topAnchor, constant: -4),
+            machineButtons.leadingAnchor.constraint(equalTo: sidebar.leadingAnchor, constant: 8),
+            machineButtons.bottomAnchor.constraint(equalTo: sidebar.bottomAnchor, constant: -6),
+            content.leadingAnchor.constraint(equalTo: sidebar.trailingAnchor, constant: 20),
             content.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -20),
             content.topAnchor.constraint(equalTo: view.topAnchor, constant: 20),
             content.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -20),
@@ -1698,34 +1954,31 @@ final class ComputerPicker: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         ])
         table.nextKeyView = address; address.nextKeyView = port
         port.nextKeyView = screen; screen.nextKeyView = connect; connect.nextKeyView = cancel; cancel.nextKeyView = refresh
-        refresh.nextKeyView = table
+        refresh.nextKeyView = machineSearch; machineSearch.nextKeyView = machineTable; machineTable.nextKeyView = table
         w.defaultButtonCell = connect.cell as? NSButtonCell
         window = w; restoreScreenPreference(); fitWindow()
-        w.center(); w.makeKeyAndOrderFront(nil); w.makeFirstResponder(address)
-        NSApplication.shared.activate(ignoringOtherApps: true)
         nearby.onChange = { [weak self] in self?.update() }
         nearby.start()
-        // The parent can close/inspect this chooser without making a connection.
-        readCommands(onClose: { [weak self] in self?.cancel(nil) }) { [weak self] _, data in
-            let cmd = json(data)
-            DispatchQueue.main.async {
-                guard let self = self else { return }
-                if cmd["type"] as? String == "cancel" { self.cancel(nil) }
-                if cmd["type"] as? String == "machine_settings" {
-                    self.configScreens = cmd["screens"] as? [String: String] ?? [:]
-                    self.pinned = Set(cmd["pinned"] as? [String] ?? [])
-                    self.defaultScreen = cmd["default_screen"] as? String ?? "mirror"
-                    // Choices made in this window still win (sessionScreens).
-                    self.preferenceTarget = nil; self.restoreScreenPreference()
-                }
-                if cmd["type"] as? String == "select", let index = cmd["index"] as? Int, self.rows.indices.contains(index) {
-                    self.table.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false)
-                    self.window?.makeFirstResponder(self.table)
-                }
-                if cmd["type"] as? String == "inspect" {
-                    event(["type": "picker_state", "hosts": self.rows.map { $0.value }, "rows": self.table.numberOfRows, "host": self.address.stringValue, "port": self.port.stringValue, "screen": self.screenMode])
-                }
-            }
+    }
+    /// A command from the client, on the main thread.
+    func handle(_ cmd: [String: Any]) {
+        if cmd["type"] as? String == "close_panel" { dismiss(); return }
+        if cmd["type"] as? String == "cancel" { self.cancel(nil) }
+        if cmd["type"] as? String == "machine_settings" {
+            self.configScreens = cmd["screens"] as? [String: String] ?? [:]
+            self.pinned = Set(cmd["pinned"] as? [String] ?? [])
+            self.defaultScreen = cmd["default_screen"] as? String ?? "mirror"
+            self.machines = (cmd["machines"] as? [String] ?? []).reversed()
+            self.filterMachines()
+            // Choices made in this window still win (sessionScreens).
+            self.preferenceTarget = nil; self.restoreScreenPreference()
+        }
+        if cmd["type"] as? String == "select", let index = cmd["index"] as? Int, self.rows.indices.contains(index) {
+            self.table.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false)
+            self.window?.makeFirstResponder(self.table)
+        }
+        if cmd["type"] as? String == "inspect" {
+            send(["type": "picker_state", "hosts": self.rows.map { $0.value }, "rows": self.table.numberOfRows, "host": self.address.stringValue, "port": self.port.stringValue, "screen": self.screenMode])
         }
     }
     func update() {
@@ -1748,9 +2001,49 @@ final class ComputerPicker: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         window.contentMinSize = size
         if wasCompact { window.setContentSize(size) }
     }
-    func numberOfRows(in tableView: NSTableView) -> Int { rows.count }
-    func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? { ComputerPickerRow() }
+    /// The sidebar's rows: known machines matching its search field.
+    func filterMachines() {
+        let query = machineSearch.stringValue.trimmingCharacters(in: .whitespaces).lowercased()
+        shownMachines = query.isEmpty ? machines : machines.filter { $0.lowercased().contains(query) }
+        machineTable.reloadData()
+    }
+    /// Inline completion while typing forward at the end of the SSH Address:
+    /// the newest known machine that starts with what was typed fills in, with
+    /// the added part selected (type on to replace it, Tab or Return to keep
+    /// it). Deleting, or editing elsewhere in the text, completes nothing.
+    func autocompleteAddress() {
+        let typed = address.stringValue
+        let previous = lastTyped
+        lastTyped = typed
+        let length = (typed as NSString).length
+        guard length > (previous as NSString).length, let editor = address.currentEditor() as? NSTextView,
+              editor.selectedRange().location == length, editor.selectedRange().length == 0 else { return }
+        let lowered = typed.lowercased()
+        guard let match = machines.first(where: { ($0 as NSString).length > length && $0.lowercased().hasPrefix(lowered) }) else { return }
+        let rest = (match as NSString).substring(from: length)
+        address.stringValue = typed + rest
+        address.currentEditor()?.selectedRange = NSRange(location: length, length: (rest as NSString).length)
+    }
+    func numberOfRows(in tableView: NSTableView) -> Int { tableView === machineTable ? shownMachines.count : rows.count }
+    func tableView(_ tableView: NSTableView, rowViewForRow row: Int) -> NSTableRowView? { tableView === machineTable ? nil : ComputerPickerRow() }
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+        if tableView === machineTable {
+            guard shownMachines.indices.contains(row) else { return nil }
+            let cell = (tableView.makeView(withIdentifier: NSUserInterfaceItemIdentifier("machine"), owner: self) as? NSTableCellView) ?? {
+                let cell = NSTableCellView(); cell.identifier = NSUserInterfaceItemIdentifier("machine")
+                let text = self.label(""); text.lineBreakMode = .byTruncatingMiddle; text.translatesAutoresizingMaskIntoConstraints = false
+                cell.textField = text; cell.addSubview(text)
+                NSLayoutConstraint.activate([
+                    text.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 8),
+                    text.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -6),
+                    text.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
+                ])
+                return cell
+            }()
+            cell.textField?.stringValue = shownMachines[row]
+            cell.toolTip = shownMachines[row]
+            return cell
+        }
         guard rows.indices.contains(row) else { return nil }
         let computer = rows[row]
         let identifier = tableColumn!.identifier
@@ -1783,7 +2076,19 @@ final class ComputerPicker: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         return cell
     }
     func tableViewSelectionDidChange(_ notification: Notification) {
+        if notification.object as? NSTableView === machineTable {
+            // A known machine: its address on the default port; the screen
+            // follows that machine's settings.
+            removeMachine.isEnabled = shownMachines.indices.contains(machineTable.selectedRow)
+            guard shownMachines.indices.contains(machineTable.selectedRow) else { return }
+            selectedID = nil; table.deselectAll(nil)
+            address.stringValue = shownMachines[machineTable.selectedRow]; port.stringValue = "22"
+            lastTyped = address.stringValue
+            restoreScreenPreference()
+            return
+        }
         guard !updating, rows.indices.contains(table.selectedRow) else { return }
+        machineTable.deselectAll(nil)
         let computer = rows[table.selectedRow]; selectedID = computer.id
         address.stringValue = computer.address; port.stringValue = String(computer.port)
         restoreScreenPreference()
@@ -1818,18 +2123,51 @@ final class ComputerPicker: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         if let key = screenPreferenceKey { sessionScreens[key] = screenMode }
         updateScreenDetail()
     }
-    @objc func openSettings(_ sender: Any?) { event(["type": "open_settings"]) }
-    func controlTextDidChange(_ note: Notification) { restoreScreenPreference() }
+    @objc func openSettings(_ sender: Any?) {
+        if panelID != nil && focusOpenSettings() { return }
+        send(["type": "open_settings"])
+    }
+    func controlTextDidChange(_ note: Notification) {
+        if note.object as? NSSearchField === machineSearch { filterMachines(); return }
+        if note.object as? NSTextField === address { autocompleteAddress() }
+        restoreScreenPreference()
+    }
     @objc func refresh(_ sender: Any?) { nearby.start() }
     func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
         if commandSelector == #selector(NSResponder.insertNewline(_:)) { connect(nil); return true }
         if commandSelector == #selector(NSResponder.cancelOperation(_:)) { cancel(nil); return true }
         return false
     }
+    /// An SSH address the client accepts (the same rule as discovery.rs).
+    static func validAddress(_ host: String) -> Bool {
+        !host.isEmpty && !host.hasPrefix("-") && host.utf8.count <= 320 &&
+            host.range(of: "^[A-Za-z0-9_.:@\\[\\]%-]+$", options: .regularExpression) != nil
+    }
+    /// + : remember the typed address as a machine without connecting.
+    @objc func addMachine(_ sender: Any?) {
+        let host = address.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard ComputerPicker.validAddress(host) else {
+            status.stringValue = "Type an SSH address such as user@computer.local, then + to add it."; fitWindow(); return
+        }
+        send(["type": "machine_add", "host": host])
+    }
+    /// − : forget the selected machine, after asking (its settings go too).
+    @objc func removeMachine(_ sender: Any?) {
+        guard shownMachines.indices.contains(machineTable.selectedRow), let window = window else { return }
+        let host = shownMachines[machineTable.selectedRow]
+        let alert = NSAlert()
+        alert.messageText = "Remove \(host)?"
+        alert.informativeText = "It leaves your machines, with its saved settings, and will not reopen at launch."
+        alert.addButton(withTitle: "Remove"); alert.addButton(withTitle: "Cancel")
+        alert.beginSheetModal(for: window) { [weak self] response in
+            guard response == .alertFirstButtonReturn else { return }
+            self?.send(["type": "machine_remove", "host": host])
+            self?.machineTable.deselectAll(nil); self?.removeMachine.isEnabled = false
+        }
+    }
     @objc func connect(_ sender: Any?) {
         let host = address.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !host.isEmpty, !host.hasPrefix("-"), host.utf8.count <= 320,
-              host.range(of: "^[A-Za-z0-9_.:@\\[\\]%-]+$", options: .regularExpression) != nil,
+        guard ComputerPicker.validAddress(host),
               let number = Int(port.stringValue), (1...65535).contains(number) else {
             status.stringValue = "Enter an SSH address and a port between 1 and 65535."; fitWindow(); return
         }
@@ -1842,7 +2180,18 @@ final class ComputerPicker: NSObject, NSApplicationDelegate, NSWindowDelegate, N
     @objc func cancel(_ sender: Any?) { complete(["type": "cancel"]) }
     func complete(_ value: [String: Any]) {
         guard !finished else { return }
-        finished = true; nearby.stop(); event(value); NSApplication.shared.terminate(nil)
+        finished = true; nearby.stop(); send(value)
+        if panelID == nil { NSApplication.shared.terminate(nil) } else { dismiss() }
+    }
+    /// Inside the viewer: take the window down (a sheet ends) without an
+    /// answer; complete() has sent one, or the client closed it.
+    func dismiss() {
+        finished = true; nearby.stop()
+        if let w = window {
+            if let parent = w.sheetParent { parent.endSheet(w) }
+            w.orderOut(nil)
+        }
+        onFinish?(); onFinish = nil
     }
     @objc func hostPermissions(_ sender: Any?) {
         _ = CGRequestScreenCaptureAccess()
@@ -1852,7 +2201,7 @@ final class ComputerPicker: NSObject, NSApplicationDelegate, NSWindowDelegate, N
     func windowWillClose(_ note: Notification) { cancel(nil) }
     func applicationShouldTerminateAfterLastWindowClosed(_ app: NSApplication) -> Bool { true }
     func applicationWillTerminate(_ note: Notification) {
-        if !finished { finished = true; nearby.stop(); event(["type": "cancel"]) }
+        if !finished { finished = true; nearby.stop(); send(["type": "cancel"]) }
     }
 }
 
@@ -1861,7 +2210,7 @@ final class ComputerPicker: NSObject, NSApplicationDelegate, NSWindowDelegate, N
 // [overrides."user@host"] table. The client owns config.toml: this window
 // gets settings_state, sends settings_edit (a null value clears a field), and
 // shows every change as soon as the client has saved it.
-final class SettingsWindow: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTableViewDataSource, NSTableViewDelegate, NSSearchFieldDelegate {
+final class SettingsWindow: NSObject, PanelWindow, NSApplicationDelegate, NSWindowDelegate, NSTableViewDataSource, NSTableViewDelegate, NSSearchFieldDelegate {
     var window: NSWindow?
     let search = NSSearchField()
     let table = NSTableView()
@@ -1869,6 +2218,14 @@ final class SettingsWindow: NSObject, NSApplicationDelegate, NSWindowDelegate, N
     let scopeNote = NSTextField(wrappingLabelWithString: "")
     let screen = NSPopUpButton()
     let clipboardBox = NSButton(checkboxWithTitle: "Share the clipboard", target: nil, action: nil)
+    let reconnectBox = NSButton(checkboxWithTitle: "Reconnect automatically", target: nil, action: nil)
+    let reconnectOrigin = NSTextField(labelWithString: "")
+    let reconnectReset = NSButton(title: "Reset", target: nil, action: nil)
+    // General: options for Gliff itself, not a machine (state["app"]).
+    let quitBox = NSButton(checkboxWithTitle: "Quit Gliff when its last window closes", target: nil, action: nil)
+    // Connect: open the selected machine in a new tab (inside the viewer
+    // only; the settings helper at launch leaves that to the connection window).
+    let connectButton = NSButton(title: "Connect", target: nil, action: nil)
     let serverBin = NSTextField(string: "")
     let screenOrigin = NSTextField(labelWithString: "")
     let clipboardOrigin = NSTextField(labelWithString: "")
@@ -1883,7 +2240,14 @@ final class SettingsWindow: NSObject, NSApplicationDelegate, NSWindowDelegate, N
     var scopes: [String] = [""]
     var selected = ""
     var updating = false
+    //= Inside the viewer: this window's id, and what to do once it closes.
+    var panelID: UInt32?
+    var onFinish: (() -> Void)?
+    var closedByClient = false
 
+    func send(_ value: [String: Any]) {
+        if let id = panelID { event(value, window: id) } else { event(value) }
+    }
     func label(_ text: String, secondary: Bool = false) -> NSTextField {
         let l = NSTextField(labelWithString: text)
         l.font = NSFont.systemFont(ofSize: secondary ? 11 : 13)
@@ -1909,24 +2273,47 @@ final class SettingsWindow: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         both.orientation = .vertical; both.alignment = .leading; both.spacing = 2
         return both
     }
+    /// The "settings" helper process: its own menu, window and reader.
     func applicationDidFinishLaunching(_ note: Notification) {
         let menu = NSMenu()
         let appItem = NSMenuItem(); menu.addItem(appItem)
         let appMenu = NSMenu(); appItem.submenu = appMenu
+        appMenu.addItem(aboutMenuItem()); appMenu.addItem(NSMenuItem.separator())
         appMenu.addItem(withTitle: "Close Settings", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
         appMenu.addItem(withTitle: "Quit Gliff", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         // An Edit menu, so Cut/Copy/Paste work in the server command field.
-        let editItem = NSMenuItem(); menu.addItem(editItem)
-        let editMenu = NSMenu(title: "Edit"); editItem.submenu = editMenu
-        editMenu.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
-        editMenu.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
-        editMenu.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
-        editMenu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        menu.addItem(editMenuItem())
         NSApplication.shared.mainMenu = menu
-
-        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 780, height: 420), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
+        build()
+        window?.center(); window?.makeKeyAndOrderFront(nil)
+        NSApplication.shared.activate(ignoringOtherApps: true)
+        readCommands { [weak self] _, data in
+            let cmd = json(data)
+            DispatchQueue.main.async { self?.handle(cmd) }
+        }
+    }
+    /// A command from the client, on the main thread.
+    func handle(_ cmd: [String: Any]) {
+        switch cmd["type"] as? String ?? "" {
+        case "settings_state":
+            state = cmd
+            let path = cmd["path"] as? String ?? ""
+            pathLabel.stringValue = path.isEmpty ? "Settings are not saved (no home folder)." : "Saved in \(path)"
+            reloadScopes()
+        case "settings_error":
+            errorLabel.stringValue = cmd["message"] as? String ?? "That change was not saved."
+        case "close_panel":
+            closedByClient = true; window?.close()
+        default: break
+        }
+    }
+    /// The window and its controls; showing it is the caller's.
+    func build() {
+        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 780, height: 540), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
         w.title = "Gliff Settings"; w.delegate = self
-        w.contentMinSize = NSSize(width: 700, height: 360)
+        // A window of its own, never a tab of the viewer.
+        w.tabbingMode = .disallowed; w.isReleasedWhenClosed = false
+        w.contentMinSize = NSSize(width: 700, height: 500)
         let view = w.contentView!
 
         search.placeholderString = "Search machines"; search.delegate = self
@@ -1935,6 +2322,11 @@ final class SettingsWindow: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         table.addTableColumn(column); table.headerView = nil
         table.delegate = self; table.dataSource = self; table.rowHeight = 24; table.style = .sourceList
         table.setAccessibilityLabel("Machines")
+        table.target = self; table.doubleAction = #selector(SettingsWindow.connectMachine(_:))
+        connectButton.target = self; connectButton.action = #selector(SettingsWindow.connectMachine(_:))
+        connectButton.bezelStyle = .rounded; connectButton.controlSize = .large
+        connectButton.toolTip = "Open the selected machine in a new tab"
+        connectButton.setAccessibilityLabel("Connect to the selected machine")
         let scroll = NSScrollView(); scroll.documentView = table; scroll.hasVerticalScroller = true
         scroll.translatesAutoresizingMaskIntoConstraints = false
         let sidebar = NSStackView(views: [search, scroll])
@@ -1949,6 +2341,8 @@ final class SettingsWindow: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         screen.target = self; screen.action = #selector(screenChanged)
         screen.setAccessibilityLabel("Screen")
         clipboardBox.target = self; clipboardBox.action = #selector(clipboardChanged)
+        reconnectBox.target = self; reconnectBox.action = #selector(reconnectChanged)
+        reconnectReset.identifier = NSUserInterfaceItemIdentifier("auto_reconnect")
         serverBin.target = self; serverBin.action = #selector(serverChanged)
         serverBin.cell?.sendsActionOnEndEditing = true
         serverBin.setAccessibilityLabel("Server command")
@@ -1958,16 +2352,31 @@ final class SettingsWindow: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         serverReset.identifier = NSUserInterfaceItemIdentifier("server_bin")
         let display = row("Screen", screen, screenOrigin, screenReset, "Mirror shows the machine's screen; Private makes a separate Linux screen that follows this window.")
         let clip = row("Clipboard", clipboardBox, clipboardOrigin, clipboardReset, "Copy on one machine and paste on the other. Turn off for machines you do not trust.")
+        let again = row("Reconnect", reconnectBox, reconnectOrigin, reconnectReset, "Reopen the machine at launch if it was open at quit, and retry a dropped session. Off, it waits for Reconnect.")
         let server = row("Server command", serverBin, serverOrigin, serverReset, "Starts the server over SSH, e.g. gliff-server --low-bandwidth. Blank uses the inherited command.")
-        let rule = label("A screen or server command change reconnects the machine; the clipboard changes at once. Changes are saved as you make them.", secondary: true)
+        let rule = label("A screen or server command change reconnects the machine; the clipboard and Reconnect change at once. Changes are saved as you make them.", secondary: true)
         rule.preferredMaxLayoutWidth = 480; rule.lineBreakMode = .byWordWrapping; rule.maximumNumberOfLines = 3
         pathLabel.font = NSFont.systemFont(ofSize: 11); pathLabel.textColor = .tertiaryLabelColor
         pathLabel.preferredMaxLayoutWidth = 480
         errorLabel.font = NSFont.systemFont(ofSize: 12); errorLabel.textColor = .systemRed
         errorLabel.preferredMaxLayoutWidth = 480
-        let form = NSStackView(views: [heading, scopeNote, display, clip, server, rule, errorLabel, NSView(), pathLabel])
+        quitBox.target = self; quitBox.action = #selector(quitChanged)
+        quitBox.setAccessibilityLabel("Quit Gliff when its last window closes")
+        let general = label("General")
+        general.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
+        let quitHelp = label("For Gliff, not one machine. Off: Gliff stays open with no windows; File ▸ New Tab or the Dock icon opens the connection window.", secondary: true)
+        quitHelp.lineBreakMode = .byWordWrapping; quitHelp.maximumNumberOfLines = 3; quitHelp.preferredMaxLayoutWidth = 480
+        let rule2 = NSBox(); rule2.boxType = .separator
+        let generalStack = NSStackView(views: [general, quitBox, quitHelp])
+        generalStack.orientation = .vertical; generalStack.alignment = .leading; generalStack.spacing = 4
+        let headerRow = NSStackView(views: [heading, NSView(), connectButton])
+        headerRow.orientation = .horizontal; headerRow.alignment = .centerY; headerRow.spacing = 8
+        heading.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        let form = NSStackView(views: [headerRow, scopeNote, display, clip, again, server, rule, rule2, generalStack, errorLabel, NSView(), pathLabel])
         form.orientation = .vertical; form.alignment = .leading; form.spacing = 14
         form.translatesAutoresizingMaskIntoConstraints = false
+        rule2.widthAnchor.constraint(equalTo: form.widthAnchor).isActive = true
+        headerRow.widthAnchor.constraint(equalTo: form.widthAnchor).isActive = true
         view.addSubview(sidebar); view.addSubview(form)
         NSLayoutConstraint.activate([
             sidebar.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 16),
@@ -1983,24 +2392,6 @@ final class SettingsWindow: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         ])
         window = w
         reloadScopes()
-        w.center(); w.makeKeyAndOrderFront(nil)
-        NSApplication.shared.activate(ignoringOtherApps: true)
-        readCommands { [weak self] _, data in
-            let cmd = json(data)
-            DispatchQueue.main.async {
-                guard let self = self else { return }
-                switch cmd["type"] as? String ?? "" {
-                case "settings_state":
-                    self.state = cmd
-                    let path = cmd["path"] as? String ?? ""
-                    self.pathLabel.stringValue = path.isEmpty ? "Settings are not saved (no home folder)." : "Saved in \(path)"
-                    self.reloadScopes()
-                case "settings_error":
-                    self.errorLabel.stringValue = cmd["message"] as? String ?? "That change was not saved."
-                default: break
-                }
-            }
-        }
     }
 
     // Data from settings_state.
@@ -2035,6 +2426,8 @@ final class SettingsWindow: NSObject, NSApplicationDelegate, NSWindowDelegate, N
     func refreshForm() {
         updating = true
         heading.stringValue = selected.isEmpty ? "All Machines" : selected
+        connectButton.isHidden = panelID == nil
+        connectButton.isEnabled = !selected.isEmpty
         scopeNote.stringValue = selected.isEmpty
             ? "Used by every machine that does not set its own value."
             : "Only this machine. Reset hands an option back to All Machines."
@@ -2044,6 +2437,10 @@ final class SettingsWindow: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         let c = effective("clipboard")
         clipboardBox.state = c.value as? Bool == false ? .off : .on
         clipboardOrigin.stringValue = c.origin; clipboardReset.isHidden = !c.here
+        let r = effective("auto_reconnect")
+        reconnectBox.state = r.value as? Bool == false ? .off : .on
+        reconnectOrigin.stringValue = r.origin; reconnectReset.isHidden = !r.here
+        quitBox.state = (state["app"] as? [String: Any])?["quit_on_last_window"] as? Bool == true ? .on : .off
         let b = effective("server_bin")
         serverBin.placeholderString = inherited("server_bin").0 as? String ?? "gliff-server"
         // Do not replace text the user is typing.
@@ -2055,10 +2452,28 @@ final class SettingsWindow: NSObject, NSApplicationDelegate, NSWindowDelegate, N
 
     func edit(_ field: String, _ value: Any) {
         errorLabel.stringValue = ""
-        event(["type": "settings_edit", "scope": selected.isEmpty ? "defaults" : "machine", "machine": selected, "field": field, "value": value])
+        send(["type": "settings_edit", "scope": selected.isEmpty ? "defaults" : "machine", "machine": selected, "field": field, "value": value])
     }
     @objc func screenChanged(_ sender: Any?) { if !updating { edit("screen", screen.indexOfSelectedItem == 1 ? "private" : "mirror") } }
     @objc func clipboardChanged(_ sender: Any?) { if !updating { edit("clipboard", clipboardBox.state == .on) } }
+    @objc func reconnectChanged(_ sender: Any?) { if !updating { edit("auto_reconnect", reconnectBox.state == .on) } }
+    /// Connect, or a double-click on a machine: the viewer opens it in a new
+    /// tab (an app event, so the client's tab loop handles it).
+    @objc func connectMachine(_ sender: Any?) {
+        guard panelID != nil else { return }
+        var name = selected
+        if (sender as AnyObject?) === table {
+            guard scopes.indices.contains(table.clickedRow) else { return }
+            name = scopes[table.clickedRow]
+        }
+        guard !name.isEmpty else { return }
+        event(["type": "connect_machine", "host": name])
+    }
+    @objc func quitChanged(_ sender: Any?) {
+        guard !updating else { return }
+        errorLabel.stringValue = ""
+        send(["type": "settings_edit", "scope": "app", "field": "quit_on_last_window", "value": quitBox.state == .on])
+    }
     @objc func serverChanged(_ sender: Any?) {
         guard !updating else { return }
         let text = serverBin.stringValue.trimmingCharacters(in: .whitespaces)
@@ -2100,8 +2515,11 @@ final class SettingsWindow: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         if (note.object as AnyObject?) === search { reloadScopes() }
     }
     func windowWillClose(_ note: Notification) {
-        if window?.firstResponder === serverBin.currentEditor() { serverChanged(nil) }
-        event(["type": "settings_close"])
+        if !closedByClient {
+            if window?.firstResponder === serverBin.currentEditor() { serverChanged(nil) }
+            send(["type": "settings_close"])
+        }
+        onFinish?(); onFinish = nil
     }
     func applicationShouldTerminateAfterLastWindowClosed(_ app: NSApplication) -> Bool { true }
 }

@@ -26,7 +26,8 @@ Layers, last wins:
 `crates/gliff-settings/src/store.rs` (`Store`) reads and writes the file for
 the macOS client. It owns `machines`, `[defaults]`, `[overrides]` and the
 top-level `muted` (the sound switch: the Linux header's speaker button and the
-Mac's Machine ▸ Play Sound, written only when sound is off), and writes every
+Mac's Machine ▸ Play Sound, written only when sound is off) and the
+Mac-only `quit_on_last_window` (Settings ▸ General; written only when on), and writes every
 other key back untouched, so the Linux client's `open` and `shown` survive a
 Mac save. The Linux client keeps its own `recent::Config` for the same file.
 
@@ -51,15 +52,24 @@ macOS (`crates/gliff-macos/src/settings.rs`, UI in `native/Gliff.swift`):
 - **Settings window** (`SettingsWindow`): Settings… (⌘,) in the picker or the
   viewer, or the picker's Settings… button. All Machines (the defaults) and
   each machine, with a search box, the same "Default"/"Built-in" origin and
-  a Reset button per row. It offers the screen, the clipboard and the server
-  command; the decode pipeline is Linux-only (the Mac viewer decodes on the
+  a Reset button per row. It offers the screen, the clipboard, Reconnect
+  (`auto_reconnect`) and the server command; the decode pipeline is Linux-only (the Mac viewer decodes on the
   CPU) and is kept in the file but not shown.
 - **Machine menu** in the viewer: Mirror Screen / Private Screen, Share
-  Clipboard, Reconnect — the Mac's equivalent of the tab menu.
+  Clipboard, Reconnect, Reconnect Automatically — the Mac's equivalent of
+  the tab menu.
+- **Picker** sidebar: the known machines, with + (add the typed address)
+  and − (forget, as the Linux client's Forget: `machines`, the override and
+  `[[open_tabs]]`).
 - **Picker**: its screen menu follows the machine's saved screen. A screen
   chosen there is saved as that machine's override on Connect; a choice
   saved by older versions in `UserDefaults` (`screen.<host>:<port>`) moves
   to the config the next time you connect to that machine.
+
+`auto_reconnect` (default true) is shared: off, neither client reopens the
+machine at launch, and a dropped session waits for the user (on Linux the
+tab shows "click the tab to reconnect"). Changing it never reconnects. The
+Linux settings window does not show it yet; set it in the file or on a Mac.
 
 The Swift windows never touch the file: the client sends them
 `settings_state` / `machine_state` / `machine_settings` and applies their

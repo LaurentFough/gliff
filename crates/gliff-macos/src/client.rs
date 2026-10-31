@@ -118,7 +118,19 @@ pub fn client_main() -> Result<()> {
         let initial = match cli.selection() {
             Some(selected) => vec![selected],
             None => {
-                let restored = shared.open_tabs();
+                //= Machines with auto_reconnect off stay closed until chosen.
+                let restored: Vec<_> = shared
+                    .open_tabs()
+                    .into_iter()
+                    .filter(|tab| {
+                        let machine = crate::settings::machine_key(&tab.host);
+                        let on = shared.resolve(&machine, &cli_layer).auto_reconnect;
+                        if !on {
+                            tracing::info!(%machine, "not reopening: auto_reconnect is off");
+                        }
+                        on
+                    })
+                    .collect();
                 if !restored.is_empty() {
                     tracing::info!(tabs = restored.len(), "reopening the last tabs");
                     restored
@@ -134,6 +146,8 @@ pub fn client_main() -> Result<()> {
         //= One viewer process for every connection, so macOS can group
         //= their windows as tabs.
         let mut hub = Hub::open(&tab_title(&cli, &initial[0])).await?;
+        //= App-wide options (Settings ▸ General) now and after every change.
+        hub.follow_app_settings(shared.clone());
         let mut visits = Vec::new();
         for (i, selected) in initial.into_iter().enumerate() {
             let viewer = if i == 0 {
@@ -168,6 +182,23 @@ pub fn client_main() -> Result<()> {
                             tracing::warn!(error = %e, "settings window failed");
                         }
                     });
+                }
+                //= Settings ▸ Connect (or a double-click on a machine): a new
+                //= tab for it; its screen and options come from its settings.
+                Some("connect_machine") => {
+                    let host = ev["host"].as_str().unwrap_or_default().trim().to_string();
+                    let selected = crate::discovery::Selection {
+                        host,
+                        port: 22,
+                        screen: crate::discovery::ScreenMode::Mirror,
+                    };
+                    match selected.validate() {
+                        Ok(()) => {
+                            let viewer = hub.new_window(&tab_title(&cli, &selected)).await?;
+                            visits.push(spawn_visit(viewer, selected, &cli, &shared, &cli_layer));
+                        }
+                        Err(e) => tracing::warn!(error = %e, "not connecting from Settings"),
+                    }
                 }
                 Some("bye") => break,
                 _ => {}
@@ -342,7 +373,9 @@ async fn visit(
                 };
                 let incompatible = e.downcast_ref::<Incompatible>().is_some();
                 let error = format!("{e:#}");
-                let (text, delay) = match retry.failed(established.get(), incompatible) {
+                //= Read now, so the Machine menu's switch applies to this failure.
+                let auto = shared.resolve(&machine, &cli_layer).auto_reconnect;
+                let (text, delay) = match retry.failed(established.get(), incompatible || !auto) {
                     Next::Retry { attempt } => {
                         tracing::warn!(%machine, %error, attempt, "session ended; reconnecting");
                         (
@@ -351,8 +384,16 @@ async fn visit(
                         )
                     }
                     Next::Wait => {
-                        tracing::warn!(%machine, %error, "session ended; waiting for Reconnect");
-                        (format!("{error}\nReconnect, or close this window."), None)
+                        tracing::warn!(%machine, %error, auto, "session ended; waiting for Reconnect");
+                        let why = if auto {
+                            ""
+                        } else {
+                            "Reconnect Automatically is off for this machine. "
+                        };
+                        (
+                            format!("{error}\n{why}Reconnect, or close this window."),
+                            None,
+                        )
                     }
                 };
                 v.message_with_reconnect(&text).await;
@@ -414,12 +455,14 @@ enum Next {
 }
 
 impl Retry {
-    fn failed(&mut self, established: bool, incompatible: bool) -> Next {
+    /// `never`: this failure must wait for the user (an incompatible server,
+    /// or the machine's auto_reconnect is off).
+    fn failed(&mut self, established: bool, never: bool) -> Next {
         if established {
             self.attempts = 0;
             self.auto = true;
         }
-        if self.auto && !incompatible && self.attempts < MAX_RETRIES {
+        if self.auto && !never && self.attempts < MAX_RETRIES {
             self.attempts += 1;
             Next::Retry {
                 attempt: self.attempts,
@@ -507,13 +550,14 @@ struct Hub {
     app: mpsc::UnboundedReceiver<Value>,
     /// Window 0's events, registered before the first event is read.
     first: Option<mpsc::UnboundedReceiver<Result<Value>>>,
-    next: u32,
+    /// The next window id; shared with the connection and settings windows
+    /// opened in this viewer (crate::panel).
+    next: Rc<Cell<u32>>,
     gpu: bool,
 }
 
 #[cfg(target_os = "macos")]
-type Routes =
-    Rc<std::cell::RefCell<std::collections::HashMap<u32, mpsc::UnboundedSender<Result<Value>>>>>;
+use crate::panel::Routes;
 
 #[cfg(target_os = "macos")]
 impl Hub {
@@ -548,8 +592,10 @@ impl Hub {
                 }
                 .await;
                 let Ok(ev) = ev else {
-                    //= The helper is gone: every window and the app see the end.
+                    //= The helper is gone: every window and the app see the end,
+                    //= and new panels open as their own processes again.
                     router.borrow_mut().clear();
+                    crate::panel::set_viewer(None);
                     break;
                 };
                 route_event(&router, &app_tx, ev);
@@ -564,13 +610,20 @@ impl Hub {
             _ => tracing::warn!("the viewer did not report its video decode"),
         }
         tracing::info!(hardware = gpu, "viewer video decode");
+        //= From now on the connection and settings windows open in here.
+        let next = Rc::new(Cell::new(1));
+        crate::panel::set_viewer(Some(crate::panel::ViewerHost {
+            out: out.clone(),
+            routes: routes.clone(),
+            next: next.clone(),
+        }));
         Ok(Self {
             _child: child,
             out,
             routes,
             app,
             first: Some(first),
-            next: 1,
+            next,
             gpu,
         })
     }
@@ -612,13 +665,30 @@ impl Hub {
 
     /// Open another window; macOS adds it as a tab of the front window.
     async fn new_window(&mut self, title: &str) -> Result<Viewer> {
-        let id = self.next;
-        self.next += 1;
+        let id = self.next.get();
+        self.next.set(id + 1);
         let viewer = self.window(id);
         viewer
             .command(json!({ "type": "open_window", "title": title }))
             .await?;
         Ok(viewer)
+    }
+
+    /// Keep the viewer's app-wide options (`app_settings`, e.g. quitting
+    /// when the last window closes) in step with the saved settings.
+    fn follow_app_settings(&self, shared: crate::settings::SharedRef) {
+        let out = self.out.clone();
+        tokio::task::spawn_local(async move {
+            let mut changes = shared.subscribe();
+            while let Ok(bytes) = serde_json::to_vec(&crate::settings::app_settings(&shared)) {
+                //= Any window id will do: the viewer handles it app-wide.
+                if out.send((0, native::EVENT, bytes)).await.is_err()
+                    || changes.changed().await.is_err()
+                {
+                    break;
+                }
+            }
+        });
     }
 
     /// The next app event; `None` once the helper is gone.

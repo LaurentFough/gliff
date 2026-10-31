@@ -27,7 +27,12 @@ use serde_json::{json, Map, Value};
 use tokio::sync::watch;
 
 /// The options this client offers, in window order.
-pub const OFFERED: [Field; 3] = [Field::Screen, Field::Clipboard, Field::ServerBin];
+pub const OFFERED: [Field; 4] = [
+    Field::Screen,
+    Field::Clipboard,
+    Field::ServerBin,
+    Field::AutoReconnect,
+];
 /// Longest server command accepted from the UI.
 const MAX_SERVER_BIN: usize = 1024;
 
@@ -70,6 +75,15 @@ impl Shared {
     pub fn remember(&self, machine: &str) {
         let added = self.store.borrow_mut().remember(machine);
         if added {
+            self.save_and_announce();
+        }
+    }
+
+    /// Forget a machine (the picker's −): its place in the list, its
+    /// settings and its tabs to reopen, as the Linux client's "Forget".
+    pub fn forget(&self, machine: &str) {
+        let removed = self.store.borrow_mut().forget(machine);
+        if removed {
             self.save_and_announce();
         }
     }
@@ -156,6 +170,20 @@ impl Shared {
         self.store.borrow().muted()
     }
 
+    /// The Mac app quits when its last window closes (off by default).
+    pub fn quit_on_last_window(&self) -> bool {
+        self.store.borrow().quit_on_last_window()
+    }
+
+    /// Save it; announced like any other change.
+    pub fn set_quit_on_last_window(&self, on: bool) {
+        if self.quit_on_last_window() == on {
+            return;
+        }
+        self.store.borrow_mut().set_quit_on_last_window(on);
+        self.save_and_announce();
+    }
+
     /// Save the sound switch; announced like any other change.
     pub fn set_muted(&self, muted: bool) {
         if self.muted() == muted {
@@ -186,6 +214,7 @@ pub fn cli_layer(
         },
         server_bin: (server_bin.trim() != DEFAULT_SERVER_BIN && !server_bin.trim().is_empty())
             .then(|| server_bin.trim().to_string()),
+        auto_reconnect: None,
     }
 }
 
@@ -223,6 +252,9 @@ fn layer_json(s: &Settings) -> Value {
     if let Some(bin) = &s.server_bin {
         m.insert("server_bin".into(), bin.clone().into());
     }
+    if let Some(auto) = s.auto_reconnect {
+        m.insert("auto_reconnect".into(), auto.into());
+    }
     Value::Object(m)
 }
 
@@ -241,10 +273,32 @@ pub fn state_json(store: &Store) -> Value {
             "screen": screen_ui(builtin.screen),
             "clipboard": builtin.clipboard,
             "server_bin": builtin.server_bin,
+            "auto_reconnect": builtin.auto_reconnect,
         },
         "defaults": layer_json(&store.defaults()),
         "machines": machines,
+        //= Settings ▸ General: options for the app, not a machine.
+        "app": {"quit_on_last_window": store.quit_on_last_window()},
     })
+}
+
+/// The viewer's app-wide options (sent at launch and after every change).
+pub fn app_settings(shared: &Shared) -> Value {
+    json!({"type": "app_settings", "quit_on_last_window": shared.quit_on_last_window()})
+}
+
+/// An edit to Settings ▸ General (`"scope": "app"`).
+fn apply_app_edit(shared: &Shared, ev: &Value) -> Result<()> {
+    match ev["field"].as_str() {
+        Some("quit_on_last_window") => {
+            let on = ev["value"]
+                .as_bool()
+                .context("quit_on_last_window must be true or false")?;
+            shared.set_quit_on_last_window(on);
+            Ok(())
+        }
+        _ => bail!("unknown app setting"),
+    }
 }
 
 /// Set (`Some`) or clear (`None`) one offered option in a layer, from a
@@ -278,6 +332,13 @@ fn set_field(s: &mut Settings, field: Field, value: Option<&Value>) -> Result<()
             s.server_bin = Some(v.trim().to_string());
             s.tidy();
         }
+        Field::AutoReconnect => {
+            s.auto_reconnect = Some(
+                value
+                    .as_bool()
+                    .context("auto_reconnect must be true or false")?,
+            );
+        }
         Field::Decode => unreachable!("not offered"),
     }
     Ok(())
@@ -286,6 +347,9 @@ fn set_field(s: &mut Settings, field: Field, value: Option<&Value>) -> Result<()
 /// Apply a `settings_edit` event from the settings window:
 /// `{"scope": "defaults"|"machine", "machine": name, "field": key, "value": v|null}`.
 pub fn apply_edit(shared: &Shared, ev: &Value) -> Result<()> {
+    if ev["scope"] == "app" {
+        return apply_app_edit(shared, ev);
+    }
     let field = ev["field"]
         .as_str()
         .and_then(Field::from_name)
@@ -330,6 +394,7 @@ pub fn machine_state(opts: &Resolved, screen_locked: bool) -> Value {
         "type": "machine_state",
         "screen": screen_ui(opts.screen),
         "clipboard": opts.clipboard,
+        "auto_reconnect": opts.auto_reconnect,
         "screen_locked": screen_locked,
     })
 }
@@ -380,30 +445,22 @@ pub async fn window(shared: SharedRef) -> Result<()> {
 
 #[cfg(target_os = "macos")]
 async fn run_window(shared: &Shared) -> Result<()> {
-    use crate::native;
-    let mut child = native::spawn("settings", &[])?;
-    let mut rd = child.stdout.take().context("settings window stdout")?;
-    let mut wr = child.stdin.take().context("settings window stdin")?;
-    native::write(
-        &mut wr,
-        native::EVENT,
-        &serde_json::to_vec(&shared.state())?,
-    )
-    .await?;
+    //= Inside the viewer when one runs (a window of the same app), else a
+    //= helper process; see crate::panel.
+    let mut panel = crate::panel::Panel::open("settings", &[]).await?;
+    panel.send(&shared.state()).await?;
     let mut changes = shared.subscribe();
     let result = async {
         loop {
             tokio::select! {
-                packet = native::read(&mut rd) => {
-                    let Ok((kind, bytes)) = packet else { break };
-                    ensure!(kind == native::EVENT, "unexpected settings packet");
-                    let ev: Value = serde_json::from_slice(&bytes)?;
+                ev = panel.recv() => {
+                    let Ok(ev) = ev else { break };
                     match ev["type"].as_str() {
                         Some("settings_edit") => {
                             if let Err(e) = apply_edit(shared, &ev) {
                                 tracing::warn!(error = %e, "settings edit refused");
                                 let msg = json!({"type": "settings_error", "message": format!("{e:#}")});
-                                native::write(&mut wr, native::EVENT, &serde_json::to_vec(&msg)?).await?;
+                                panel.send(&msg).await?;
                             }
                         }
                         Some("settings_close") => break,
@@ -413,14 +470,14 @@ async fn run_window(shared: &Shared) -> Result<()> {
                 //= Edits from here or the viewer's menu: show them.
                 changed = changes.changed() => {
                     if changed.is_err() { break; }
-                    native::write(&mut wr, native::EVENT, &serde_json::to_vec(&shared.state())?).await?;
+                    panel.send(&shared.state()).await?;
                 }
             }
         }
         Ok(())
     }
     .await;
-    let _ = child.kill().await;
+    drop(panel);
     result
 }
 
@@ -555,5 +612,57 @@ mod tests {
         assert_eq!(v["screen"], "private");
         assert_eq!(v["screen_locked"], true);
         assert_eq!(v["clipboard"], true);
+        assert_eq!(v["auto_reconnect"], true);
+    }
+
+    #[test]
+    fn the_machine_menu_switches_auto_reconnect_without_reconnecting() {
+        let sh = Shared::new(Store::in_memory());
+        let before = sh.resolve("m@h", &Settings::default());
+        apply_machine_setting(
+            &sh,
+            "m@h",
+            &json!({"field": "auto_reconnect", "value": false}),
+        )
+        .unwrap();
+        let after = sh.resolve("m@h", &Settings::default());
+        assert!(!after.auto_reconnect);
+        assert_eq!(
+            change(&before, &after, false),
+            Change::None,
+            "it applies at the next launch or failure"
+        );
+        assert!(apply_machine_setting(
+            &sh,
+            "m@h",
+            &json!({"field": "auto_reconnect", "value": "no"})
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn forgetting_a_machine_drops_its_settings() {
+        let sh = Shared::new(Store::in_memory());
+        apply_machine_setting(&sh, "m@h", &json!({"field": "clipboard", "value": false})).unwrap();
+        sh.forget("m@h");
+        assert!(sh.resolve("m@h", &Settings::default()).clipboard);
+        assert!(sh.state()["machines"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn the_general_section_sets_quit_on_last_window() {
+        let shared = shared();
+        assert_eq!(shared.state()["app"]["quit_on_last_window"], false);
+        let changes = shared.subscribe();
+        let edit = json!({"scope": "app", "field": "quit_on_last_window", "value": true});
+        apply_edit(&shared, &edit).unwrap();
+        assert!(shared.quit_on_last_window());
+        assert!(changes.has_changed().unwrap(), "announced to the viewer");
+        assert_eq!(app_settings(&shared)["quit_on_last_window"], true);
+        assert_eq!(shared.state()["app"]["quit_on_last_window"], true);
+        let bad = json!({"scope": "app", "field": "quit_on_last_window", "value": "yes"});
+        assert!(apply_edit(&shared, &bad).is_err());
+        let unknown = json!({"scope": "app", "field": "dock_icon", "value": true});
+        assert!(apply_edit(&shared, &unknown).is_err());
     }
 }

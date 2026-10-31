@@ -29,17 +29,42 @@ This fork ([LaurentFough/gliff](https://github.com/LaurentFough/gliff)) builds o
 
 ### Fork features
 
-- **Tabs on the Mac**: every connection is a native macOS tab in one viewer. The tab bar's **+** or File ▸ New Tab adds a machine; tabs stay connected, only the visible one plays sound, and open tabs reopen at launch. *(Tested: several machines at once, each in its own tab. The rest of the checklist is pending.)*
-- **Reconnect on the Mac**: a dropped or failed session shows a **Reconnect** button; sessions that had connected retry automatically (5 × 1.5 s, as on Linux), without repeating SSH prompts. *(Merged; hands-on testing pending.)*
+- **Tabs on the Mac**: every connection is a native macOS tab in one viewer. The tab bar's **+** or File ▸ New Tab adds a machine; tabs stay connected, only the visible one plays sound, and open tabs reopen at launch. *(Tested.)*
+- **Known machines in the connection window**: a sidebar lists every machine you have connected to (searchable, **+** to add one, **−** to forget one), and the SSH Address field autocompletes from them, at launch and for File ▸ New Tab. *(Tested.)*
+- **Per-machine auto-reconnect**: Machine ▸ Reconnect Automatically, or Reconnect in Settings (`auto_reconnect`). Off, the machine is not reopened at launch and a dropped session waits for Reconnect; the Linux client honours it too. *(Tested on the Mac.)*
+- **One app on the Mac**: Settings and File ▸ New Tab open inside the viewer (one Dock icon and ⌘-Tab entry, one menu bar). New Tab is a sheet over a tab that is not connected, else its own window; ⌘, brings an open Settings forward, and Settings can **Connect** a machine (or double-click it) in a new tab. The connection window's list grows with the window. *(Tested.)*
+- **Quit on last window, and About**: Settings ▸ General ▸ Quit Gliff when its last window closes (`quit_on_last_window`, default off: Gliff stays open, and ⌘T or the Dock icon opens the connection window). Gliff ▸ About Gliff shows the version and build (commit, arch). *(Tested.)*
+- **Reconnect on the Mac**: a dropped or failed session shows a **Reconnect** button; sessions that had connected retry automatically (5 × 1.5 s, as on Linux), without repeating SSH prompts. *(Tested.)*
 - **GPU video on the Mac viewer**: VideoToolbox hardware H.264 decode, Metal 4:4:4 recombine, `CAMetalLayer` presentation; asks for 4:4:4 first, falls back to OpenH264 (`--video cpu` forces it). 4K 4:4:4: about 6.9 ms per frame on the GPU vs 18.8 ms on the CPU.
 - **Sound on the Mac viewer**: plays Linux hosts' sound through #80's `gliff-audio` (CoreAudio). **Machine ▸ Play Sound** shares the Linux client's mute switch; `--no-audio` starts muted.
 - **Host speaker mute**: `gliff-server --mute-local-audio` mutes the Linux host's speakers while the client plays, and restores them on stop, disconnect or crash.
 - **Shared settings**: a `gliff-settings` crate; both clients read and write `~/.config/gliff/config.toml`. On the Mac: a settings window (⌘,) and a Machine menu.
 - **Local signing**: no paid Apple Developer account needed (a self-signed `gliff-local` identity), so privacy permissions survive rebuilds.
-- **Makefile**: one front end for `bin/` and `scripts/`. `make macos` builds, signs, installs and verifies; `make install` on Arch; also `make check` and `make video-check`.
+- **Makefile**: one front end for `bin/` and `scripts/`. `make macos` builds, signs, installs and verifies; `make install` on Arch; also `make check`, `make video-check` and `make distclean`; a project-wide `.gitignore`.
 - **Build once, install on other Macs**: `make install` skips an unchanged build (a build ID in the app); `make install-package` installs a ZIP from another Mac and re-signs it locally; `make release-upload` / `make install-release` carry it through GitHub Releases. Apple Silicon. *(New; testing pending.)*
 - **Checks**: `make video-check` checks GPU output against the CPU decoder and benchmarks both; the ssh login-shell test no longer depends on your shell setup.
 - **Fixes**: Mac install and signing (`plutil`, a custom cargo `target-dir`); the client ignores stray sound packets from a host.
+- **Planned**: an iOS/iPadOS client; see [docs/feature-future/ios-ipados-plan.md](docs/feature-future/ios-ipados-plan.md). Several clients on one desktop (hardening, view-only, a shared stream); see [docs/feature-future/multi-client-plan.md](docs/feature-future/multi-client-plan.md).
+
+### Screenshots
+
+The new features are outlined in red.
+
+**Connection window:** known machines in a sidebar (search, **+** to add, **−** to forget); the SSH Address field autocompletes from them.
+
+<img src="docs/images/macos-connect-machines.png" width="871" alt="Connect to a Computer window with the known-machines sidebar and the SSH Address field">
+
+**Tabs:** this shows two tabs in one window, one connection each (outlined separately). Any number of tabs is supported: **+** or File ▸ New Tab opens another connection.
+
+![Two Gliff tabs, one per machine, with the + button](docs/images/macos-tabs.png)
+
+**Reconnect in Settings:** per machine, or for all machines.
+
+<img src="docs/images/macos-settings-reconnect.png" width="784" alt="Gliff Settings with the Reconnect automatically row">
+
+**'Machine' menu:** Play Sound, Reconnect and Reconnect Automatically.
+
+<img src="docs/images/macos-machine-menu.png" width="760" alt="Machine menu: Mirror Screen, Private Screen, Share Clipboard, Play Sound, Reconnect, Reconnect Automatically">
 
 ### Status
 
@@ -47,8 +72,13 @@ This fork ([LaurentFough/gliff](https://github.com/LaurentFough/gliff)) builds o
 |---|---|
 | Linux host → Mac client | Tested: GPU video, sound, host mute |
 | Mac tabs: several connections at once | Tested (2026-10-30) |
-| Mac tabs: sound, clipboard, restore at launch | Merged; testing pending |
-| Mac reconnect | Merged; testing pending |
+| Mac tabs: sound, clipboard, Machine menu, Window menu, restore at launch | Tested (2026-10-30) |
+| Mac reconnect | Tested (2026-10-30) |
+| Known machines (sidebar, + / −, autocomplete) | Tested (2026-10-30) |
+| Per-machine auto-reconnect | Tested on the Mac; Linux pending |
+| Mac: Settings and New Tab in the viewer, Connect from Settings | Tested (2026-10-31) |
+| Mac: quit on last window, About Gliff | Tested (2026-10-31) |
+| Mac discovery (Bonjour) | Tested (2026-10-30); the host must run `gliff-discovery` (`gliff-enable-discovery`) |
 | Linux host → Linux client sound | Not retested on the merged branch |
 | Sound from a Mac host | Not built yet |
 
@@ -345,12 +375,41 @@ gliff 0.4.1).
   ▸ New Tab opens the connection window for another machine. Every tab stays
   connected, only a visible tab plays sound, the clipboard and Machine menu
   follow the active tab, and open tabs reopen at launch (`[[open_tabs]]`).
-  See [macOS support](docs/macos.md).
+  The Window menu lists the tab commands (Show Previous/Next Tab, Move Tab to
+  New Window, Merge All Windows, Show Tab Bar). See
+  [macOS support](docs/macos.md).
+- **One app.** While the viewer runs, Settings and the File ▸ New Tab
+  connection window are its own windows (one Dock icon, ⌘-Tab entry and menu
+  bar), not separate helper processes. New Tab is a sheet over a tab without
+  a live session and its own window over a connected tab (or with no tab);
+  ⌘, brings an open Settings forward; Settings' **Connect** (or a
+  double-click on a machine) opens it in a new tab. The connection window's
+  nearby-computers list takes the height of a taller window.
+- **Quit on last window.** Settings ▸ General ▸ Quit Gliff when its last
+  window closes (`quit_on_last_window`, top-level in `config.toml`, default
+  off). Off, closing the last tab leaves Gliff running, and ⌘T or the Dock
+  icon opens the connection window; on, it quits and that machine reopens at
+  the next launch.
+- **About Gliff.** The Gliff menu shows the version and the build: the commit
+  (`-dirty` for uncommitted changes) and architecture, or `GLIFF_BUILD_ID`
+  from an installer.
 - **Reconnect.** A failed or dropped session shows its error with a
   **Reconnect** button. A session that had connected retries automatically,
   5 times 1.5 s apart, as on Linux; a failed first connection waits, so a
   wrong password does not reopen the SSH prompt; an incompatible server is
   never retried.
+- **Per-machine auto-reconnect.** A shared `auto_reconnect` setting (default
+  on), switched with Machine ▸ Reconnect Automatically or the Reconnect row
+  in Settings. Off, the machine is not reopened at launch and a dropped
+  session waits for Reconnect; the Linux client honours it too. Changing it
+  never reconnects a session.
+- **Known machines in the connection window.** A sidebar lists every
+  machine in `config.toml`'s `machines`, newest first, with a search field;
+  choosing one fills the address and its screen, double-click connects, **+**
+  adds the typed address and **−** forgets a machine (its settings and its
+  tab to reopen too, as the Linux client's Forget). The SSH Address field
+  completes from the same list as you type. At launch and for File ▸ New Tab.
+  See [macOS support](docs/macos.md#known-machines-and-autocomplete).
 - **Per-machine settings.** #98's settings model is a shared
   `gliff-settings` crate, so both clients read and write the same
   `~/.config/gliff/config.toml`. The Mac has a settings window (⌘,), a
@@ -388,8 +447,11 @@ gliff 0.4.1).
 ### Build and checks
 
 - **Makefile**: one front end for `bin/` and `scripts/`, including the
-  `make macos` pipeline, `make verify` and `make video-check`; see
+  `make macos` pipeline, `make verify`, `make video-check` and `make
+  distclean` (removes everything `.gitignore` ignores, after asking); see
   [Make targets](#make-targets).
+- **Project `.gitignore`**: Rust/cargo, Python, Swift/Xcode, logs, macOS
+  clutter (`.DS_Store`), editors, packaging and local scratch (`patch/`).
 - **ToDone.md**: a running report of this fork's state, pending work and a
   log of each commit or merge. **ForkNews.md**: the short list of what the
   fork adds, also at the top of this README.
@@ -406,5 +468,9 @@ gliff 0.4.1).
   and Hyprland do, and what is tested where.
 - [docs/development.md](docs/development.md): building, running on one
   machine, and the tests.
+- [docs/feature-future/ios-ipados-plan.md](docs/feature-future/ios-ipados-plan.md): this fork's plan for an
+  iOS/iPadOS client (scope, effort, open decisions).
+- [docs/feature-future/multi-client-plan.md](docs/feature-future/multi-client-plan.md): this fork's plan for
+  several clients on one desktop (what works today, levels of work, decisions).
 
 gliff is released under the MIT license.

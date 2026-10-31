@@ -5,11 +5,11 @@ slug: gliff-ios-ipados-plan
 author: LaurentFough
 type: plan
 date-created: 2026-10-29
-date-modified: 2026-10-29
+date-modified: 2026-10-31
 date-published:
 source: https://claude.ai/artifact/GxWqoHcvapjDQ8UN68VGkd
 domain: remote-desktop
-url: https://github.com/LaurentFough/gliff/blob/acrogenesis/macos-client-host/docs/ios-ipados-plan.md
+url: https://github.com/LaurentFough/gliff/blob/acrogenesis/macos-client-host/docs/feature-future/ios-ipados-plan.md
 draft: true
 tags: [gliff, ios, ipados, plan, russh, videotoolbox, metal]
 keywords: [iOS client, iPadOS, in-app SSH, russh, touch input, TestFlight, SideStore, gliff-client, gliff-ffi]

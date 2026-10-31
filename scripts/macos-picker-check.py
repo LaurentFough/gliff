@@ -28,6 +28,33 @@ let preferences=UserDefaults(suiteName:CommandLine.arguments[2])!
 let checkDefault=CommandLine.arguments[1].hasPrefix("default-")
 let picker=checkDefault ? ComputerPicker() : ComputerPicker(preferences:preferences);app.delegate=picker
 Timer.scheduledTimer(withTimeInterval:0.4,repeats:false) { _ in
+    if CommandLine.arguments[1]=="panels" {
+        // Inside a running viewer the connection and settings windows are the
+        // viewer's own windows (open_panel), never tabs, and close on request.
+        let viewer=App()
+        viewer.openPanel(7,["type":"open_panel","kind":"settings","args":[String]()])
+        let settings=viewer.panel(7) as! SettingsWindow
+        precondition(settings.window!.isVisible && settings.window!.tabbingMode == .disallowed,"Settings did not open as a window of its own")
+        precondition(viewer.focusSettings(),"An open settings window was not brought forward")
+        precondition(!settings.connectButton.isHidden && !settings.connectButton.isEnabled,"Connect must show in the viewer and wait for a machine")
+        viewer.openPanel(8,["type":"open_panel","kind":"choose","args":["private"]])
+        let chooser=viewer.panel(8) as! ComputerPicker
+        precondition(chooser.window!.isVisible && chooser.screenOverride=="private","The connection window did not open in the viewer")
+        // With no tab to attach to, New Tab's window is a window of its own.
+        precondition(chooser.window!.sheetParent==nil,"The connection window became a sheet with no connected tab")
+        chooser.handle(["type":"close_panel"])
+        precondition(viewer.panel(8)==nil && !chooser.window!.isVisible,"close_panel left the connection window open")
+        settings.window!.close()
+        precondition(viewer.panel(7)==nil,"A closed settings window was not forgotten")
+        // Quit on last window: off by default, then follows app_settings.
+        precondition(!viewer.applicationShouldTerminateAfterLastWindowClosed(app),"Quit on last window must default to off")
+        viewer.quitOnLastWindow=true
+        precondition(viewer.applicationShouldTerminateAfterLastWindowClosed(app),"Quit on last window was not honoured")
+        precondition(settings.quitBox.title.contains("last window"),"Settings lacks the General quit option")
+        precondition(aboutMenuItem().target === About.shared && !About.version.isEmpty && !About.build.isEmpty,"About Gliff is not wired")
+        diagnostic("PANELS PASS: settings and connection windows open inside the viewer, come forward and close; quit on last window; About")
+        exit(0)
+    }
     let window=picker.window!
     if checkDefault {
         precondition(window.isVisible,"Default picker did not open")
@@ -52,7 +79,10 @@ Timer.scheduledTimer(withTimeInterval:0.4,repeats:false) { _ in
     let scroll=picker.table.enclosingScrollView!
     precondition(scroll.documentVisibleRect.height < picker.table.bounds.height,"Long host list did not scroll")
     let enlarged=NSSize(width:window.contentLayoutRect.width+80,height:window.contentLayoutRect.height+80)
+    let listBefore=scroll.frame.height
     window.setContentSize(enlarged)
+    window.contentView!.layoutSubtreeIfNeeded()
+    precondition(scroll.frame.height >= listBefore+79,"The nearby list did not take a taller window's extra height")
     picker.nearby.records=picker.nearby.records.filter { $0.key=="fixture" }
     picker.update()
     precondition(window.contentLayoutRect.size==enlarged,"Discovery changed the user's window size")
@@ -102,6 +132,29 @@ Timer.scheduledTimer(withTimeInterval:0.4,repeats:false) { _ in
     picker.address.stringValue="tester@keyboard.example";picker.port.stringValue="2222";picker.restoreScreenPreference()
     precondition(picker.screenMode=="private","A choice made in the window was lost")
     diagnostic("SETTINGS PASS: saved screens, defaults, UserDefaults migration and in-window choices")
+    // Known machines: the sidebar lists and filters them, choosing one fills
+    // the address, and typing completes from them (deleting keeps the typed part).
+    picker.machines=["old@host.example","xoot@10.0.8.44","xoot@lorax.example"]
+    picker.filterMachines()
+    precondition(picker.machineTable.numberOfRows==3,"Known machines were not listed")
+    picker.machineSearch.stringValue="xoot";picker.filterMachines()
+    precondition(picker.machineTable.numberOfRows==2,"Machine search did not filter")
+    picker.machineSearch.stringValue="";picker.filterMachines()
+    picker.machineTable.selectRowIndexes(IndexSet(integer:0),byExtendingSelection:false)
+    precondition(picker.address.stringValue=="old@host.example" && picker.port.stringValue=="22","Choosing a known machine did not fill the address")
+    picker.address.stringValue="";picker.lastTyped=""
+    window.makeFirstResponder(picker.address)
+    let editor=picker.address.currentEditor() as! NSTextView
+    editor.insertText("xoot@10",replacementRange:editor.selectedRange())
+    precondition(picker.address.stringValue=="xoot@10.0.8.44","Typing did not complete a known machine")
+    editor.deleteBackward(nil)
+    precondition(picker.address.stringValue=="xoot@10","Deleting the completion brought it back")
+    picker.address.stringValue="tester@keyboard.example";picker.port.stringValue="2222";picker.restoreScreenPreference()
+    precondition(picker.screenMode=="private","The window's choice was lost after using known machines")
+    precondition(picker.removeMachine.isEnabled,"Selecting a known machine did not enable −")
+    precondition(ComputerPicker.validAddress("xoot@10.0.8.44") && ComputerPicker.validAddress("[fe80::1%en0]"),"A valid address was refused")
+    precondition(!ComputerPicker.validAddress("") && !ComputerPicker.validAddress("-oProxyCommand=x") && !ComputerPicker.validAddress("a b"),"An unsafe address was accepted")
+    diagnostic("MACHINES PASS: sidebar list and search, choosing fills the address, typing completes, + and − rules")
     window.makeFirstResponder(picker.address)
     let tab=NSEvent.keyEvent(with:.keyDown,location:.zero,modifierFlags:[],timestamp:0,windowNumber:window.windowNumber,context:nil,characters:"\\t",charactersIgnoringModifiers:"\\t",isARepeat:false,keyCode:48)!
     window.sendEvent(tab)
@@ -137,7 +190,7 @@ withExtendedLifetime(picker) { app.run() }
             }, info)
         subprocess.run(["codesign", "--force", "--sign", "-", str(bundle)],
                        check=True, timeout=15)
-        for mode in ("connect", "cancel", "default-standalone", "default-bundled"):
+        for mode in ("connect", "cancel", "default-standalone", "default-bundled", "panels"):
             suite = f"org.omacom.gliff.picker-check.{uuid.uuid4()}"
             executable = bundled_binary if mode == "default-bundled" else binary
             child = subprocess.Popen([str(executable), mode, suite], stdin=subprocess.PIPE,
@@ -146,6 +199,10 @@ withExtendedLifetime(picker) { app.run() }
                 code = child.wait(timeout=15)
                 errors = child.stderr.read().decode()
                 assert code == 0, f"picker exited {code}: {errors}"
+                if mode == "panels":
+                    assert "PANELS PASS" in errors, errors
+                    print("PICKER PANELS PASS: connection and settings windows inside the viewer")
+                    continue
                 packet = child.stdout.read()
                 assert len(packet) >= 5 and packet[0] == 2, "missing picker result"
                 length = struct.unpack("<I", packet[1:5])[0]

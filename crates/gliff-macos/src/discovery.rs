@@ -104,10 +104,14 @@ pub fn picker_settings(
     let state = shared.state();
     let mut screens = serde_json::Map::new();
     let mut pinned = Vec::new();
+    //= The config's machines, in its order (oldest first): the picker lists
+    //= them, newest first, and completes the SSH address from them.
+    let mut machines = Vec::new();
     for m in state["machines"].as_array().into_iter().flatten() {
         let Some(name) = m["name"].as_str() else {
             continue;
         };
+        machines.push(serde_json::Value::from(name));
         screens.insert(
             name.into(),
             screen_ui(shared.resolve(name, cli).screen).into(),
@@ -122,13 +126,15 @@ pub fn picker_settings(
         "default_screen": screen_ui(shared.resolve("", cli).screen),
         "screens": screens,
         "pinned": pinned,
+        "machines": machines,
     })
 }
 
 /// Show the picker. Its screen menu follows the saved settings; a screen
 /// the user picked there (or one migrated from the picker's old
 /// `UserDefaults` store) is saved as that machine's override on Connect.
-/// "Settings…" opens the settings window alongside it.
+/// "Settings…" opens the settings window alongside it. Inside a running
+/// viewer (File ▸ New Tab) it is a sheet on the front tab; see [`crate::panel`].
 #[cfg(target_os = "macos")]
 pub async fn choose(
     screen: Option<ScreenMode>,
@@ -138,18 +144,14 @@ pub async fn choose(
     let args = screen
         .map(|mode| vec![mode.as_str().into()])
         .unwrap_or_default();
-    let mut child = crate::native::spawn("choose", &args)?;
-    let mut rd = child.stdout.take().unwrap();
-    let mut wr = child.stdin.take().unwrap();
+    let mut panel = crate::panel::Panel::open("choose", &args).await?;
     let mut changes = Some(shared.subscribe());
     let result = async {
-        send_picker_settings(&mut wr, shared, cli).await?;
+        send_picker_settings(&mut panel, shared, cli).await?;
         loop {
             tokio::select! {
-                packet = crate::native::read(&mut rd) => {
-                    let (kind, bytes) = packet?;
-                    ensure!(kind == crate::native::EVENT, "invalid chooser response");
-                    let event: serde_json::Value = serde_json::from_slice(&bytes)?;
+                event = panel.recv() => {
+                    let event = event?;
                     match event["type"].as_str() {
                         Some("cancel") => return Ok(None),
                         Some("open_settings") => {
@@ -174,13 +176,27 @@ pub async fn choose(
                             }
                             return Ok(Some(selection));
                         }
-                        _ => anyhow::bail!("unexpected chooser response"),
+                        //= The sidebar's + and −; the change notice below refreshes it.
+                        Some("machine_add") => {
+                            let host = event["host"].as_str().unwrap_or_default();
+                            let candidate = Selection { host: host.trim().into(), port: 22, screen: ScreenMode::Mirror };
+                            match candidate.validate() {
+                                Ok(()) => shared.remember(&crate::settings::machine_key(host)),
+                                Err(e) => tracing::warn!(%host, error = %e, "not adding the machine"),
+                            }
+                        }
+                        Some("machine_remove") => {
+                            if let Some(host) = event["host"].as_str() {
+                                shared.forget(&crate::settings::machine_key(host));
+                            }
+                        }
+                        other => tracing::debug!(?other, "connection window event ignored"),
                     }
                 }
                 //= The settings window changed something: refresh the menu.
                 changed = async { changes.as_mut().unwrap().changed().await }, if changes.is_some() => {
                     if changed.is_ok() {
-                        send_picker_settings(&mut wr, shared, cli).await?;
+                        send_picker_settings(&mut panel, shared, cli).await?;
                     } else {
                         changes = None;
                     }
@@ -189,18 +205,18 @@ pub async fn choose(
         }
     }
     .await;
-    let _ = child.kill().await;
+    //= Closes the window (or kills its helper process).
+    drop(panel);
     result
 }
 
 #[cfg(target_os = "macos")]
 async fn send_picker_settings(
-    wr: &mut tokio::process::ChildStdin,
+    panel: &mut crate::panel::Panel,
     shared: &crate::settings::Shared,
     cli: &gliff_settings::Settings,
 ) -> Result<()> {
-    let bytes = serde_json::to_vec(&picker_settings(shared, cli))?;
-    crate::native::write(wr, crate::native::EVENT, &bytes).await
+    panel.send(&picker_settings(shared, cli)).await
 }
 
 #[cfg(target_os = "macos")]
@@ -310,5 +326,10 @@ mod tests {
         assert_eq!(v["screens"]["pinned@h"], "mirror");
         assert_eq!(v["screens"]["plain@h"], "private");
         assert_eq!(v["pinned"], serde_json::json!(["pinned@h"]));
+        assert_eq!(
+            v["machines"],
+            serde_json::json!(["pinned@h", "plain@h"]),
+            "the config's order, for the picker's list and autocomplete"
+        );
     }
 }

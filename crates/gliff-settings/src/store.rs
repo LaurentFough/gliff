@@ -1,11 +1,12 @@
 //! The config file both clients share: `$XDG_CONFIG_HOME/gliff/config.toml`,
 //! else `~/.config/gliff/config.toml`.
 //!
-//! [`Store`] owns five keys: `machines` (the machines this client has
+//! [`Store`] owns six keys: `machines` (the machines this client has
 //! connected to, oldest first), `[defaults]`, `[overrides."user@host"]`,
-//! `muted` (the sound switch, shared with the Linux client's header button)
-//! and `[[open_tabs]]` (the Mac's tabs to reopen at launch, `host` + `port`;
-//! the Linux client keeps its own `open` list).
+//! `muted` (the sound switch, shared with the Linux client's header button),
+//! `[[open_tabs]]` (the Mac's tabs to reopen at launch, `host` + `port`;
+//! the Linux client keeps its own `open` list) and `quit_on_last_window`
+//! (the Mac app quits when its last window closes; absent means off).
 //! Everything else in the file (the Linux client's `open` and `shown`, or
 //! keys from a newer build) is read and written back untouched, so either
 //! client can save without losing the other's state.
@@ -30,6 +31,8 @@ const OVERRIDES: &str = "overrides";
 /// sound is off.
 const MUTED: &str = "muted";
 const OPEN_TABS: &str = "open_tabs";
+/// Top-level, Mac only: present and true only when on.
+const QUIT_ON_LAST_WINDOW: &str = "quit_on_last_window";
 
 /// The parsed config file and where it lives.
 #[derive(Debug, Clone)]
@@ -173,6 +176,32 @@ impl Store {
         true
     }
 
+    /// Forget a machine, as the Linux client's "Forget" does: its place in
+    /// `machines`, its `[overrides]` entry and its tabs to reopen. False
+    /// when it was not known.
+    pub fn forget(&mut self, name: &str) -> bool {
+        let name = name.trim();
+        let mut known = false;
+        if let Some(Value::Array(list)) = self.doc.get_mut(MACHINES) {
+            let before = list.len();
+            list.retain(|v| v.as_str().map(str::trim) != Some(name));
+            known |= list.len() != before;
+        }
+        if let Some(Value::Table(t)) = self.doc.get_mut(OVERRIDES) {
+            known |= t.remove(name).is_some();
+            if t.is_empty() {
+                self.doc.remove(OVERRIDES);
+            }
+        }
+        let tabs = self.open_tabs();
+        let kept: Vec<_> = tabs.iter().filter(|(h, _)| h != name).cloned().collect();
+        if kept.len() != tabs.len() {
+            known = true;
+            self.set_open_tabs(&kept);
+        }
+        known
+    }
+
     /// Replace the `[defaults]` layer; an empty layer removes the table.
     pub fn set_defaults(&mut self, mut settings: Settings) {
         settings.tidy();
@@ -232,6 +261,25 @@ impl Store {
             self.doc.insert(MUTED.into(), Value::Boolean(true));
         } else {
             self.doc.remove(MUTED);
+        }
+    }
+
+    /// The Mac app quits when its last window closes
+    /// (`quit_on_last_window = true`); off by default.
+    pub fn quit_on_last_window(&self) -> bool {
+        self.doc
+            .get(QUIT_ON_LAST_WINDOW)
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    }
+
+    /// Switch it on or off; off removes the key.
+    pub fn set_quit_on_last_window(&mut self, on: bool) {
+        if on {
+            self.doc
+                .insert(QUIT_ON_LAST_WINDOW.into(), Value::Boolean(true));
+        } else {
+            self.doc.remove(QUIT_ON_LAST_WINDOW);
         }
     }
 
@@ -431,6 +479,21 @@ mod tests {
     }
 
     #[test]
+    fn quit_on_last_window_is_off_unless_set() {
+        let mut s = store("shown = \"a@b\"\n");
+        assert!(!s.quit_on_last_window(), "off by default");
+        s.set_quit_on_last_window(true);
+        assert!(s.quit_on_last_window());
+        s.set_quit_on_last_window(false);
+        assert!(
+            !s.doc.contains_key(QUIT_ON_LAST_WINDOW),
+            "off leaves no key"
+        );
+        assert_eq!(s.doc.get("shown").and_then(Value::as_str), Some("a@b"));
+        assert!(!store("quit_on_last_window = 1\n").quit_on_last_window());
+    }
+
+    #[test]
     fn muted_is_the_linux_clients_top_level_key() {
         let mut s = store("muted = true\nshown = \"a@b\"\n");
         assert!(s.muted());
@@ -470,6 +533,30 @@ mod tests {
         assert_eq!(bad.open_tabs(), [("ok@z".to_string(), 22)]);
         s.set_open_tabs(&[]);
         assert!(!s.doc.contains_key(OPEN_TABS));
+    }
+
+    #[test]
+    fn forget_removes_a_machine_everywhere_it_is_kept() {
+        let mut s = store(
+            "machines = [\"a@b\", \"c@d\"]\nopen = [\"a@b\"]\n\
+             [overrides.\"a@b\"]\nclipboard = false\n\
+             [[open_tabs]]\nhost = \"a@b\"\nport = 22\n\
+             [[open_tabs]]\nhost = \"c@d\"\nport = 22\n",
+        );
+        assert!(s.forget("a@b"));
+        assert_eq!(s.machines(), ["c@d"]);
+        assert_eq!(s.machine("a@b"), Settings::default());
+        assert!(
+            !s.doc.contains_key(OVERRIDES),
+            "an empty [overrides] goes too"
+        );
+        assert_eq!(s.open_tabs(), [("c@d".to_string(), 22)]);
+        assert!(!s.forget("a@b"), "already forgotten");
+        assert_eq!(
+            s.doc.get("open").and_then(Value::as_array).map(Vec::len),
+            Some(1),
+            "Linux's list is its own"
+        );
     }
 
     #[test]

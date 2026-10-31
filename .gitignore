@@ -41,6 +41,7 @@ logs/
 *.png
 !/.github/assets/*.png
 !/pkgbuild/gliff.png
+!/docs/images/*.png
 
 #= Arch packaging (makepkg)
 /pkgbuild/pkg/

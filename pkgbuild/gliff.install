@@ -1,12 +1,22 @@
-post_install() {
+#= Desktop database and icon cache; shared by install, upgrade and remove.
+refresh_caches() {
   command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database -q
   command -v gtk-update-icon-cache >/dev/null 2>&1 && gtk-update-icon-cache -q -t -f usr/share/icons/hicolor
+  return 0
+}
+
+post_install() {
+  refresh_caches
+  #= The gliff-discovery user unit is installed but not enabled: without it,
+  #= clients never see this machine in their nearby-computers list.
+  echo ">>> To let gliff clients on this LAN find this desktop, run as your"
+  echo ">>> desktop user: gliff-enable-discovery   (--disable to stop)"
 }
 
 post_upgrade() {
-  post_install
+  refresh_caches
 }
 
 post_remove() {
-  post_install
+  refresh_caches
 }

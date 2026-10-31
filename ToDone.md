@@ -5,7 +5,7 @@ slug: gliff-macos-todone
 author: LaurentFough
 type: report
 date-created: 2026-10-29
-date-modified: 2026-10-30
+date-modified: 2026-10-31
 date-published:
 source: https://github.com/LaurentFough/gliff
 domain: remote-desktop
@@ -35,16 +35,17 @@ The log is newest first, and each entry names the commit.
 | Working branch | `acrogenesis/macos-client-host` (see Log for the latest commit) |
 | Pushed to | `LaurentFough/gliff` only (never acrogenesis or omacom) |
 | Ahead of acrogenesis' branch | see `git rev-list --count origin/acrogenesis/macos-client-host..HEAD` |
-| Last updated | 2026-10-30 |
+| Last updated | 2026-10-31 |
 
 ### Branches on the fork
 
 | Branch | Contents | Status |
 |---|---|---|
-| `acrogenesis/macos-client-host` | #47 base, signing and install fixes, Makefile, #98, Mac settings, GPU video, #80 sound, Mac sound, host mute, Mac reconnect, Mac tabs, ToDone.md | working branch |
+| `acrogenesis/macos-client-host` | #47 base, signing and install fixes, Makefile, #98, Mac settings, GPU video, #80 sound, Mac sound, host mute, Mac reconnect, Mac tabs, known machines, auto-reconnect, one app (panels), quit on last window, About, screenshots, plan docs, ToDone.md | working branch |
+| `feature/macos-install-reuse` | Build once, install on other Macs (build ID, `install-package`, `release-upload` / `install-release`) | **open**: waiting for your test (#3), then merge |
 | `main` | upstream, untouched | — |
 
-Merged into the working branch on 2026-10-29, still on the fork until deleted (see Repo housekeeping): `feature/macos-gpu-video`, `macos-settings`, `merge/pr-98`, `merge/pr-80`, `feature/macos-audio`, `feature/macos-reconnect`, `feature/macos-tabs`.
+The working branch is the fork's default branch (2026-10-31). The ten feature branches merged into it were deleted from the fork on 2026-10-31. Also kept: `archive/gliff-mac-objc2` (the old objc2 prototype).
 
 ## Upstream PRs
 
@@ -100,11 +101,39 @@ Merged into the working branch on 2026-10-29, still on the fork until deleted (s
 - The Mac viewer plays it through #80's `gliff-audio` (Opus, jitter buffer, cpal on CoreAudio). **Machine ▸ Play Sound** is the same top-level `muted` key as the Linux speaker button; `--no-audio` starts muted. Oversized packets are refused.
 - `gliff-server --mute-local-audio`: the host's speakers are muted while the client plays its sound, following a new default output, and restored on sound off, session end, or a crash (watchdog). PipeWire path only. Set it as the machine's server command.
 
-### Mac tabs and reconnect (merged 2026-10-29; several connections in tabs tested 2026-10-30)
+### Mac tabs and reconnect (merged 2026-10-29; tested 2026-10-30)
 
 - **Tabs:** one viewer process hosts every connection as a native macOS tab. The tab bar's + or File ▸ New Tab opens the connection window; Window menu tab commands; every tab stays connected; only visible tabs play sound; the clipboard and Machine menu follow the active tab; open tabs reopen at launch (`[[open_tabs]]`), closing a tab forgets it.
 - **Reconnect:** a failed or dropped session shows its error with a Reconnect button (and Machine ▸ Reconnect). Sessions that had connected retry automatically, 5 × 1.5 s as on Linux; a failed first connect waits, so SSH prompts do not repeat; incompatible servers are never retried.
 - Bridge: packet kind 6 (TARGET window), events carry `"window"`; the Rust `Hub` routes them.
+
+### Known machines in the connection window (merged 2026-10-30; tested)
+
+- A sidebar in the connection window (at launch and for File ▸ New Tab) lists the config's `machines`, newest first, with a search field; choosing one fills the address and its screen; double-click connects.
+- The SSH Address field completes inline from the same list while typing forward; deleting keeps the typed part.
+- The client sends `machines` with `machine_settings` (test extended); the picker check covers the list, search, choosing and completion.
+- **+** adds the typed address to `machines`; **−** forgets the selected machine (asks first): `Store::forget` removes it from `machines`, `[overrides]` and `[[open_tabs]]`, as the Linux client's Forget.
+
+### Per-machine auto-reconnect (merged 2026-10-30; tested on the Mac)
+
+- New shared setting `auto_reconnect` (default on) in `gliff-settings`, per machine or in `[defaults]`.
+- Off: not reopened at launch, and a dropped session waits for Reconnect (Mac: the error says so; Linux: "click the tab to reconnect"). Changing it never reconnects a session, on either client.
+- Mac: Machine ▸ Reconnect Automatically (checkbox) and a Reconnect row in Settings. Linux honours it; its settings window does not show it yet.
+
+### One app on the Mac (merged 2026-10-31; tested)
+
+- Settings and File ▸ New Tab open inside the viewer (`crate::panel`, `open_panel` / `close_panel`, routed by window id like tabs): one Dock icon, ⌘-Tab entry and menu bar. The connection window at launch (no viewer yet) is still its own process.
+- New Tab: a sheet over a tab without a live session; its own window over a connected tab or with no tab. ⌘, brings an open Settings forward; the viewer has an Edit menu.
+- Settings ▸ **Connect** (or double-click a machine) opens it in a new tab (`connect_machine`).
+- The connection window's nearby list takes a taller window's height.
+- Settings ▸ General ▸ **Quit Gliff when its last window closes** (`quit_on_last_window`, default off); off, Gliff stays open and ⌘T or the Dock icon opens the connection window.
+- Gliff ▸ **About Gliff**: version and build ID (commit, `-dirty`, arch; `GLIFF_BUILD_ID` overrides).
+
+### Discovery, checks and screenshots
+
+- Discovery needs `gliff-discovery` on each host: the Arch package says so after install; `docs/macos.md` leads with it.
+- `scripts/check.sh` stops early when Rust is older than `rust-version` (1.87), with how to update.
+- README / ForkNews screenshots (`docs/images/`): connection window, tabs, Settings ▸ Reconnect, Machine menu mockup (`docs/images/src/`), features outlined in red.
 
 ### Build once, install on other Macs (on `feature/macos-install-reuse`; testing pending)
 
@@ -116,6 +145,7 @@ Merged into the working branch on 2026-10-29, still on the fork until deleted (s
 ### Docs
 
 - `ForkNews.md` (the short list of what the fork adds, also near the top of the README), README fork notes, `docs/macos.md`, `docs/settings.md`, and the crate list in `docs/architecture.md`.
+- Future-feature plans in `docs/feature-future/`: the iOS/iPadOS client and several clients on one desktop.
 - In the macGliff project: ADR 0001, the GPU video decision with its results.
 
 ## Pending
@@ -136,8 +166,9 @@ Support today:
 
 - [ ] #98's settings on the Linux client.
 - [x] Mac tabs: several machines connected at once, each in its own tab (tested 2026-10-30).
-- [ ] Mac tabs, the rest: switching tabs moves sound to the visible one; drag a tab out and Merge All Windows; the Machine menu follows the active tab; clipboard to the active tab's machine; quit with two tabs and relaunch (both reopen); close one tab, quit, relaunch (only the other).
-- [ ] Mac reconnect, tabled 2026-10-29: stop `gliff-server` mid-session (expect "Reconnecting… (attempt n of 5)", then recovery); a wrong address (error + Reconnect button, no repeated SSH prompts); Machine ▸ Reconnect while the error shows.
+- [x] Mac tabs (tested 2026-10-30): sound follows the visible tab, and stays off for a hidden tab across a reconnect and while minimised; drag a tab out; the Machine menu follows the active tab; clipboard to the active tab's machine; quit with two tabs and relaunch (both reopen); close one, quit, relaunch (only the other).
+- [x] Mac tabs: Window ▸ Merge All Windows (T5) works since the Window menu lists the tab commands (retested 2026-10-30).
+- [x] Mac reconnect (tested 2026-10-30): a dropped session retries and recovers; after 5 attempts the error and Reconnect button, then Reconnect works; a failed first connect waits with no retries or repeated prompts; fixing the server command in Settings then Reconnect connects; other tabs keep streaming meanwhile.
 
 ### Follow-ups
 
@@ -148,22 +179,44 @@ Support today:
 - [x] Tabs on the Mac: merged 2026-10-29 (one viewer process for every connection); several connections in tabs tested 2026-10-30; the rest under Deferred testing.
 - [x] Reconnect for dead sessions on the Mac: merged 2026-10-29; testing tabled, see Deferred testing.
 - [ ] Viewer and client CPU use and frame rate in a live GPU session (Activity Monitor).
-- [ ] Test build-once installs: `make install` twice (second skips), a change then `make install` (rebuilds), `make package` → `make install-package` on a second Mac, `make release-upload` → `make install-release`.
+- [x] Connection window's known machines: list, search, choosing, double-click, autocomplete, File ▸ New Tab (tested 2026-10-30).
+- [x] + (adds the typed address) and − (asks, then forgets the machine and its settings) (tested 2026-10-30).
+- [x] Auto-reconnect on the Mac (tested 2026-10-30): Machine ▸ Reconnect Automatically off skips the launch reopen and drop retries; Settings ▸ Reconnect matches.
+- [ ] Auto-reconnect on Linux: a machine with `auto_reconnect = false` is not reopened and not retried.
+- [x] `feature/macos-panels-in-viewer`: the connection window's nearby list takes the extra height when the window is made taller (reported and tested 2026-10-30).
+- [x] `feature/macos-panels-in-viewer`: Settings and File ▸ New Tab open inside the viewer, not as separate apps (reported 2026-10-30; tested 2026-10-30): one Dock icon and ⌘-Tab entry; New Tab's connection window is a sheet on the front tab; Settings is a window of the viewer and ⌘, brings an open one forward; Edit ▸ Paste works in both. The connection window at launch (no viewer yet) is still its own process.
+- [x] `feature/macos-panels-in-viewer`: File ▸ New Tab is a sheet over a tab with no live session (connecting, failed or dropped), else its own window (connected tab, or no tab) — corrected 2026-10-31.
+- [x] `feature/macos-panels-in-viewer`: Settings ▸ Connect, or double-clicking a machine, opens it in a new tab (viewer only).
+- [x] `feature/macos-panels-in-viewer`: Gliff ▸ About Gliff shows the version and build (commit, `-dirty`, arch).
+- [x] `feature/macos-panels-in-viewer`: Settings ▸ General ▸ Quit Gliff when its last window closes (`quit_on_last_window`, default off). Off: last tab closed, Gliff stays open; ⌘T or the Dock icon opens the connection window; the Machine menu is greyed out. On: closing the last tab quits and the machine reopens at the next launch.
+- [ ] Linux settings window: show `auto_reconnect`.
+- [x] Discovery on the Mac (resolved 2026-10-30): the hosts were not running the `gliff-discovery` user service. `gliff-enable-discovery` on each host fixes it; the package now says so after install, and docs/macos.md leads with it.
+- [ ] An iOS/iPadOS client: plan, effort and open decisions in [docs/feature-future/ios-ipados-plan.md](docs/feature-future/ios-ipados-plan.md) (Phase 0 spike first).
+- [ ] Several clients on one desktop: plan, levels and open decisions in [docs/feature-future/multi-client-plan.md](docs/feature-future/multi-client-plan.md) (Level 0 test first; for later).
+
+### Build and release
+
+- [ ] #3: test build-once installs on `feature/macos-install-reuse` (`make install` twice, the second skips; a change then `make install` rebuilds; `make package` → `make install-package` on a second Mac; `make release-upload` → `make install-release`), then merge.
 - [ ] Intel Macs: a universal (arm64 + x86_64) package, or per-architecture releases.
-- [ ] Linux: prebuilt packages to copy between machines (today each Linux machine builds with `makepkg`).
-- [ ] Releases from CI: the workflow already packages development builds on macOS runners; attach those to `macos-*` releases instead of building locally.
-- [ ] An iOS/iPadOS client: plan, effort and open decisions in [docs/ios-ipados-plan.md](docs/ios-ipados-plan.md) (Phase 0 spike first).
+- [ ] Linux: prebuilt packages to copy between machines (today each machine builds with `makepkg`).
+- [ ] Releases from CI: attach the macOS runners' packages to `macos-*` releases instead of building locally.
+
+### Ideas (not decided)
+
+- [ ] Tailnet machines in the connection window (Tailscale peers, for hosts mDNS cannot reach).
+- [ ] Settings ▸ Connect: switch to the machine's open tab instead of opening a second one.
+- [ ] Connect in the stand-alone Settings window at launch (opened from the launch connection window; today only inside the viewer).
+- [ ] Open the launch connection window inside the viewer too, so Gliff is one process from the start.
+- [ ] Screenshots still missing: the address autocomplete, the Reconnect button on a dropped session, the File and Window menus' tab commands.
+- [ ] Screenshots: a second (lighter or dashed) outline for older fork features (the Settings window itself, Mirror/Private Screen, Share Clipboard).
+- [ ] Build ID: `-dirty` can lag until the next commit or Swift change (build.rs watches HEAD, not the index).
+- [ ] Several clients on one desktop, Level 0 test and then Levels 1–2 (see the plan above).
 
 ### Repo housekeeping
 
-- [ ] Make `acrogenesis/macos-client-host` the fork's default branch (only you can):
-  ```sh
-  gh repo edit LaurentFough/gliff --default-branch acrogenesis/macos-client-host
-  ```
-- [ ] Delete the merged branches on the fork (only you can; all seven are contained in the working branch):
-  ```sh
-  git push <fork-remote> --delete feature/macos-gpu-video macos-settings merge/pr-98 merge/pr-80 feature/macos-audio feature/macos-reconnect feature/macos-tabs
-  ```
+- [x] `acrogenesis/macos-client-host` is the fork's default branch (2026-10-31).
+- [x] The ten merged branches are deleted from the fork (2026-10-31).
+- [x] `rust-toolchain.toml` pins Rust 1.99.0 with rustfmt, clippy, rust-src and rust-analyzer (`adf8813`, 2026-10-31); `rust-version` (1.87) stays the minimum.
 - [x] Rename remotes in Claude's clone (`origin` = the fork, `acrogenesis` = acrogenesis); do the same in your clones if you like.
 
 ### PR #26
@@ -173,6 +226,72 @@ Support today:
 ## Log
 
 Newest first. Format: `### YYYY-MM-DD — summary (commit)`, then a line or two.
+
+### 2026-10-31 — Fork housekeeping done; Rust toolchain pinned (`adf8813`)
+Default branch is now `acrogenesis/macos-client-host`; the ten merged branches are gone from the fork (left: the working branch, `main`, `feature/macos-install-reuse`, `archive/gliff-mac-objc2`). `rust-toolchain.toml` (LaurentFough) pins 1.99.0 for rustup users. Upstream: omacom/main has nothing the fork lacks (last: 0.4.1, 2026-10-24); acrogenesis' branch has nothing new.
+
+### 2026-10-31 — ToDone audit
+State and branch tables brought up to date (open `feature/macos-install-reuse`; ten merged branches to delete). Features added gains one app on the Mac, quit on last window, About, discovery hint, the Rust version check and screenshots. Pending gains Build and release (#3, Intel, Linux packages, CI releases, previously only on the install branch) and Ideas (Tailnet list, Connect to an open tab, Connect at launch, launch window in the viewer, missing screenshots, secondary outlines, build ID lag, multi-client levels).
+
+### 2026-10-31 — Plan docs moved to `docs/feature-future/`
+`ios-ipados-plan.md` and `multi-client-plan.md` now live in `docs/feature-future/`; links in the README, ForkNews, the backlog and their frontmatter `url` updated (older log entries keep the paths of their day).
+
+### 2026-10-31 — Plan doc: several clients on one desktop
+`docs/multi-client-plan.md`: what already works (one server per connection), what breaks (`--mute-local-audio` restore, pointer contention, no viewer notice), levels 0–3 with estimates, a Level 0 checklist and the decisions. Linked from the README, ForkNews and the backlog; for later.
+
+### 2026-10-31 — Merge `feature/macos-panels-in-viewer` into the working branch
+All hand tests passed (New Tab sheet/window, About, Quit on last window on and off, Connect from Settings). No-fast-forward merge; README fork notes, the shared list and status table (README and ForkNews.md) updated.
+
+### 2026-10-31 — `feature/macos-panels-in-viewer`: automated checks pass on the Mac
+`scripts/check.sh` (fmt, clippy, tests, native checks) and `scripts/macos-picker-check.py` pass (after `91d146b`, clippy `while_let_loop`). Hand tests: all passed (2026-10-31).
+
+### 2026-10-31 — New Tab rule corrected; Connect from Settings (`feature/macos-panels-in-viewer`)
+New Tab's sheet/window rule inverted as requested: a sheet over a tab without a live session; a window over a connected tab or with no tab. Settings gains Connect (and double-click on a machine), sent as the app event `connect_machine`; the client opens a new tab with the machine's settings.
+
+### 2026-10-31 — New Tab sheet or window; About Gliff; Quit on last window (`feature/macos-panels-in-viewer`)
+Panels and list resizing tested on the Mac. New Tab: a sheet only over a tab showing a connected machine, else its own window. About Gliff in every Gliff menu (version from the client; build ID from build.rs: commit, `-dirty`, arch, or `GLIFF_BUILD_ID`). New app-wide setting `quit_on_last_window` (gliff-settings `Store`, default off) in Settings ▸ General; the client sends it to the viewer (`app_settings`); off keeps Gliff open with no windows (Dock icon or ⌘T reopens the connection window). `check.sh` now stops early on a Rust older than `rust-version`.
+
+### 2026-10-30 — Connection and settings windows inside the viewer; list resizing (`feature/macos-panels-in-viewer`)
+New `panel.rs`: the connection ("choose") and settings windows open in the running viewer (`open_panel`, routed by window id like tabs) and fall back to their own helper process when no viewer runs. Swift: `PanelWindow`; the picker and settings window split into build/handle so both modes share them; New Tab's picker is a sheet; viewer gains an Edit menu. Picker layout: the nearby list hugs least and its height is a minimum, so it takes a taller window's height. `scripts/macos-picker-check.py` checks both (LAYOUT, PANELS). Not compiled here (no Swift, no crates.io): run `scripts/check.sh` and the picker check.
+
+### 2026-10-30 — Tabs caption clarified
+The screenshot shows two tabs; the caption now says any number of tabs (connections) is supported.
+
+### 2026-10-30 — Discovery resolved: hosts were not advertising
+Cause: `gliff-discovery` not running on the Linux hosts (no code fault on the Mac). The Arch package's install hook now tells you to run `gliff-enable-discovery`; docs/macos.md "When nothing is found" leads with it; status rows updated.
+
+### 2026-10-30 — Screenshot: connection window with known machines
+The sidebar (search, list, + / −) and the autocompleting SSH Address field outlined; host name replaced with a placeholder.
+
+### 2026-10-30 — Screenshots: red outlines, one per tab
+Outlines are now macOS systemRed (#FF3B30); the tabs shot has one box per tab (per connection).
+
+### 2026-10-30 — Fix: screenshots not shown
+`.gitignore` ignores `*.png`, so the three images were never committed; `docs/images/*.png` is now an exception. Screenshots captions shortened.
+
+### 2026-10-30 — Screenshots in the README and ForkNews
+Tabs and Settings ▸ Reconnect screenshots (host names, IPs and the home path replaced with placeholders, EXIF dropped), and a Machine menu mockup drawn to match `Gliff.swift` (`docs/images/src/`). New features outlined in 2 pt blue. Same Screenshots section in both files.
+
+### 2026-10-30 — README and ForkNews brought up to date
+README fork notes gain known machines, per-machine auto-reconnect, the Window menu's tab commands, `make distclean`, the project `.gitignore` and a link to the iOS plan. The shared list and status table (README and ForkNews.md) add the same. Discovery pinned.
+
+### 2026-10-30 — Merge known machines and per-machine auto-reconnect into the working branch
+No-fast-forward merge of `feature/machines-and-auto-reconnect` (which holds `feature/macos-picker-machines`): the connection window's known-machines sidebar with + / − and autocomplete, and the shared `auto_reconnect` setting. Both tested on the Mac. Discovery: `dns-sd` on the Mac sees no `_gliff._tcp` either, so the advertisements never reach it.
+
+### 2026-10-30 — T5 retested: Merge All Windows works
+Every tabs (T1–T9) and reconnect (R1–R5) check now passes.
+
+### 2026-10-30 — Mac tabs and reconnect tested; Window menu gains the tab commands
+Tabs T1–T4 and T6–T9 and reconnect R1–R5 passed. T5 failed: no Window ▸ Merge All Windows, because AppKit does not add its tab commands to a menu built in code. The Window menu now lists Show Previous/Next Tab (⌘{ ⌘}), Move Tab to New Window, Merge All Windows and Show Tab Bar; retest pending.
+
+### 2026-10-30 — Add/forget machines; per-machine auto-reconnect (`feature/machines-and-auto-reconnect`)
+The known-machines list and autocomplete tested OK. Added + / − to the picker sidebar (`Store::forget`, as Linux's Forget) and a shared `auto_reconnect` setting: Machine ▸ Reconnect Automatically and a Settings row on the Mac; off skips launch reopen and drop retries, on both clients; changing it never reconnects. Tests: model, store forget, menu setting, picker rules.
+
+### 2026-10-30 — Fix: the connection window's sidebar did not compile
+`make check` on `feature/macos-picker-machines`: `#selector(connect)` for the sidebar's double-click came after the local `connect` button, which Swift refuses ("cannot refer to variable 'connect'"). Now `#selector(ComputerPicker.connect(_:))`.
+
+### 2026-10-30 — Connection window: known machines and autocomplete (`feature/macos-picker-machines`)
+Sidebar of past machines (search, choose, double-click to connect) and inline autocomplete of the SSH address from the config's `machines`, also in File ▸ New Tab. Discovery not finding hosts: the browse code matches what Linux advertises; docs/macos.md gains "When nothing is found" (dns-sd, Local Network permission incl. terminal launches, Avahi, LAN-only mDNS).
 
 ### 2026-10-30 — Build once, install on other Macs (`feature/macos-install-reuse`)
 Build ID in the app; `make install` skips unchanged builds; `make install-package` (checksum, quarantine, local re-sign); `make release-upload` / `make install-release` via GitHub Releases; shared `bin/lib/macos-install.sh`; Makefile 0.4.0; docs/macos.md "Build once, install on other Macs". Shell syntax checked here; nothing run on a Mac yet.

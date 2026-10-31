@@ -121,6 +121,9 @@ pub fn spawn(mode: &str, args: &[String]) -> Result<tokio::process::Child> {
     Ok(tokio::process::Command::new(helper_path()?)
         .arg(mode)
         .args(args)
+        //= For Gliff ▸ About Gliff in every native window.
+        .env("GLIFF_VERSION", env!("CARGO_PKG_VERSION"))
+        .env("GLIFF_BUILD", env!("GLIFF_BUILD"))
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::inherit())

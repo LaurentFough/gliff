@@ -47,7 +47,8 @@ The standalone connection window follows the Mac's appearance and accent color. 
 between fields, Return connects, and Escape cancels; changing focus does not
 start a connection.
 It opens at the minimum size that fits its controls. The computer list grows
-to show up to four rows, then scrolls; discovery preserves a window you enlarge.
+to show up to four rows, then scrolls; discovery preserves a window you enlarge,
+and the list takes the extra height when you make the window taller.
 The app asks for Local Network access on macOS versions that require it;
 enable Gliff under System Settings → Privacy & Security → Local Network.
 
@@ -61,18 +62,32 @@ Or run:
 The Linux host needs Gliff installed and a running Hyprland session. The
 `--headless` option creates a private screen there and follows the Mac window.
 
+**About.** Gliff ▸ About Gliff shows the version and the build: the commit
+it was built from (`-dirty` when it had uncommitted changes) and the
+architecture, e.g. `build 4be6c38a1f arm64`. An installer can set the build
+ID with `GLIFF_BUILD_ID` at build time.
+
 ## Settings
 
 Gliff keeps per-machine options in `~/.config/gliff/config.toml`
 (`$XDG_CONFIG_HOME/gliff/config.toml` when set), the same file and format as
 the Linux client: `[defaults]` for every machine, `[overrides."user@host"]`
 for one. Open **Settings…** (⌘,) from the connection window or the viewer.
+While the viewer is open, Settings is one of its windows (same Dock icon,
+⌘-Tab entry and menu bar), and ⌘, brings an open one forward instead of
+opening another.
 
 | Option | What it does | When it changes |
 |---|---|---|
 | Screen | Mirror the machine's screen, or a private Linux screen that follows the window | reconnects the machine |
 | Clipboard | Share the clipboard in both directions | at once |
+| Reconnect | Reopen the machine at launch if it was open at quit, and retry a dropped session (`auto_reconnect`, default on) | at the next launch or failure |
 | Server command | The command started over SSH, e.g. `gliff-server --low-bandwidth` | reconnects the machine |
+| General ▸ Quit Gliff when its last window closes | For the app, not a machine (`quit_on_last_window`, default off). Off: closing the last tab leaves Gliff running with no windows; File ▸ New Tab (⌘T) or clicking the Dock icon opens the connection window. On: closing the last tab quits, and that machine reopens at the next launch | at once |
+
+**Connect** (or double-clicking a machine in the list) opens that machine in
+a new tab, with its saved settings. It is shown while the viewer is open;
+the connection window at launch has its own Connect.
 
 **All Machines** sets the defaults; selecting a machine sets only that
 machine, and **Reset** hands an option back to the defaults. Each row says
@@ -80,8 +95,11 @@ where its value comes from (Built-in, Default, or set here). Changes are
 saved as you make them.
 
 While connected, the **Machine** menu has the everyday choices: Mirror
-Screen / Private Screen, Share Clipboard, Play Sound, and Reconnect. A screen
-or server command change reconnects in the same window.
+Screen / Private Screen, Share Clipboard, Play Sound, Reconnect, and
+**Reconnect Automatically**. A screen or server command change reconnects in
+the same window. Reconnect Automatically is the machine's `auto_reconnect`
+setting: off, its tab is not reopened at the next launch and a dropped
+session waits for Reconnect instead of retrying.
 
 **Sound.** The viewer plays the sound of a Linux host running a gliff with
 sound (upstream PR #80), through the Mac's default output. **Machine ▸ Play
@@ -214,6 +232,43 @@ with a nonstandard port, use `gliff --port 2222 user@host`.
 Bonjour discovery is local to the LAN. Enter an SSH address manually for
 routed networks, jump hosts and VPN-only peers.
 
+### Known machines and autocomplete
+
+The connection window (at launch, and for File ▸ New Tab) lists every machine
+you have connected to, newest first, in a sidebar with a search field: the
+`machines` list in `config.toml`. Choosing one fills the SSH address (port 22)
+and the screen it is set to; double-click connects. **+** under the list adds
+what is in SSH Address without connecting; **−** forgets the selected
+machine, with its saved settings and its tab to reopen (it asks first), as
+the Linux client's Forget does. Typing in **SSH Address**
+completes from the same list: the rest of the newest matching machine is
+filled in and selected, so typing on replaces it and Tab or Return keeps it.
+Deleting never brings a completion back.
+
+### When nothing is found
+
+The usual cause is the host: installing gliff does not start advertising.
+On each Linux host, run `gliff-enable-discovery` once as the desktop user
+(`make discovery` in a checkout); it enables the `gliff-discovery` user
+service. Otherwise, work from the bottom up; each step separates one cause:
+
+1. **On the Mac, outside Gliff:** `dns-sd -B _gliff._tcp local.` (Ctrl+C to
+   stop). Nothing listed means the advertisements do not reach the Mac at
+   all: go to step 3.
+2. **Listed there, but not in Gliff:** Local Network access. In System
+   Settings ▸ Privacy & Security ▸ Local Network, allow **Gliff**. When Gliff
+   is started from a terminal (`~/.local/bin/gliff`), macOS asks on behalf of
+   that terminal app instead, so allow it there too, or open the app.
+   `gliff --discover` prints what Gliff itself sees.
+3. **On the Linux host:** `systemctl --user status gliff-discovery` (enable
+   it with `gliff-enable-discovery`, or `make discovery` in a checkout),
+   `systemctl status avahi-daemon`, and `avahi-browse -rt _gliff._tcp` to see
+   the host's own advertisement. A firewall must allow mDNS (UDP 5353).
+4. **The network:** mDNS stays on one LAN segment. Machines reached over
+   Tailscale, Headscale, WireGuard or another routed or VPN link are never
+   discovered this way; they appear in the known-machines list once you have
+   connected by address.
+
 ## Host the Mac
 
 On the Mac, choose **Gliff → Enable Remote Control…**, or run:
@@ -260,12 +315,16 @@ logical display coordinates. macOS hosts mirror physical screens and reject
 
 - **Tabs.** Each connection is a native macOS window tab: the tab bar's
   **+** or File ▸ New Tab (⌘T while the pointer is off the picture) opens the
-  connection window for another machine; drag a tab out for its own window,
+  connection window for another machine (part of the viewer, not a separate
+  app): a sheet over the front tab when that tab has no live session
+  (connecting, failed or dropped); a window of its own, like Settings, when
+  the front tab is connected (so it stays usable) or no tab is open; drag a tab out for its own window,
   or Window ▸ Merge All Windows to gather them. Every tab stays connected;
   only a tab you can see plays sound (its host stops recording otherwise),
   and the Mac's clipboard is offered to the active tab's machine. The tabs
   open when Gliff quits reopen at the next launch (`[[open_tabs]]` in
-  `config.toml`); closing a tab forgets it. A machine named on the command
+  `config.toml`), except machines with Reconnect Automatically off; closing a
+  tab forgets it. A machine named on the command
   line opens alone. The Linux client's Omarchy theme is not in the macOS
   client. Settings changes that need a new session reconnect in the same tab.
 - A session that fails or drops shows its error with a **Reconnect** button
