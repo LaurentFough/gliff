@@ -45,7 +45,7 @@ The log is newest first, and each entry names the commit.
 | `feature/macos-install-reuse` | Build once, install on other Macs (build ID, `install-package`, `release-upload` / `install-release`) | **open**: waiting for your test (#3), then merge |
 | `main` | upstream, untouched | — |
 
-Merged into the working branch (2026-10-29 to 2026-10-31), still on the fork until deleted (see Repo housekeeping): `feature/macos-gpu-video`, `macos-settings`, `merge/pr-98`, `merge/pr-80`, `feature/macos-audio`, `feature/macos-reconnect`, `feature/macos-tabs`, `feature/macos-picker-machines`, `feature/machines-and-auto-reconnect`, `feature/macos-panels-in-viewer`.
+The working branch is the fork's default branch (2026-10-31). The ten feature branches merged into it were deleted from the fork on 2026-10-31. Also kept: `archive/gliff-mac-objc2` (the old objc2 prototype).
 
 ## Upstream PRs
 
@@ -207,14 +207,9 @@ Support today:
 
 ### Repo housekeeping
 
-- [ ] Make `acrogenesis/macos-client-host` the fork's default branch (only you can):
-  ```sh
-  gh repo edit LaurentFough/gliff --default-branch acrogenesis/macos-client-host
-  ```
-- [ ] Delete the merged branches on the fork (only you can; all ten are contained in the working branch):
-  ```sh
-  git push origin --delete feature/macos-gpu-video macos-settings merge/pr-98 merge/pr-80 feature/macos-audio feature/macos-reconnect feature/macos-tabs feature/macos-picker-machines feature/machines-and-auto-reconnect feature/macos-panels-in-viewer
-  ```
+- [x] `acrogenesis/macos-client-host` is the fork's default branch (2026-10-31).
+- [x] The ten merged branches are deleted from the fork (2026-10-31).
+- [x] `rust-toolchain.toml` pins Rust 1.99.0 with rustfmt, clippy, rust-src and rust-analyzer (`adf8813`, 2026-10-31); `rust-version` (1.87) stays the minimum.
 - [x] Rename remotes in Claude's clone (`origin` = the fork, `acrogenesis` = acrogenesis); do the same in your clones if you like.
 
 ### PR #26
@@ -224,6 +219,9 @@ Support today:
 ## Log
 
 Newest first. Format: `### YYYY-MM-DD — summary (commit)`, then a line or two.
+
+### 2026-10-31 — Fork housekeeping done; Rust toolchain pinned (`adf8813`)
+Default branch is now `acrogenesis/macos-client-host`; the ten merged branches are gone from the fork (left: the working branch, `main`, `feature/macos-install-reuse`, `archive/gliff-mac-objc2`). `rust-toolchain.toml` (LaurentFough) pins 1.99.0 for rustup users. Upstream: omacom/main has nothing the fork lacks (last: 0.4.1, 2026-10-24); acrogenesis' branch has nothing new.
 
 ### 2026-10-31 — ToDone audit
 State and branch tables brought up to date (open `feature/macos-install-reuse`; ten merged branches to delete). Features added gains one app on the Mac, quit on last window, About, discovery hint, the Rust version check and screenshots. Pending gains Build and release (#3, Intel, Linux packages, CI releases, previously only on the install branch) and Ideas (Tailnet list, Connect to an open tab, Connect at launch, launch window in the viewer, missing screenshots, secondary outlines, build ID lag, multi-client levels).
