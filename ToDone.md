@@ -5,7 +5,7 @@ slug: gliff-macos-todone
 author: LaurentFough
 type: report
 date-created: 2026-10-29
-date-modified: 2026-10-30
+date-modified: 2026-10-31
 date-published:
 source: https://github.com/LaurentFough/gliff
 domain: remote-desktop
@@ -161,10 +161,10 @@ Support today:
 - [ ] Auto-reconnect on Linux: a machine with `auto_reconnect = false` is not reopened and not retried.
 - [x] `feature/macos-panels-in-viewer`: the connection window's nearby list takes the extra height when the window is made taller (reported and tested 2026-10-30).
 - [x] `feature/macos-panels-in-viewer`: Settings and File ▸ New Tab open inside the viewer, not as separate apps (reported 2026-10-30; tested 2026-10-30): one Dock icon and ⌘-Tab entry; New Tab's connection window is a sheet on the front tab; Settings is a window of the viewer and ⌘, brings an open one forward; Edit ▸ Paste works in both. The connection window at launch (no viewer yet) is still its own process.
-- [ ] `feature/macos-panels-in-viewer`: File ▸ New Tab is a sheet over a tab with no live session (connecting, failed or dropped), else its own window (connected tab, or no tab) — corrected 2026-10-31.
-- [ ] `feature/macos-panels-in-viewer`: Settings ▸ Connect, or double-clicking a machine, opens it in a new tab (viewer only).
-- [ ] `feature/macos-panels-in-viewer`: Gliff ▸ About Gliff shows the version and build (commit, `-dirty`, arch).
-- [ ] `feature/macos-panels-in-viewer`: Settings ▸ General ▸ Quit Gliff when its last window closes (`quit_on_last_window`, default off). Off: last tab closed, Gliff stays open; ⌘T or the Dock icon opens the connection window; the Machine menu is greyed out. On: closing the last tab quits and the machine reopens at the next launch.
+- [x] `feature/macos-panels-in-viewer`: File ▸ New Tab is a sheet over a tab with no live session (connecting, failed or dropped), else its own window (connected tab, or no tab) — corrected 2026-10-31.
+- [x] `feature/macos-panels-in-viewer`: Settings ▸ Connect, or double-clicking a machine, opens it in a new tab (viewer only).
+- [x] `feature/macos-panels-in-viewer`: Gliff ▸ About Gliff shows the version and build (commit, `-dirty`, arch).
+- [x] `feature/macos-panels-in-viewer`: Settings ▸ General ▸ Quit Gliff when its last window closes (`quit_on_last_window`, default off). Off: last tab closed, Gliff stays open; ⌘T or the Dock icon opens the connection window; the Machine menu is greyed out. On: closing the last tab quits and the machine reopens at the next launch.
 - [ ] Linux settings window: show `auto_reconnect`.
 - [x] Discovery on the Mac (resolved 2026-10-30): the hosts were not running the `gliff-discovery` user service. `gliff-enable-discovery` on each host fixes it; the package now says so after install, and docs/macos.md leads with it.
 - [ ] An iOS/iPadOS client: plan, effort and open decisions in [docs/ios-ipados-plan.md](docs/ios-ipados-plan.md) (Phase 0 spike first).
@@ -189,8 +189,11 @@ Support today:
 
 Newest first. Format: `### YYYY-MM-DD — summary (commit)`, then a line or two.
 
+### 2026-10-31 — Merge `feature/macos-panels-in-viewer` into the working branch
+All hand tests passed (New Tab sheet/window, About, Quit on last window on and off, Connect from Settings). No-fast-forward merge; README fork notes, the shared list and status table (README and ForkNews.md) updated.
+
 ### 2026-10-31 — `feature/macos-panels-in-viewer`: automated checks pass on the Mac
-`scripts/check.sh` (fmt, clippy, tests, native checks) and `scripts/macos-picker-check.py` pass (after `91d146b`, clippy `while_let_loop`). Hand tests pending: New Tab sheet/window, About, Quit on last window, Connect from Settings.
+`scripts/check.sh` (fmt, clippy, tests, native checks) and `scripts/macos-picker-check.py` pass (after `91d146b`, clippy `while_let_loop`). Hand tests: all passed (2026-10-31).
 
 ### 2026-10-31 — New Tab rule corrected; Connect from Settings (`feature/macos-panels-in-viewer`)
 New Tab's sheet/window rule inverted as requested: a sheet over a tab without a live session; a window over a connected tab or with no tab. Settings gains Connect (and double-click on a machine), sent as the app event `connect_machine`; the client opens a new tab with the machine's settings.

@@ -32,6 +32,8 @@ This fork ([LaurentFough/gliff](https://github.com/LaurentFough/gliff)) builds o
 - **Tabs on the Mac**: every connection is a native macOS tab in one viewer. The tab bar's **+** or File ▸ New Tab adds a machine; tabs stay connected, only the visible one plays sound, and open tabs reopen at launch. *(Tested.)*
 - **Known machines in the connection window**: a sidebar lists every machine you have connected to (searchable, **+** to add one, **−** to forget one), and the SSH Address field autocompletes from them, at launch and for File ▸ New Tab. *(Tested.)*
 - **Per-machine auto-reconnect**: Machine ▸ Reconnect Automatically, or Reconnect in Settings (`auto_reconnect`). Off, the machine is not reopened at launch and a dropped session waits for Reconnect; the Linux client honours it too. *(Tested on the Mac.)*
+- **One app on the Mac**: Settings and File ▸ New Tab open inside the viewer (one Dock icon and ⌘-Tab entry, one menu bar). New Tab is a sheet over a tab that is not connected, else its own window; ⌘, brings an open Settings forward, and Settings can **Connect** a machine (or double-click it) in a new tab. The connection window's list grows with the window. *(Tested.)*
+- **Quit on last window, and About**: Settings ▸ General ▸ Quit Gliff when its last window closes (`quit_on_last_window`, default off: Gliff stays open, and ⌘T or the Dock icon opens the connection window). Gliff ▸ About Gliff shows the version and build (commit, arch). *(Tested.)*
 - **Reconnect on the Mac**: a dropped or failed session shows a **Reconnect** button; sessions that had connected retry automatically (5 × 1.5 s, as on Linux), without repeating SSH prompts. *(Tested.)*
 - **GPU video on the Mac viewer**: VideoToolbox hardware H.264 decode, Metal 4:4:4 recombine, `CAMetalLayer` presentation; asks for 4:4:4 first, falls back to OpenH264 (`--video cpu` forces it). 4K 4:4:4: about 6.9 ms per frame on the GPU vs 18.8 ms on the CPU.
 - **Sound on the Mac viewer**: plays Linux hosts' sound through #80's `gliff-audio` (CoreAudio). **Machine ▸ Play Sound** shares the Linux client's mute switch; `--no-audio` starts muted.
@@ -73,6 +75,8 @@ The new features are outlined in red.
 | Mac reconnect | Tested (2026-10-30) |
 | Known machines (sidebar, + / −, autocomplete) | Tested (2026-10-30) |
 | Per-machine auto-reconnect | Tested on the Mac; Linux pending |
+| Mac: Settings and New Tab in the viewer, Connect from Settings | Tested (2026-10-31) |
+| Mac: quit on last window, About Gliff | Tested (2026-10-31) |
 | Mac discovery (Bonjour) | Tested (2026-10-30); the host must run `gliff-discovery` (`gliff-enable-discovery`) |
 | Linux host → Linux client sound | Not retested on the merged branch |
 | Sound from a Mac host | Not built yet |
@@ -370,6 +374,21 @@ gliff 0.4.1).
   The Window menu lists the tab commands (Show Previous/Next Tab, Move Tab to
   New Window, Merge All Windows, Show Tab Bar). See
   [macOS support](docs/macos.md).
+- **One app.** While the viewer runs, Settings and the File ▸ New Tab
+  connection window are its own windows (one Dock icon, ⌘-Tab entry and menu
+  bar), not separate helper processes. New Tab is a sheet over a tab without
+  a live session and its own window over a connected tab (or with no tab);
+  ⌘, brings an open Settings forward; Settings' **Connect** (or a
+  double-click on a machine) opens it in a new tab. The connection window's
+  nearby-computers list takes the height of a taller window.
+- **Quit on last window.** Settings ▸ General ▸ Quit Gliff when its last
+  window closes (`quit_on_last_window`, top-level in `config.toml`, default
+  off). Off, closing the last tab leaves Gliff running, and ⌘T or the Dock
+  icon opens the connection window; on, it quits and that machine reopens at
+  the next launch.
+- **About Gliff.** The Gliff menu shows the version and the build: the commit
+  (`-dirty` for uncommitted changes) and architecture, or `GLIFF_BUILD_ID`
+  from an installer.
 - **Reconnect.** A failed or dropped session shows its error with a
   **Reconnect** button. A session that had connected retries automatically,
   5 times 1.5 s apart, as on Linux; a failed first connection waits, so a
