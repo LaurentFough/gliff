@@ -1,10 +1,11 @@
 #!/bin/sh
 #= Install a package from bin/package-linux (make package) on another
 #= Arch/Omarchy machine: checks the SHA-256, the package name and the
-#= architecture, skips the build that is already installed, then pacman -U.
+#= architecture, skips the build that is already installed, then pacman -U
+#= as root (sudo, doas or su: GLIFF_AUTH, else makepkg.conf's PACMAN_AUTH).
 #= Usage: bin/install-linux-package [--force] PATH/gliff-*-linux-*.pkg.tar.zst
 #= The .sha256 file must sit next to the package.
-#= Version: 1.0.0
+#= Version: 1.1.0
 set -eu
 ROOT="$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)"
 . "$ROOT/bin/lib/linux-install.sh"
@@ -34,6 +35,7 @@ if [ "$GLIFF_FORCE_INSTALL" != 1 ] && [ -n "$GLIFF_BUILD_ID" ] && [ "$GLIFF_INST
 fi
 gliff_log info "installing gliff ${GLIFF_BUILD_ID:-unknown build} (installed: ${GLIFF_INSTALLED:-none})"
 #= pacman resolves the runtime dependencies from the configured repositories.
-sudo pacman -U "$GLIFF_DIR/$GLIFF_FILE"
+#= As root through sudo, doas or su (gliff_root; GLIFF_AUTH picks one).
+gliff_root pacman -U "$GLIFF_DIR/$GLIFF_FILE"
 gliff_log info "installed: $(gliff_installed_build)"
 printf 'To let clients on this LAN find this desktop: gliff-enable-discovery\n'

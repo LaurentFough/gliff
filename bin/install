@@ -1,10 +1,12 @@
 #!/bin/sh
 #= Install gliff from this checkout: the Mac app on macOS (bin/install-macos),
-#= the Arch package elsewhere (makepkg). On Arch an unchanged clean build is
-#= not rebuilt: the installed package's build ID (/usr/share/gliff/build-id)
-#= is compared with the checkout's. GLIFF_FORCE=1 rebuilds anyway.
-#= Extra arguments go to makepkg (Linux) or bin/install-macos.
-#= Version: 2.0.0
+#= the Arch package elsewhere. On Arch an unchanged clean build is not
+#= rebuilt: the installed package's build ID (/usr/share/gliff/build-id) is
+#= compared with the checkout's; GLIFF_FORCE=1 rebuilds anyway.
+#= Arch: builds with bin/package-linux, installs with bin/install-linux-package
+#= (pacman -U as root through GLIFF_AUTH, makepkg.conf's PACMAN_AUTH, sudo,
+#= doas or su). Extra arguments go to makepkg (Linux) or bin/install-macos.
+#= Version: 2.1.0
 set -eu
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 if [ "$(uname -s)" = Darwin ]; then
@@ -23,6 +25,12 @@ case "$GLIFF_BUILD_ID" in
         fi
         gliff_log info "building $GLIFF_BUILD_ID (installed: ${GLIFF_INSTALLED:-none})" ;;
 esac
-export GLIFF_BUILD_ID
-cd "$ROOT/pkgbuild"
-makepkg -fsi "$@"
+#= Build, then install the package ourselves rather than makepkg -i, so the
+#= root step uses the same tool choice as install-package.
+GLIFF_STAGE=$(mktemp -d "${TMPDIR:-/tmp}/gliff-install.XXXXXX")
+trap 'rm -rf "$GLIFF_STAGE"' EXIT
+trap 'exit 1' HUP INT TERM
+GLIFF_MAKEPKG_ARGS="$*" "$ROOT/bin/package-linux" "$GLIFF_STAGE"
+GLIFF_PKG=$(ls "$GLIFF_STAGE"/gliff-*-linux-*.pkg.tar.* 2>/dev/null | grep -v '\.sha256$' | head -n 1)
+[ -n "$GLIFF_PKG" ] || { gliff_log err "no package was built"; exit 1; }
+"$ROOT/bin/install-linux-package" --force "$GLIFF_PKG"

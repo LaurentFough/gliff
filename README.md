@@ -236,7 +236,9 @@ make release-upload   # needs gh             make install-release            # n
 `make package` writes `target/linux/gliff-VERSION-linux-ARCH-COMMIT.pkg.tar.zst`
 and its `.sha256`; `install-package` checks the checksum, the package name and
 the architecture, skips a build that is already installed (`FORCE=1`
-reinstalls) and runs `sudo pacman -U`. Releases go to the fork as
+reinstalls) and runs `pacman -U` as root: through `GLIFF_AUTH` (e.g.
+`GLIFF_AUTH=doas`), else `PACMAN_AUTH` from `makepkg.conf`, else sudo, doas
+or su. Releases go to the fork as
 pre-releases tagged `linux-COMMIT`, next to the Mac's `macos-COMMIT`
 (`REPO=owner/name` for another repository; remove one with
 `gh release delete linux-COMMIT --cleanup-tag`). Afterwards, run

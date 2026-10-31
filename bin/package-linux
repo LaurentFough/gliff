@@ -5,7 +5,7 @@
 #= Usage: bin/package-linux [OUTPUT_DIRECTORY]   (default target/linux)
 #= Writes gliff-VERSION-linux-ARCH-COMMIT.pkg.tar.zst and its .sha256; the
 #= package carries its build ID in /usr/share/gliff/build-id.
-#= Version: 1.0.0
+#= Version: 1.1.0
 set -eu
 ROOT="$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)"
 . "$ROOT/bin/lib/linux-install.sh"
@@ -21,8 +21,10 @@ trap 'rm -rf "$GLIFF_STAGE"' EXIT
 trap 'exit 1' HUP INT TERM
 gliff_log info "packaging $GLIFF_BUILD_ID"
 #= PKGDEST keeps the result out of pkgbuild/; -s installs missing build
-#= dependencies (asks for sudo), -f rebuilds an existing version.
-(cd "$ROOT/pkgbuild" && PKGDEST="$GLIFF_STAGE" makepkg -fs --noconfirm)
+#= dependencies (through makepkg.conf's PACMAN_AUTH, sudo by default), -f
+#= rebuilds an existing version. GLIFF_MAKEPKG_ARGS adds makepkg options.
+# shellcheck disable=SC2086
+(cd "$ROOT/pkgbuild" && PKGDEST="$GLIFF_STAGE" makepkg -fs --noconfirm ${GLIFF_MAKEPKG_ARGS:-})
 GLIFF_BUILT=$(ls "$GLIFF_STAGE"/gliff-*.pkg.tar.* 2>/dev/null | grep -v -- '-debug-' | head -n 1)
 [ -n "$GLIFF_BUILT" ] || { gliff_log err "makepkg did not produce a package"; exit 1; }
 [ "$(gliff_pkg_build "$GLIFF_BUILT")" = "$GLIFF_BUILD_ID" ] || { gliff_log err "the package lacks build ID $GLIFF_BUILD_ID"; exit 1; }

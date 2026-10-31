@@ -226,6 +226,9 @@ Support today:
 
 Newest first. Format: `### YYYY-MM-DD — summary (commit)`, then a line or two.
 
+### 2026-10-31 — Linux packages: install through doas (`feature/linux-packages`)
+First test: the build worked, `make install` failed at makepkg's install step with "doas: Authentication required" (makepkg exit 14). `bin/install` now builds with `bin/package-linux` and installs with `bin/install-linux-package`, whose root step (`gliff_root`) picks `GLIFF_AUTH`, else `makepkg.conf`'s `PACMAN_AUTH`, else sudo, doas or su, and runs it on the terminal. README says so.
+
 ### 2026-10-31 — Build once, install on other Arch/Omarchy machines (`feature/linux-packages`)
 Intel Mac builds deferred (that Mac runs Omarchy). New: `bin/package-linux` (pacman package with `/usr/share/gliff/build-id`, renamed `gliff-VER-linux-ARCH-COMMIT.pkg.tar.zst`, plus `.sha256`), `bin/install-linux-package` (checksum, name, arch, skip same build, `sudo pacman -U`), `bin/release-linux` / `bin/install-linux-release` (`linux-COMMIT` pre-releases via gh, curl fallback); `bin/install` skips an unchanged clean build on Arch; `gliff_build_id` moved to `bin/lib/build-id.sh` (shared), Linux helpers in `bin/lib/linux-install.sh`; PKGBUILD writes the build ID; Makefile 0.5.0 dispatches `package` / `install-package` / `release-upload` / `install-release` by OS (`PKG=` on Arch). README procedure and targets updated. Shell syntax checked here; not run on Arch yet.
 
