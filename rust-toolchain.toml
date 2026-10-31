@@ -1,0 +1,14 @@
+#= ==========================================================================
+#= rust-toolchain.toml — per-project toolchain pin (commit to the repo root)
+#= Version : 1.0.0
+#= rustup reads this in the project dir and auto-installs the pinned toolchain,
+#= overriding the host default. This is what makes builds reproducible.
+#= Ref: https://rust-lang.github.io/rustup/overrides.html
+#= ==========================================================================
+[toolchain]
+#= Exact release; bump deliberately in a PR alongside Cargo.lock updates
+channel = "1.99.0"
+profile = "minimal"
+components = ["rustfmt", "clippy", "rust-src", "rust-analyzer"]
+#= Only targets THIS project ships; host triple is implicit
+targets = ["aarch64-apple-darwin", "x86_64-unknown-linux-gnu"]
