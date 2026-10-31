@@ -170,6 +170,18 @@ make install-release TAG=macos-0707147a1b2c
 `LaurentFough/gliff`). Releases are marked pre-release: they are development
 builds, self-signed or ad-hoc and not notarized.
 
+Notes:
+
+- **The other Mac** needs a clone of the fork (any branch) for the `make`
+  targets and `bin/` scripts, and `gh` signed in for `install-release`; it
+  does not need Rust or Xcode.
+- **Which build is installed:** Gliff ▸ About Gliff, or
+  `plutil -extract GliffBuildID raw ~/Applications/Gliff.app/Contents/Info.plist`.
+  Both show the same ID.
+- **Removing a release** you no longer want (they are public on the fork):
+  `gh release delete macos-COMMIT --cleanup-tag --repo LaurentFough/gliff`.
+- **Apple Silicon only** for now; Intel Macs are on the backlog.
+
 ## Mac packages and release signing
 
 `bin/package-macos --development` builds an ad-hoc signed ZIP and checksum in
