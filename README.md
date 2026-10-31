@@ -41,6 +41,7 @@ This fork ([LaurentFough/gliff](https://github.com/LaurentFough/gliff)) builds o
 - **Shared settings**: a `gliff-settings` crate; both clients read and write `~/.config/gliff/config.toml`. On the Mac: a settings window (⌘,) and a Machine menu.
 - **Local signing**: no paid Apple Developer account needed (a self-signed `gliff-local` identity), so privacy permissions survive rebuilds.
 - **Makefile**: one front end for `bin/` and `scripts/`. `make macos` builds, signs, installs and verifies; `make install` on Arch; also `make check`, `make video-check` and `make distclean`; a project-wide `.gitignore`.
+- **Build once, install on other Macs**: `make install` skips an unchanged build (a build ID in the app); `make install-package` installs a ZIP from another Mac and re-signs it locally; `make release-upload` / `make install-release` carry it through GitHub Releases. Apple Silicon. *(Tested.)*
 - **Checks**: `make video-check` checks GPU output against the CPU decoder and benchmarks both; the ssh login-shell test no longer depends on your shell setup.
 - **Fixes**: Mac install and signing (`plutil`, a custom cargo `target-dir`); the client ignores stray sound packets from a host.
 - **Planned**: an iOS/iPadOS client; see [docs/feature-future/ios-ipados-plan.md](docs/feature-future/ios-ipados-plan.md). Several clients on one desktop (hardening, view-only, a shared stream); see [docs/feature-future/multi-client-plan.md](docs/feature-future/multi-client-plan.md).
@@ -155,6 +156,22 @@ builds run on Macs that trust the certificate; builds for other people need
 Developer ID signing and notarization (`make package-release`, see
 [macOS support](docs/macos.md)).
 
+**Other Macs: build once.** `make install` skips an unchanged build, so
+re-running it is cheap. To put the same build on more Apple Silicon Macs
+without building there, either copy a package or go through GitHub Releases
+(the other Mac needs a clone of this repository for its `make` targets, but
+not Rust or Xcode):
+
+```
+# Build Mac                                 # Other Mac
+make package                                make install-package ZIP=path/to/gliff-…-macos-arm64-development.zip
+make release-upload   # needs gh            make install-release            # newest macos-* release
+```
+
+Each install re-signs the app with that Mac's own identity and verifies it;
+About Gliff shows the build ID. The full procedure, options and checks are in
+[macOS support › Build once, install on other Macs](docs/macos.md#build-once-install-on-other-macs).
+
 This installs `~/Applications/Gliff.app`, with `gliff` and `gliff-server`
 links in `~/.local/bin`; `make verify` checks the signature and the links. Open the app to select a nearby computer or enter an
 SSH address, or run:
@@ -228,6 +245,9 @@ exit status.
 | `make verify` | checks the installed app's signature and `~/.local/bin` links |
 | `make video-check` | checks the viewer's GPU video and compares GPU and CPU decode times (`ARGS="--cases 1080p-444"`) |
 | `make package` | `bin/package-macos --development`: ad-hoc signed ZIP and checksum (`OUT=`) |
+| `make install-package` | installs a `make package` ZIP from another Mac (`ZIP=`): checks the SHA-256, re-signs with this Mac's identity (`FORCE=1`) |
+| `make release-upload` | publishes this commit's package as a GitHub release `macos-COMMIT` (`TAG=`, `ZIP=`, `REPO=`; needs `gh`) |
+| `make install-release` | downloads and installs a Mac release (`TAG=`, default the newest; `REPO=`, `FORCE=1`) |
 | `make package-release` | `bin/package-macos`: Developer ID, notarized (`GLIFF_NOTARY_PROFILE`) |
 | `make icon` | `bin/export-macos-icon` |
 | `make dev` / `make install-dev` | `bin/dev` / `bin/install-dev` (Linux) |
@@ -446,6 +466,13 @@ gliff 0.4.1).
   `make macos` pipeline, `make verify`, `make video-check` and `make
   distclean` (removes everything `.gitignore` ignores, after asking); see
   [Make targets](#make-targets).
+- **Build once, install on other Macs**: a build ID in the app
+  (`GliffBuildID`, the same as About Gliff's) lets `make install` skip an
+  unchanged build; `make install-package` installs a `make package` ZIP
+  (SHA-256, quarantine, re-signed locally); `make release-upload` /
+  `make install-release` go through GitHub Releases. Shared logic in
+  `bin/lib/macos-install.sh`. See
+  [Build once, install on other Macs](docs/macos.md#build-once-install-on-other-macs).
 - **Project `.gitignore`**: Rust/cargo, Python, Swift/Xcode, logs, macOS
   clutter (`.DS_Store`), editors, packaging and local scratch (`patch/`).
 - **ToDone.md**: a running report of this fork's state, pending work and a

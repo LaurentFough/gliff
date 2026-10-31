@@ -64,7 +64,7 @@ The Linux host needs Gliff installed and a running Hyprland session. The
 
 **About.** Gliff ▸ About Gliff shows the version and the build: the commit
 it was built from (`-dirty` when it had uncommitted changes) and the
-architecture, e.g. `build 4be6c38a1f arm64`. An installer can set the build
+architecture, e.g. `build 0707147a1b2c+arm64` (the same ID as the app's `GliffBuildID`, which `make install` compares). An installer can set the build
 ID with `GLIFF_BUILD_ID` at build time.
 
 ## Settings
@@ -124,6 +124,63 @@ always wins; the Machine menu's screen items are disabled while it is in use.
 
 Choices the connection window saved before settings existed (in macOS
 preferences) move to the config the next time you connect to that machine.
+
+## Build once, install on other Macs
+
+`make install` rebuilds only when it has to. Each app records a build ID in
+its `Info.plist` (`GliffBuildID`: commit, `-dirty` for uncommitted changes,
+architecture, e.g. `0707147a1b2c+arm64`). When the installed app is the same
+clean build, signed with the same identity and still verifying, `make
+install` only refreshes the `~/.local/bin` links. Uncommitted changes always
+rebuild; `make install FORCE=1` rebuilds anyway.
+
+To put one build on several Macs (Apple Silicon, macOS 13 or later) without
+Rust or Xcode on the others:
+
+```
+# On the build Mac
+make package                       # target/macos/gliff-…-macos-arm64-development.zip + .sha256
+
+# On another Mac: copy both files (AirDrop, scp, a shared folder), then
+make install-package ZIP=~/Downloads/gliff-0.4.1-macos-arm64-development.zip
+```
+
+`install-package` checks the SHA-256, the architecture and the minimum macOS
+version, removes the quarantine flag macOS adds to copied files, **re-signs
+the app with that Mac's own identity** (its `gliff-local`, else an Apple
+Development certificate, else ad-hoc), installs it into `~/Applications`,
+links the tools and runs `make verify`. Re-signing matters: Screen Recording
+and Accessibility grants belong to the signer, so a local signature keeps
+them across later updates on that Mac. Hosting from it still asks for them
+once; viewing needs neither.
+
+Or let GitHub carry the file, with the [GitHub CLI](https://cli.github.com)
+signed in (`brew install gh && gh auth login`):
+
+```
+# On the build Mac, from a clean, pushed commit
+make release-upload                # packages, then publishes release macos-COMMIT (pre-release)
+
+# On another Mac, from any checkout of the fork
+make install-release               # newest macos-* release
+make install-release TAG=macos-0707147a1b2c
+```
+
+`REPO=owner/name` publishes to or installs from another repository (default
+`LaurentFough/gliff`). Releases are marked pre-release: they are development
+builds, self-signed or ad-hoc and not notarized.
+
+Notes:
+
+- **The other Mac** needs a clone of the fork (any branch) for the `make`
+  targets and `bin/` scripts, and `gh` signed in for `install-release`; it
+  does not need Rust or Xcode.
+- **Which build is installed:** Gliff ▸ About Gliff, or
+  `plutil -extract GliffBuildID raw ~/Applications/Gliff.app/Contents/Info.plist`.
+  Both show the same ID.
+- **Removing a release** you no longer want (they are public on the fork):
+  `gh release delete macos-COMMIT --cleanup-tag --repo LaurentFough/gliff`.
+- **Apple Silicon only** for now; Intel Macs are on the backlog.
 
 ## Mac packages and release signing
 

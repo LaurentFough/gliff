@@ -1,70 +1,37 @@
 #!/bin/sh
 # Install the native client and SSH host for the current macOS user.
+#= Builds from this checkout, unless the installed app already is this build
+#= (same commit, no uncommitted changes, same architecture and signing
+#= identity, signature intact): then it only refreshes the ~/.local/bin links.
+#= GLIFF_FORCE=1 (make install FORCE=1) always rebuilds.
+#= Version: 2.0.0
 set -eu
 [ "$(uname -s)" = Darwin ] || { echo 'Run bin/install-macos on the Mac.' >&2; exit 1; }
 ROOT="$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)"
 cd "$ROOT"
 # Homebrew's bin directory is absent from the usual SSH PATH.
 export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.cargo/bin:$PATH"
-GLIFF_DEST_APP="$HOME/Applications/Gliff.app"
-# Reuse the certificate chosen for this installation across future builds.
-# A fingerprint avoids ambiguous certificate names and needs no XML escaping.
-# Read it only from an existing app, with plutil: PlistBuddy prints its
-# errors ("File Doesn't Exist", "Does Not Exist") on stdout, which a first
-# install would otherwise capture as the identity. Anything that is not a
-# 40-digit fingerprint counts as no saved choice.
-GLIFF_SAVED_IDENTITY=-
-GLIFF_DEST_PLIST="$GLIFF_DEST_APP/Contents/Info.plist"
-if [ -f "$GLIFF_DEST_PLIST" ]; then
-    GLIFF_SAVED_IDENTITY=$(plutil -extract GliffSigningIdentity raw -o - "$GLIFF_DEST_PLIST" 2>/dev/null) || GLIFF_SAVED_IDENTITY=-
-    case "$GLIFF_SAVED_IDENTITY" in
-        *[!a-fA-F0-9]*|'') GLIFF_SAVED_IDENTITY=- ;;
-        *) [ "${#GLIFF_SAVED_IDENTITY}" -eq 40 ] || GLIFF_SAVED_IDENTITY=- ;;
-    esac
+. "$ROOT/bin/lib/macos-install.sh"
+# Reuse the certificate chosen for this installation across future builds;
+# see gliff_pick_identity for the order.
+gliff_pick_identity
+GLIFF_BUILD_ID=$(gliff_build_id "$ROOT")
+if [ "${GLIFF_FORCE:-0}" != 1 ] && gliff_installed_is "$GLIFF_BUILD_ID" "$GLIFF_SIGNING_IDENTITY"; then
+    mkdir -p "$HOME/.local/bin"
+    for name in gliff gliff-server; do
+        ln -sfn "$GLIFF_DEST_APP/Contents/MacOS/$name" "$HOME/.local/bin/$name"
+    done
+    printf 'Gliff %s is already installed at %s; nothing to build (FORCE=1 rebuilds).\n' "$GLIFF_BUILD_ID" "$GLIFF_DEST_APP"
+    exit 0
 fi
-GLIFF_SIGNING_IDENTITY="${GLIFF_CODESIGN_IDENTITY:-$GLIFF_SAVED_IDENTITY}"
-# No choice yet: prefer a stable local identity over ad-hoc signing, so
-# privacy grants survive rebuilds without a paid developer account. Order:
-# the self-signed one from bin/setup-macos-signing, then a free Apple ID's
-# "Apple Development" certificate. Only valid (trusted) identities count.
-if [ "$GLIFF_SIGNING_IDENTITY" = - ] && [ -z "${GLIFF_CODESIGN_IDENTITY:-}" ]; then
-    GLIFF_FOUND_IDENTITY=$(security find-identity -v -p codesigning 2>/dev/null | awk '
-        $3 == "\"gliff-local\"" { own = $2 }
-        /"Apple Development:/ && dev == "" { dev = $2 }
-        END { if (own != "") print own; else if (dev != "") print dev }
-    ')
-    if [ -n "$GLIFF_FOUND_IDENTITY" ]; then
-        GLIFF_SIGNING_IDENTITY="$GLIFF_FOUND_IDENTITY"
-        printf 'Signing with local identity %s\n' "$GLIFF_SIGNING_IDENTITY"
-    fi
-fi
-case "$GLIFF_SIGNING_IDENTITY" in
-    -) ;;
-    *[!a-fA-F0-9]*|'') printf 'GLIFF_CODESIGN_IDENTITY must be a certificate SHA-1 fingerprint (40 hex digits), not "%s".\n' "$GLIFF_SIGNING_IDENTITY" >&2; exit 1 ;;
-    *) [ "${#GLIFF_SIGNING_IDENTITY}" -eq 40 ] || { printf 'Invalid signing fingerprint "%s": expected 40 hex digits.\n' "$GLIFF_SIGNING_IDENTITY" >&2; exit 1; } ;;
+case "$GLIFF_BUILD_ID" in
+    *-dirty+*) printf 'Building %s: uncommitted changes, so it cannot match an installed build.\n' "$GLIFF_BUILD_ID" ;;
+    *) printf 'Building %s (installed: %s)\n' "$GLIFF_BUILD_ID" "$(gliff_plist_value "$GLIFF_DEST_APP" GliffBuildID | sed 's/^$/none/')" ;;
 esac
 mkdir -p "$HOME/Applications" "$HOME/.local/bin"
 GLIFF_STAGE=$(mktemp -d "$HOME/Applications/.gliff-install.XXXXXX")
-cleanup() {
-    if [ -d "$GLIFF_STAGE/previous.app" ] && [ ! -e "$GLIFF_DEST_APP" ]; then
-        mv "$GLIFF_STAGE/previous.app" "$GLIFF_DEST_APP"
-    fi
-    rm -rf "$GLIFF_STAGE"
-}
-trap cleanup EXIT
+trap 'gliff_restore_previous "$GLIFF_STAGE"' EXIT
 trap 'exit 1' HUP INT TERM
-GLIFF_APP="$GLIFF_STAGE/Gliff.app"
-GLIFF_CODESIGN_IDENTITY="$GLIFF_SIGNING_IDENTITY" bin/build-macos-app "$GLIFF_APP"
-if [ -e "$GLIFF_DEST_APP" ]; then
-    mv "$GLIFF_DEST_APP" "$GLIFF_STAGE/previous.app"
-fi
-mv "$GLIFF_APP" "$GLIFF_DEST_APP"
-GLIFF_APP="$GLIFF_DEST_APP"
-for name in gliff gliff-server; do
-    ln -sfn "$GLIFF_APP/Contents/MacOS/$name" "$HOME/.local/bin/$name"
-done
-printf 'Installed %s\n' "$GLIFF_APP"
-printf 'Enable hosting with: %s --permissions --request\n' "$GLIFF_APP/Contents/MacOS/gliff-server"
-if [ "$GLIFF_SIGNING_IDENTITY" = - ]; then
-    printf 'Ad-hoc signing changes the permission identity on rebuild. Run bin/setup-macos-signing once (no Apple account needed), then reinstall to keep grants across updates.\n'
-fi
+GLIFF_CODESIGN_IDENTITY="$GLIFF_SIGNING_IDENTITY" bin/build-macos-app "$GLIFF_STAGE/Gliff.app"
+gliff_place_app "$GLIFF_STAGE/Gliff.app" "$GLIFF_STAGE"
+gliff_after_install "$GLIFF_SIGNING_IDENTITY"

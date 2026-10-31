@@ -1,0 +1,85 @@
+#!/bin/sh
+# Install Gliff from a ZIP made by `make package` on another Mac: no Rust,
+# Xcode or checkout build needed here.
+#= Usage: bin/install-macos-package [--force] [--no-checksum] PATH/gliff-*-macos-ARCH*.zip
+#=
+#= 1. Checks the ZIP against its .sha256 beside it (--no-checksum skips that).
+#= 2. Unpacks it and checks the architecture (this Mac's) and the minimum
+#=    macOS version from the bundle.
+#= 3. Removes the quarantine flag macOS adds to downloaded or AirDropped
+#=    files (an unnotarized app would not open with it).
+#= 4. Re-signs the app with this Mac's identity (see gliff_pick_identity):
+#=    Screen Recording and Accessibility grants belong to the signer, so a
+#=    local signature keeps them across later updates here.
+#= 5. Swaps it into ~/Applications and links gliff and gliff-server into
+#=    ~/.local/bin. Skipped when the installed app already is that build,
+#=    signed the same way (--force or GLIFF_FORCE=1 installs anyway).
+#= Version: 1.0.0
+set -eu
+[ "$(uname -s)" = Darwin ] || { echo 'Run bin/install-macos-package on the Mac.' >&2; exit 1; }
+ROOT="$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)"
+. "$ROOT/bin/lib/macos-install.sh"
+usage() { echo 'Usage: bin/install-macos-package [--force] [--no-checksum] PATH/gliff-*-macos-*.zip' >&2; exit 1; }
+GLIFF_CHECKSUM=1
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --force) GLIFF_FORCE=1 ;;
+        --no-checksum) GLIFF_CHECKSUM=0 ;;
+        -h|--help) usage ;;
+        -*) printf 'Unknown option %s\n' "$1" >&2; usage ;;
+        *) break ;;
+    esac
+    shift
+done
+[ $# -eq 1 ] || usage
+GLIFF_ZIP="$1"
+case "$GLIFF_ZIP" in *.zip) ;; *) echo 'Expected a .zip made by make package.' >&2; exit 1 ;; esac
+[ -f "$GLIFF_ZIP" ] || { printf 'No such file: %s\n' "$GLIFF_ZIP" >&2; exit 1; }
+GLIFF_ZIP_DIR="$(CDPATH='' cd -- "$(dirname -- "$GLIFF_ZIP")" && pwd)"
+GLIFF_ZIP_NAME="$(basename -- "$GLIFF_ZIP")"
+
+# 1. Integrity: the .sha256 make package wrote next to the ZIP.
+if [ "$GLIFF_CHECKSUM" = 1 ]; then
+    [ -f "$GLIFF_ZIP_DIR/$GLIFF_ZIP_NAME.sha256" ] || {
+        printf 'No %s.sha256 beside the ZIP; copy it too, or pass --no-checksum.\n' "$GLIFF_ZIP_NAME" >&2; exit 1; }
+    (cd "$GLIFF_ZIP_DIR" && shasum -a 256 -c "$GLIFF_ZIP_NAME.sha256") || { echo 'Checksum mismatch: the ZIP is damaged or not the one packaged.' >&2; exit 1; }
+fi
+
+# 2. Unpack beside the destination (same volume, so the final move is a rename).
+mkdir -p "$HOME/Applications"
+GLIFF_STAGE=$(mktemp -d "$HOME/Applications/.gliff-install.XXXXXX")
+trap 'gliff_restore_previous "$GLIFF_STAGE"' EXIT
+trap 'exit 1' HUP INT TERM
+ditto -x -k "$GLIFF_ZIP" "$GLIFF_STAGE/unpacked"
+GLIFF_APP="$GLIFF_STAGE/unpacked/Gliff.app"
+[ -d "$GLIFF_APP" ] && [ -x "$GLIFF_APP/Contents/MacOS/gliff" ] && [ -x "$GLIFF_APP/Contents/MacOS/gliff-server" ] && [ -x "$GLIFF_APP/Contents/MacOS/gliff-native" ] ||
+    { echo 'The ZIP does not hold a complete Gliff.app.' >&2; exit 1; }
+GLIFF_ARCH=$(uname -m)
+for bin in gliff gliff-server gliff-native; do
+    lipo -archs "$GLIFF_APP/Contents/MacOS/$bin" | tr ' ' '\n' | grep -qx "$GLIFF_ARCH" ||
+        { printf '%s is built for %s, not this Mac (%s).\n' "$bin" "$(lipo -archs "$GLIFF_APP/Contents/MacOS/$bin")" "$GLIFF_ARCH" >&2; exit 1; }
+done
+GLIFF_MIN=$(gliff_plist_value "$GLIFF_APP" LSMinimumSystemVersion)
+GLIFF_HAVE=$(sw_vers -productVersion)
+if [ -n "$GLIFF_MIN" ] && [ "${GLIFF_HAVE%%.*}" -lt "${GLIFF_MIN%%.*}" ]; then
+    printf 'This Gliff needs macOS %s or later; this Mac has %s.\n' "$GLIFF_MIN" "$GLIFF_HAVE" >&2; exit 1
+fi
+GLIFF_BUILD_ID=$(gliff_plist_value "$GLIFF_APP" GliffBuildID)
+[ -n "$GLIFF_BUILD_ID" ] || GLIFF_BUILD_ID="unknown+$GLIFF_ARCH"
+
+# 4. The identity this Mac signs with; skip if that build is already here.
+gliff_pick_identity
+if [ "${GLIFF_FORCE:-0}" != 1 ] && gliff_installed_is "$GLIFF_BUILD_ID" "$GLIFF_SIGNING_IDENTITY"; then
+    printf 'Gliff %s is already installed at %s (--force installs anyway).\n' "$GLIFF_BUILD_ID" "$GLIFF_DEST_APP"
+    exit 0
+fi
+printf 'Installing %s from %s (installed: %s)\n' "$GLIFF_BUILD_ID" "$GLIFF_ZIP_NAME" \
+    "$(gliff_plist_value "$GLIFF_DEST_APP" GliffBuildID | sed 's/^$/none/')"
+
+# 3. Quarantine, then 4. sign for this Mac.
+xattr -dr com.apple.quarantine "$GLIFF_APP" 2>/dev/null || true
+gliff_sign_app "$GLIFF_APP" "$GLIFF_SIGNING_IDENTITY"
+
+# 5. Swap it in.
+gliff_place_app "$GLIFF_APP" "$GLIFF_STAGE"
+gliff_after_install "$GLIFF_SIGNING_IDENTITY"

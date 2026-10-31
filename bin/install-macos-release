@@ -1,0 +1,51 @@
+#!/bin/sh
+# Download a Mac build published by bin/release-macos and install it with
+# bin/install-macos-package (checksum, quarantine, local re-sign).
+#= Usage: bin/install-macos-release [--force] [TAG]
+#= Without TAG: the newest release whose tag starts with macos- (needs the
+#= GitHub CLI). With TAG, plain curl works too, for public repositories.
+#= Repository: GLIFF_RELEASE_REPO (default LaurentFough/gliff).
+#= Version: 1.0.0
+set -eu
+[ "$(uname -s)" = Darwin ] || { echo 'Run bin/install-macos-release on the Mac.' >&2; exit 1; }
+ROOT="$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)"
+GLIFF_RELEASE_REPO="${GLIFF_RELEASE_REPO:-LaurentFough/gliff}"
+usage() { echo 'Usage: bin/install-macos-release [--force] [TAG]' >&2; exit 1; }
+GLIFF_PASS=""
+GLIFF_TAG=""
+for arg in "$@"; do
+    case "$arg" in
+        --force) GLIFF_PASS="--force" ;;
+        -h|--help) usage ;;
+        -*) printf 'Unknown option %s\n' "$arg" >&2; usage ;;
+        *) [ -z "$GLIFF_TAG" ] || usage; GLIFF_TAG="$arg" ;;
+    esac
+done
+GLIFF_ARCH=$(uname -m)
+GLIFF_DL=$(mktemp -d "${TMPDIR:-/tmp}/gliff-release.XXXXXX")
+trap 'rm -rf "$GLIFF_DL"' EXIT
+trap 'exit 1' HUP INT TERM
+if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
+    if [ -z "$GLIFF_TAG" ]; then
+        GLIFF_TAG=$(gh release list --repo "$GLIFF_RELEASE_REPO" --limit 50 --json tagName \
+            --jq '[.[] | select(.tagName | startswith("macos-"))][0].tagName // empty')
+        [ -n "$GLIFF_TAG" ] || { printf 'No macos- release on %s yet (make release-upload on the build Mac).\n' "$GLIFF_RELEASE_REPO" >&2; exit 1; }
+    fi
+    printf 'Downloading %s from %s\n' "$GLIFF_TAG" "$GLIFF_RELEASE_REPO"
+    gh release download "$GLIFF_TAG" --repo "$GLIFF_RELEASE_REPO" --dir "$GLIFF_DL" \
+        --pattern "gliff-*-macos-$GLIFF_ARCH*.zip" --pattern "gliff-*-macos-$GLIFF_ARCH*.zip.sha256"
+else
+    [ -n "$GLIFF_TAG" ] || { echo 'Without a signed-in GitHub CLI, name the release: make install-release TAG=macos-…' >&2; exit 1; }
+    printf 'Downloading %s from %s (curl)\n' "$GLIFF_TAG" "$GLIFF_RELEASE_REPO"
+    curl -fsSL "https://api.github.com/repos/$GLIFF_RELEASE_REPO/releases/tags/$GLIFF_TAG" |
+        grep -o '"browser_download_url": *"[^"]*"' | sed 's/.*"\(https[^"]*\)"/\1/' |
+        grep -E "/gliff-[^/]*-macos-$GLIFF_ARCH[^/]*\.zip(\.sha256)?$" > "$GLIFF_DL/urls" || true
+    [ -s "$GLIFF_DL/urls" ] || { printf 'Release %s has no %s ZIP.\n' "$GLIFF_TAG" "$GLIFF_ARCH" >&2; exit 1; }
+    while read -r url; do
+        curl -fsSL -o "$GLIFF_DL/$(basename -- "$url")" "$url"
+    done < "$GLIFF_DL/urls"
+fi
+GLIFF_ZIP=$(ls "$GLIFF_DL"/gliff-*-macos-"$GLIFF_ARCH"*.zip 2>/dev/null | head -1)
+[ -n "$GLIFF_ZIP" ] || { printf 'Release %s has no %s ZIP.\n' "$GLIFF_TAG" "$GLIFF_ARCH" >&2; exit 1; }
+# shellcheck disable=SC2086
+"$ROOT/bin/install-macos-package" $GLIFF_PASS "$GLIFF_ZIP"

@@ -42,7 +42,6 @@ The log is newest first, and each entry names the commit.
 | Branch | Contents | Status |
 |---|---|---|
 | `acrogenesis/macos-client-host` | #47 base, signing and install fixes, Makefile, #98, Mac settings, GPU video, #80 sound, Mac sound, host mute, Mac reconnect, Mac tabs, known machines, auto-reconnect, one app (panels), quit on last window, About, screenshots, plan docs, ToDone.md | working branch |
-| `feature/macos-install-reuse` | Build once, install on other Macs (build ID, `install-package`, `release-upload` / `install-release`) | **open**: waiting for your test (#3), then merge |
 | `main` | upstream, untouched | — |
 
 The working branch is the fork's default branch (2026-10-31). The ten feature branches merged into it were deleted from the fork on 2026-10-31. Also kept: `archive/gliff-mac-objc2` (the old objc2 prototype).
@@ -135,6 +134,13 @@ The working branch is the fork's default branch (2026-10-31). The ten feature br
 - `scripts/check.sh` stops early when Rust is older than `rust-version` (1.87), with how to update.
 - README / ForkNews screenshots (`docs/images/`): connection window, tabs, Settings ▸ Reconnect, Machine menu mockup (`docs/images/src/`), features outlined in red.
 
+### Build once, install on other Macs (merged 2026-10-31; tested)
+
+- `GliffBuildID` in the app's `Info.plist` (commit, `-dirty`, architecture). `make install` skips the build when the installed app is the same clean build with the same signing identity and a valid signature; `FORCE=1` rebuilds.
+- `make install-package ZIP=…`: checksum, architecture and macOS checks, quarantine removed, re-signed with the receiving Mac's identity, installed, verified.
+- `make release-upload` / `make install-release`: the ZIP as a pre-release `macos-COMMIT` on GitHub (gh), installed through `install-package`.
+- Shared `bin/lib/macos-install.sh` (identity choice, signing, safe swap) used by all three installers. Makefile 0.4.0. Apple Silicon only for now.
+
 ### Docs
 
 - `ForkNews.md` (the short list of what the fork adds, also near the top of the README), README fork notes, `docs/macos.md`, `docs/settings.md`, and the crate list in `docs/architecture.md`.
@@ -189,7 +195,7 @@ Support today:
 
 ### Build and release
 
-- [ ] #3: test build-once installs on `feature/macos-install-reuse` (`make install` twice, the second skips; a change then `make install` rebuilds; `make package` → `make install-package` on a second Mac; `make release-upload` → `make install-release`), then merge.
+- [x] #3 (tested and merged 2026-10-31): build-once installs on `feature/macos-install-reuse` (`make install` twice, the second skips; a change then `make install` rebuilds; About Gliff shows the same build ID as `GliffBuildID`; `make package` → `make install-package` on a second Mac; `make release-upload` → `make install-release`), then merge.
 - [ ] Intel Macs: a universal (arm64 + x86_64) package, or per-architecture releases.
 - [ ] Linux: prebuilt packages to copy between machines (today each machine builds with `makepkg`).
 - [ ] Releases from CI: attach the macOS runners' packages to `macos-*` releases instead of building locally.
@@ -219,6 +225,12 @@ Support today:
 ## Log
 
 Newest first. Format: `### YYYY-MM-DD — summary (commit)`, then a line or two.
+
+### 2026-10-31 — Merge `feature/macos-install-reuse` (build once, install on other Macs)
+#3 tested on the Mac: `make install` skips an unchanged build, `make package` / `make install-package`, `make release-upload` / `make install-release`. README: an "Other Macs: build once" procedure under Install and a fork note; docs/macos.md: notes (the other Mac needs a clone, checking the build ID, removing a release). No-fast-forward merge into the working branch; delete the branch on the fork when convenient.
+
+### 2026-10-31 — `feature/macos-install-reuse` brought up to date; one build ID
+Merged the working branch into it (conflicts in README, ForkNews, ToDone resolved). `bin/build-macos-app` now computes the build ID before `cargo build` and exports it as `GLIFF_BUILD_ID`, so About Gliff and `Info.plist`'s `GliffBuildID` are the same string; build.rs's own fallback uses the same form (`COMMIT[-dirty]+ARCH`, 12-digit commit, `arm64`).
 
 ### 2026-10-31 — Fork housekeeping done; Rust toolchain pinned (`adf8813`)
 Default branch is now `acrogenesis/macos-client-host`; the ten merged branches are gone from the fork (left: the working branch, `main`, `feature/macos-install-reuse`, `archive/gliff-mac-objc2`). `rust-toolchain.toml` (LaurentFough) pins 1.99.0 for rustup users. Upstream: omacom/main has nothing the fork lacks (last: 0.4.1, 2026-10-24); acrogenesis' branch has nothing new.
@@ -285,6 +297,9 @@ The known-machines list and autocomplete tested OK. Added + / − to the picker 
 
 ### 2026-10-30 — Connection window: known machines and autocomplete (`feature/macos-picker-machines`)
 Sidebar of past machines (search, choose, double-click to connect) and inline autocomplete of the SSH address from the config's `machines`, also in File ▸ New Tab. Discovery not finding hosts: the browse code matches what Linux advertises; docs/macos.md gains "When nothing is found" (dns-sd, Local Network permission incl. terminal launches, Avahi, LAN-only mDNS).
+
+### 2026-10-30 — Build once, install on other Macs (`feature/macos-install-reuse`)
+Build ID in the app; `make install` skips unchanged builds; `make install-package` (checksum, quarantine, local re-sign); `make release-upload` / `make install-release` via GitHub Releases; shared `bin/lib/macos-install.sh`; Makefile 0.4.0; docs/macos.md "Build once, install on other Macs". Shell syntax checked here; nothing run on a Mac yet.
 
 ### 2026-10-30 — Mac tabs: several connections at once tested
 Several machines connected at the same time, each in its own tab, work as implemented. ForkNews.md and the README's fork features and status now say so; the remaining tab checks (sound following the visible tab, drag and merge, Machine menu, clipboard, restore at launch) and Mac reconnect stay under Deferred testing.
