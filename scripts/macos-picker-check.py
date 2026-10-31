@@ -36,10 +36,11 @@ Timer.scheduledTimer(withTimeInterval:0.4,repeats:false) { _ in
         let settings=viewer.panel(7) as! SettingsWindow
         precondition(settings.window!.isVisible && settings.window!.tabbingMode == .disallowed,"Settings did not open as a window of its own")
         precondition(viewer.focusSettings(),"An open settings window was not brought forward")
+        precondition(!settings.connectButton.isHidden && !settings.connectButton.isEnabled,"Connect must show in the viewer and wait for a machine")
         viewer.openPanel(8,["type":"open_panel","kind":"choose","args":["private"]])
         let chooser=viewer.panel(8) as! ComputerPicker
         precondition(chooser.window!.isVisible && chooser.screenOverride=="private","The connection window did not open in the viewer")
-        // With no connected tab, New Tab's window is a window of its own.
+        // With no tab to attach to, New Tab's window is a window of its own.
         precondition(chooser.window!.sheetParent==nil,"The connection window became a sheet with no connected tab")
         chooser.handle(["type":"close_panel"])
         precondition(viewer.panel(8)==nil && !chooser.window!.isVisible,"close_panel left the connection window open")

@@ -183,6 +183,23 @@ pub fn client_main() -> Result<()> {
                         }
                     });
                 }
+                //= Settings ▸ Connect (or a double-click on a machine): a new
+                //= tab for it; its screen and options come from its settings.
+                Some("connect_machine") => {
+                    let host = ev["host"].as_str().unwrap_or_default().trim().to_string();
+                    let selected = crate::discovery::Selection {
+                        host,
+                        port: 22,
+                        screen: crate::discovery::ScreenMode::Mirror,
+                    };
+                    match selected.validate() {
+                        Ok(()) => {
+                            let viewer = hub.new_window(&tab_title(&cli, &selected)).await?;
+                            visits.push(spawn_visit(viewer, selected, &cli, &shared, &cli_layer));
+                        }
+                        Err(e) => tracing::warn!(error = %e, "not connecting from Settings"),
+                    }
+                }
                 Some("bye") => break,
                 _ => {}
             }

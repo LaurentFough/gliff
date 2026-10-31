@@ -1438,10 +1438,11 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
             tabsLock.lock(); panels[id] = picker; tabsLock.unlock()
             picker.build()
             guard let w = picker.window else { forget(); return }
-            // A sheet over a tab that shows a connected machine; otherwise
-            // (no tab, or its session failed, dropped or is still
-            // connecting) a window of its own, like Settings.
-            if let tab = keyTab, tab.view?.hasPicture == true, let parent = tab.window,
+            // Over a tab with no live session (connecting, failed or
+            // dropped) the connection window is a sheet on that tab; over a
+            // connected tab, or with no tab, it is a window of its own, like
+            // Settings, so the live session stays usable.
+            if let tab = keyTab, tab.view?.hasPicture == false, let parent = tab.window,
                parent.isVisible, !parent.isMiniaturized, parent.attachedSheet == nil {
                 parent.beginSheet(w)
             } else {
@@ -2222,6 +2223,9 @@ final class SettingsWindow: NSObject, PanelWindow, NSApplicationDelegate, NSWind
     let reconnectReset = NSButton(title: "Reset", target: nil, action: nil)
     // General: options for Gliff itself, not a machine (state["app"]).
     let quitBox = NSButton(checkboxWithTitle: "Quit Gliff when its last window closes", target: nil, action: nil)
+    // Connect: open the selected machine in a new tab (inside the viewer
+    // only; the settings helper at launch leaves that to the connection window).
+    let connectButton = NSButton(title: "Connect", target: nil, action: nil)
     let serverBin = NSTextField(string: "")
     let screenOrigin = NSTextField(labelWithString: "")
     let clipboardOrigin = NSTextField(labelWithString: "")
@@ -2318,6 +2322,11 @@ final class SettingsWindow: NSObject, PanelWindow, NSApplicationDelegate, NSWind
         table.addTableColumn(column); table.headerView = nil
         table.delegate = self; table.dataSource = self; table.rowHeight = 24; table.style = .sourceList
         table.setAccessibilityLabel("Machines")
+        table.target = self; table.doubleAction = #selector(SettingsWindow.connectMachine(_:))
+        connectButton.target = self; connectButton.action = #selector(SettingsWindow.connectMachine(_:))
+        connectButton.bezelStyle = .rounded; connectButton.controlSize = .large
+        connectButton.toolTip = "Open the selected machine in a new tab"
+        connectButton.setAccessibilityLabel("Connect to the selected machine")
         let scroll = NSScrollView(); scroll.documentView = table; scroll.hasVerticalScroller = true
         scroll.translatesAutoresizingMaskIntoConstraints = false
         let sidebar = NSStackView(views: [search, scroll])
@@ -2360,10 +2369,14 @@ final class SettingsWindow: NSObject, PanelWindow, NSApplicationDelegate, NSWind
         let rule2 = NSBox(); rule2.boxType = .separator
         let generalStack = NSStackView(views: [general, quitBox, quitHelp])
         generalStack.orientation = .vertical; generalStack.alignment = .leading; generalStack.spacing = 4
-        let form = NSStackView(views: [heading, scopeNote, display, clip, again, server, rule, rule2, generalStack, errorLabel, NSView(), pathLabel])
+        let headerRow = NSStackView(views: [heading, NSView(), connectButton])
+        headerRow.orientation = .horizontal; headerRow.alignment = .centerY; headerRow.spacing = 8
+        heading.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        let form = NSStackView(views: [headerRow, scopeNote, display, clip, again, server, rule, rule2, generalStack, errorLabel, NSView(), pathLabel])
         form.orientation = .vertical; form.alignment = .leading; form.spacing = 14
         form.translatesAutoresizingMaskIntoConstraints = false
         rule2.widthAnchor.constraint(equalTo: form.widthAnchor).isActive = true
+        headerRow.widthAnchor.constraint(equalTo: form.widthAnchor).isActive = true
         view.addSubview(sidebar); view.addSubview(form)
         NSLayoutConstraint.activate([
             sidebar.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 16),
@@ -2413,6 +2426,8 @@ final class SettingsWindow: NSObject, PanelWindow, NSApplicationDelegate, NSWind
     func refreshForm() {
         updating = true
         heading.stringValue = selected.isEmpty ? "All Machines" : selected
+        connectButton.isHidden = panelID == nil
+        connectButton.isEnabled = !selected.isEmpty
         scopeNote.stringValue = selected.isEmpty
             ? "Used by every machine that does not set its own value."
             : "Only this machine. Reset hands an option back to All Machines."
@@ -2442,6 +2457,18 @@ final class SettingsWindow: NSObject, PanelWindow, NSApplicationDelegate, NSWind
     @objc func screenChanged(_ sender: Any?) { if !updating { edit("screen", screen.indexOfSelectedItem == 1 ? "private" : "mirror") } }
     @objc func clipboardChanged(_ sender: Any?) { if !updating { edit("clipboard", clipboardBox.state == .on) } }
     @objc func reconnectChanged(_ sender: Any?) { if !updating { edit("auto_reconnect", reconnectBox.state == .on) } }
+    /// Connect, or a double-click on a machine: the viewer opens it in a new
+    /// tab (an app event, so the client's tab loop handles it).
+    @objc func connectMachine(_ sender: Any?) {
+        guard panelID != nil else { return }
+        var name = selected
+        if (sender as AnyObject?) === table {
+            guard scopes.indices.contains(table.clickedRow) else { return }
+            name = scopes[table.clickedRow]
+        }
+        guard !name.isEmpty else { return }
+        event(["type": "connect_machine", "host": name])
+    }
     @objc func quitChanged(_ sender: Any?) {
         guard !updating else { return }
         errorLabel.stringValue = ""
