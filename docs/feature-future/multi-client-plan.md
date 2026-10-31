@@ -9,7 +9,7 @@ date-modified: 2026-10-31
 date-published:
 source: https://github.com/LaurentFough/gliff
 domain: remote-desktop
-url: https://github.com/LaurentFough/gliff/blob/acrogenesis/macos-client-host/docs/multi-client-plan.md
+url: https://github.com/LaurentFough/gliff/blob/acrogenesis/macos-client-host/docs/feature-future/multi-client-plan.md
 draft: true
 tags: [gliff, multi-client, shared-session, plan, hyprland, view-only]
 keywords: [several clients, shared desktop, view-only, local mute, private screen, RFB shared flag, session broker, fan-out encoding]

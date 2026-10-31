@@ -167,8 +167,8 @@ Support today:
 - [x] `feature/macos-panels-in-viewer`: Settings ▸ General ▸ Quit Gliff when its last window closes (`quit_on_last_window`, default off). Off: last tab closed, Gliff stays open; ⌘T or the Dock icon opens the connection window; the Machine menu is greyed out. On: closing the last tab quits and the machine reopens at the next launch.
 - [ ] Linux settings window: show `auto_reconnect`.
 - [x] Discovery on the Mac (resolved 2026-10-30): the hosts were not running the `gliff-discovery` user service. `gliff-enable-discovery` on each host fixes it; the package now says so after install, and docs/macos.md leads with it.
-- [ ] An iOS/iPadOS client: plan, effort and open decisions in [docs/ios-ipados-plan.md](docs/ios-ipados-plan.md) (Phase 0 spike first).
-- [ ] Several clients on one desktop: plan, levels and open decisions in [docs/multi-client-plan.md](docs/multi-client-plan.md) (Level 0 test first; for later).
+- [ ] An iOS/iPadOS client: plan, effort and open decisions in [docs/feature-future/ios-ipados-plan.md](docs/feature-future/ios-ipados-plan.md) (Phase 0 spike first).
+- [ ] Several clients on one desktop: plan, levels and open decisions in [docs/feature-future/multi-client-plan.md](docs/feature-future/multi-client-plan.md) (Level 0 test first; for later).
 
 ### Repo housekeeping
 
@@ -189,6 +189,9 @@ Support today:
 ## Log
 
 Newest first. Format: `### YYYY-MM-DD — summary (commit)`, then a line or two.
+
+### 2026-10-31 — Plan docs moved to `docs/feature-future/`
+`ios-ipados-plan.md` and `multi-client-plan.md` now live in `docs/feature-future/`; links in the README, ForkNews, the backlog and their frontmatter `url` updated (older log entries keep the paths of their day).
 
 ### 2026-10-31 — Plan doc: several clients on one desktop
 `docs/multi-client-plan.md`: what already works (one server per connection), what breaks (`--mute-local-audio` restore, pointer contention, no viewer notice), levels 0–3 with estimates, a Level 0 checklist and the decisions. Linked from the README, ForkNews and the backlog; for later.
