@@ -133,7 +133,8 @@ pub fn picker_settings(
 /// Show the picker. Its screen menu follows the saved settings; a screen
 /// the user picked there (or one migrated from the picker's old
 /// `UserDefaults` store) is saved as that machine's override on Connect.
-/// "Settings…" opens the settings window alongside it.
+/// "Settings…" opens the settings window alongside it. Inside a running
+/// viewer (File ▸ New Tab) it is a sheet on the front tab; see [`crate::panel`].
 #[cfg(target_os = "macos")]
 pub async fn choose(
     screen: Option<ScreenMode>,
@@ -143,18 +144,14 @@ pub async fn choose(
     let args = screen
         .map(|mode| vec![mode.as_str().into()])
         .unwrap_or_default();
-    let mut child = crate::native::spawn("choose", &args)?;
-    let mut rd = child.stdout.take().unwrap();
-    let mut wr = child.stdin.take().unwrap();
+    let mut panel = crate::panel::Panel::open("choose", &args).await?;
     let mut changes = Some(shared.subscribe());
     let result = async {
-        send_picker_settings(&mut wr, shared, cli).await?;
+        send_picker_settings(&mut panel, shared, cli).await?;
         loop {
             tokio::select! {
-                packet = crate::native::read(&mut rd) => {
-                    let (kind, bytes) = packet?;
-                    ensure!(kind == crate::native::EVENT, "invalid chooser response");
-                    let event: serde_json::Value = serde_json::from_slice(&bytes)?;
+                event = panel.recv() => {
+                    let event = event?;
                     match event["type"].as_str() {
                         Some("cancel") => return Ok(None),
                         Some("open_settings") => {
@@ -193,13 +190,13 @@ pub async fn choose(
                                 shared.forget(&crate::settings::machine_key(host));
                             }
                         }
-                        _ => anyhow::bail!("unexpected chooser response"),
+                        other => tracing::debug!(?other, "connection window event ignored"),
                     }
                 }
                 //= The settings window changed something: refresh the menu.
                 changed = async { changes.as_mut().unwrap().changed().await }, if changes.is_some() => {
                     if changed.is_ok() {
-                        send_picker_settings(&mut wr, shared, cli).await?;
+                        send_picker_settings(&mut panel, shared, cli).await?;
                     } else {
                         changes = None;
                     }
@@ -208,18 +205,18 @@ pub async fn choose(
         }
     }
     .await;
-    let _ = child.kill().await;
+    //= Closes the window (or kills its helper process).
+    drop(panel);
     result
 }
 
 #[cfg(target_os = "macos")]
 async fn send_picker_settings(
-    wr: &mut tokio::process::ChildStdin,
+    panel: &mut crate::panel::Panel,
     shared: &crate::settings::Shared,
     cli: &gliff_settings::Settings,
 ) -> Result<()> {
-    let bytes = serde_json::to_vec(&picker_settings(shared, cli))?;
-    crate::native::write(wr, crate::native::EVENT, &bytes).await
+    panel.send(&picker_settings(shared, cli)).await
 }
 
 #[cfg(target_os = "macos")]

@@ -159,6 +159,12 @@ Support today:
 - [x] + (adds the typed address) and − (asks, then forgets the machine and its settings) (tested 2026-10-30).
 - [x] Auto-reconnect on the Mac (tested 2026-10-30): Machine ▸ Reconnect Automatically off skips the launch reopen and drop retries; Settings ▸ Reconnect matches.
 - [ ] Auto-reconnect on Linux: a machine with `auto_reconnect = false` is not reopened and not retried.
+- [x] `feature/macos-panels-in-viewer`: the connection window's nearby list takes the extra height when the window is made taller (reported and tested 2026-10-30).
+- [x] `feature/macos-panels-in-viewer`: Settings and File ▸ New Tab open inside the viewer, not as separate apps (reported 2026-10-30; tested 2026-10-30): one Dock icon and ⌘-Tab entry; New Tab's connection window is a sheet on the front tab; Settings is a window of the viewer and ⌘, brings an open one forward; Edit ▸ Paste works in both. The connection window at launch (no viewer yet) is still its own process.
+- [ ] `feature/macos-panels-in-viewer`: File ▸ New Tab is a sheet over a tab with no live session (connecting, failed or dropped), else its own window (connected tab, or no tab) — corrected 2026-10-31.
+- [ ] `feature/macos-panels-in-viewer`: Settings ▸ Connect, or double-clicking a machine, opens it in a new tab (viewer only).
+- [ ] `feature/macos-panels-in-viewer`: Gliff ▸ About Gliff shows the version and build (commit, `-dirty`, arch).
+- [ ] `feature/macos-panels-in-viewer`: Settings ▸ General ▸ Quit Gliff when its last window closes (`quit_on_last_window`, default off). Off: last tab closed, Gliff stays open; ⌘T or the Dock icon opens the connection window; the Machine menu is greyed out. On: closing the last tab quits and the machine reopens at the next launch.
 - [ ] Linux settings window: show `auto_reconnect`.
 - [x] Discovery on the Mac (resolved 2026-10-30): the hosts were not running the `gliff-discovery` user service. `gliff-enable-discovery` on each host fixes it; the package now says so after install, and docs/macos.md leads with it.
 - [ ] An iOS/iPadOS client: plan, effort and open decisions in [docs/ios-ipados-plan.md](docs/ios-ipados-plan.md) (Phase 0 spike first).
@@ -182,6 +188,18 @@ Support today:
 ## Log
 
 Newest first. Format: `### YYYY-MM-DD — summary (commit)`, then a line or two.
+
+### 2026-10-31 — `feature/macos-panels-in-viewer`: automated checks pass on the Mac
+`scripts/check.sh` (fmt, clippy, tests, native checks) and `scripts/macos-picker-check.py` pass (after `91d146b`, clippy `while_let_loop`). Hand tests pending: New Tab sheet/window, About, Quit on last window, Connect from Settings.
+
+### 2026-10-31 — New Tab rule corrected; Connect from Settings (`feature/macos-panels-in-viewer`)
+New Tab's sheet/window rule inverted as requested: a sheet over a tab without a live session; a window over a connected tab or with no tab. Settings gains Connect (and double-click on a machine), sent as the app event `connect_machine`; the client opens a new tab with the machine's settings.
+
+### 2026-10-31 — New Tab sheet or window; About Gliff; Quit on last window (`feature/macos-panels-in-viewer`)
+Panels and list resizing tested on the Mac. New Tab: a sheet only over a tab showing a connected machine, else its own window. About Gliff in every Gliff menu (version from the client; build ID from build.rs: commit, `-dirty`, arch, or `GLIFF_BUILD_ID`). New app-wide setting `quit_on_last_window` (gliff-settings `Store`, default off) in Settings ▸ General; the client sends it to the viewer (`app_settings`); off keeps Gliff open with no windows (Dock icon or ⌘T reopens the connection window). `check.sh` now stops early on a Rust older than `rust-version`.
+
+### 2026-10-30 — Connection and settings windows inside the viewer; list resizing (`feature/macos-panels-in-viewer`)
+New `panel.rs`: the connection ("choose") and settings windows open in the running viewer (`open_panel`, routed by window id like tabs) and fall back to their own helper process when no viewer runs. Swift: `PanelWindow`; the picker and settings window split into build/handle so both modes share them; New Tab's picker is a sheet; viewer gains an Edit menu. Picker layout: the nearby list hugs least and its height is a minimum, so it takes a taller window's height. `scripts/macos-picker-check.py` checks both (LAYOUT, PANELS). Not compiled here (no Swift, no crates.io): run `scripts/check.sh` and the picker check.
 
 ### 2026-10-30 — Tabs caption clarified
 The screenshot shows two tabs; the caption now says any number of tabs (connections) is supported.

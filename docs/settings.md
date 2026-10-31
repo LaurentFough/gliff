@@ -26,7 +26,8 @@ Layers, last wins:
 `crates/gliff-settings/src/store.rs` (`Store`) reads and writes the file for
 the macOS client. It owns `machines`, `[defaults]`, `[overrides]` and the
 top-level `muted` (the sound switch: the Linux header's speaker button and the
-Mac's Machine ▸ Play Sound, written only when sound is off), and writes every
+Mac's Machine ▸ Play Sound, written only when sound is off) and the
+Mac-only `quit_on_last_window` (Settings ▸ General; written only when on), and writes every
 other key back untouched, so the Linux client's `open` and `shown` survive a
 Mac save. The Linux client keeps its own `recent::Config` for the same file.
 

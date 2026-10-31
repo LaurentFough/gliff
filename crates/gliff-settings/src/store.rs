@@ -1,11 +1,12 @@
 //! The config file both clients share: `$XDG_CONFIG_HOME/gliff/config.toml`,
 //! else `~/.config/gliff/config.toml`.
 //!
-//! [`Store`] owns five keys: `machines` (the machines this client has
+//! [`Store`] owns six keys: `machines` (the machines this client has
 //! connected to, oldest first), `[defaults]`, `[overrides."user@host"]`,
-//! `muted` (the sound switch, shared with the Linux client's header button)
-//! and `[[open_tabs]]` (the Mac's tabs to reopen at launch, `host` + `port`;
-//! the Linux client keeps its own `open` list).
+//! `muted` (the sound switch, shared with the Linux client's header button),
+//! `[[open_tabs]]` (the Mac's tabs to reopen at launch, `host` + `port`;
+//! the Linux client keeps its own `open` list) and `quit_on_last_window`
+//! (the Mac app quits when its last window closes; absent means off).
 //! Everything else in the file (the Linux client's `open` and `shown`, or
 //! keys from a newer build) is read and written back untouched, so either
 //! client can save without losing the other's state.
@@ -30,6 +31,8 @@ const OVERRIDES: &str = "overrides";
 /// sound is off.
 const MUTED: &str = "muted";
 const OPEN_TABS: &str = "open_tabs";
+/// Top-level, Mac only: present and true only when on.
+const QUIT_ON_LAST_WINDOW: &str = "quit_on_last_window";
 
 /// The parsed config file and where it lives.
 #[derive(Debug, Clone)]
@@ -261,6 +264,25 @@ impl Store {
         }
     }
 
+    /// The Mac app quits when its last window closes
+    /// (`quit_on_last_window = true`); off by default.
+    pub fn quit_on_last_window(&self) -> bool {
+        self.doc
+            .get(QUIT_ON_LAST_WINDOW)
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    }
+
+    /// Switch it on or off; off removes the key.
+    pub fn set_quit_on_last_window(&mut self, on: bool) {
+        if on {
+            self.doc
+                .insert(QUIT_ON_LAST_WINDOW.into(), Value::Boolean(true));
+        } else {
+            self.doc.remove(QUIT_ON_LAST_WINDOW);
+        }
+    }
+
     /// The Mac's tabs to reopen, in order: (SSH address, port). Malformed
     /// entries are skipped.
     pub fn open_tabs(&self) -> Vec<(String, u16)> {
@@ -454,6 +476,21 @@ mod tests {
         assert_eq!(s.defaults(), Settings::default());
         assert_eq!(s.machine("m@h"), Settings::default());
         assert!(Store::parse("not toml [").is_err());
+    }
+
+    #[test]
+    fn quit_on_last_window_is_off_unless_set() {
+        let mut s = store("shown = \"a@b\"\n");
+        assert!(!s.quit_on_last_window(), "off by default");
+        s.set_quit_on_last_window(true);
+        assert!(s.quit_on_last_window());
+        s.set_quit_on_last_window(false);
+        assert!(
+            !s.doc.contains_key(QUIT_ON_LAST_WINDOW),
+            "off leaves no key"
+        );
+        assert_eq!(s.doc.get("shown").and_then(Value::as_str), Some("a@b"));
+        assert!(!store("quit_on_last_window = 1\n").quit_on_last_window());
     }
 
     #[test]
