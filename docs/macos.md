@@ -86,6 +86,16 @@ opening another.
 | Server command | The command started over SSH, e.g. `gliff-server --low-bandwidth` | reconnects the machine |
 | General ▸ Quit Gliff when its last window closes | For the app, not a machine (`quit_on_last_window`, default off). Off: closing the last tab leaves Gliff running with no windows; File ▸ New Tab (⌘T) or clicking the Dock icon opens the connection window. On: closing the last tab quits, and that machine reopens at the next launch | at once |
 
+**Command line** shows what the selected machine's settings come to, each
+with Copy: the client (`RUST_LOG=info gliff --headless … user@host`, to open
+it from a terminal with its connection log) and the server over ssh (the
+exact `ssh … -- user@host '… gliff-server --stdio …'` Gliff runs, to debug the
+connection by hand: the server speaks Gliff's binary protocol on stdout, so
+read its errors on stderr and press Ctrl+C). All Machines shows them for
+`user@host`. The client line spells out every option that has a flag
+(`--headless`, `--no-clipboard`, `--video`, `--server-bin`,
+`--mute-host-speakers`, the last new in this fork).
+
 **Connect** (or double-clicking a machine in the list) opens that machine in
 a new tab, with its saved settings. It is shown while the viewer is open;
 the connection window at launch has its own Connect.

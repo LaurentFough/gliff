@@ -43,6 +43,7 @@ This fork ([LaurentFough/gliff](https://github.com/LaurentFough/gliff)) builds o
 - **Makefile**: one front end for `bin/` and `scripts/`. `make macos` builds, signs, installs and verifies; `make install` on Arch; also `make check`, `make video-check` and `make distclean`; a project-wide `.gitignore`.
 - **Build once, install on other Macs**: `make install` skips an unchanged build (a build ID in the app); `make install-package` installs a ZIP from another Mac and re-signs it locally; `make release-upload` / `make install-release` carry it through GitHub Releases. Apple Silicon. *(Tested.)*
 - **Build once, install on other Arch/Omarchy machines**: the same `make package` / `install-package` / `release-upload` / `install-release` with a pacman package (`PKG=`, `linux-COMMIT` releases); `make install` skips an unchanged build. *(Tested.)*
+- **Command line in Settings**: each machine's client command (`RUST_LOG=info gliff [flags] user@host`) and the exact ssh server command, with Copy, in both clients' Settings, for running or debugging a connection from a terminal; new `--mute-host-speakers` flag. *(New; testing pending.)*
 - **Releases built by CI**: `make release-ci` runs the fork's "Fork builds" workflow on GitHub Actions for the pushed branch (checks, Mac ZIPs for Apple Silicon and Intel, the Arch package) and publishes one `build-COMMIT` pre-release that `make install-release` finds on either system. *(New; testing pending.)*
 - **Checks**: `make video-check` checks GPU output against the CPU decoder and benchmarks both; the ssh login-shell test no longer depends on your shell setup.
 - **Fixes**: Mac install and signing (`plutil`, a custom cargo `target-dir`); the client ignores stray sound packets from a host.
@@ -478,6 +479,11 @@ gliff 0.4.1).
   it. `make video-check` checks the output and compares decode times (4K
   4:4:4: 6.9 ms GPU against 18.8 ms CPU). See
   [macOS support](docs/macos.md).
+- **Command line in Settings.** Both settings windows show what the selected
+  machine's settings come to on the command line, with Copy: the client
+  (`RUST_LOG=info gliff [flags] user@host`) and the exact ssh command that
+  starts its server, to debug a connection by hand. Both clients gain
+  `--mute-host-speakers`, so the client line can spell out every option.
 - **Host speakers muted while streaming.** `gliff-server --mute-local-audio`,
   switched per machine with the shared `mute_host_speakers` setting (Settings
   on both clients, default off), mutes the Linux host's default output while

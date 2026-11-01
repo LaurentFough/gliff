@@ -204,6 +204,7 @@ pub fn cli_layer(
     no_clipboard: bool,
     server_bin: &str,
     video: Option<&str>,
+    mute_host_speakers: bool,
 ) -> Settings {
     Settings {
         screen: headless.then_some(Screen::Own),
@@ -216,8 +217,35 @@ pub fn cli_layer(
         server_bin: (server_bin.trim() != DEFAULT_SERVER_BIN && !server_bin.trim().is_empty())
             .then(|| server_bin.trim().to_string()),
         auto_reconnect: None,
-        mute_host_speakers: None,
+        mute_host_speakers: mute_host_speakers.then_some(true),
     }
+}
+
+/// The server's arguments for a Mac session (after `--stdio`): `--output`
+/// names a screen and beats the settings; else a private screen, or the
+/// focused one (no flag); then the options' flags (Host speakers).
+pub fn server_args(opts: &Resolved, output: Option<&str>) -> Vec<String> {
+    let mut args = Vec::new();
+    match output {
+        Some(name) => args.extend(["--output".to_string(), name.to_string()]),
+        None if opts.screen == Screen::Own => args.push("--headless".to_string()),
+        None => {}
+    }
+    args.extend(opts.server_flags());
+    args
+}
+
+/// What a machine's settings come to on the command line, for Settings to
+/// show and copy: the client (`gliff …`, with its logs) and the ssh command
+/// that starts its server (to debug the connection by hand).
+pub fn command_lines(name: &str, opts: &Resolved) -> Value {
+    let mut target = gliff_transport::SshTarget::new(name.to_string());
+    target.server_bin = opts.server_bin.clone();
+    target.server_args = server_args(opts, None);
+    json!({
+        "client": gliff_settings::command::client_line("gliff", name, None, opts),
+        "server": gliff_transport::ssh_command_line(&target),
+    })
 }
 
 /// The settings key for a connection: the SSH address as typed. The port
@@ -269,7 +297,10 @@ pub fn state_json(store: &Store) -> Value {
     let machines: Vec<Value> = store
         .machines()
         .into_iter()
-        .map(|name| json!({"name": name, "settings": layer_json(&store.machine(&name))}))
+        .map(|name| {
+            let commands = command_lines(&name, &store.resolve(&name, &Settings::default()));
+            json!({"name": name, "settings": layer_json(&store.machine(&name)), "commands": commands})
+        })
         .collect();
     json!({
         "type": "settings_state",
@@ -282,6 +313,8 @@ pub fn state_json(store: &Store) -> Value {
             "mute_host_speakers": builtin.mute_host_speakers,
         },
         "defaults": layer_json(&store.defaults()),
+        //= All Machines: what a new machine would run, for a placeholder address.
+        "defaults_commands": command_lines("user@host", &store.resolve("", &Settings::default())),
         "machines": machines,
         //= Settings ▸ General: options for the app, not a machine.
         "app": {"quit_on_last_window": store.quit_on_last_window()},
@@ -510,18 +543,19 @@ mod tests {
     #[test]
     fn the_command_line_layer_sets_only_what_was_given() {
         assert_eq!(
-            cli_layer(false, false, "gliff-server", None),
+            cli_layer(false, false, "gliff-server", None, false),
             Settings::default()
         );
         assert_eq!(
-            cli_layer(false, false, "gliff-server", Some("cpu")).decode,
+            cli_layer(false, false, "gliff-server", Some("cpu"), false).decode,
             Some(Video::Cpu)
         );
-        let s = cli_layer(true, true, " env X=1 gliff-server ", Some("gpu"));
+        let s = cli_layer(true, true, " env X=1 gliff-server ", Some("gpu"), true);
         assert_eq!(s.decode, Some(Video::Gpu));
         assert_eq!(s.screen, Some(Screen::Own));
         assert_eq!(s.clipboard, Some(false));
         assert_eq!(s.server_bin.as_deref(), Some("env X=1 gliff-server"));
+        assert_eq!(s.mute_host_speakers, Some(true));
     }
 
     #[test]
@@ -709,6 +743,39 @@ mod tests {
             !shared
                 .resolve("m@h", &Settings::default())
                 .mute_host_speakers
+        );
+    }
+
+    #[test]
+    fn settings_show_the_command_lines_a_machine_comes_to() {
+        let shared = shared();
+        shared.edit(Some("me@box"), |s| {
+            s.screen = Some(Screen::Own);
+            s.mute_host_speakers = Some(true);
+        });
+        let state = shared.state();
+        let m = &state["machines"][0];
+        assert_eq!(m["name"], "me@box");
+        assert_eq!(
+            m["commands"]["client"],
+            "RUST_LOG=info gliff --headless --mute-host-speakers me@box"
+        );
+        let server = m["commands"]["server"].as_str().unwrap();
+        assert!(server.starts_with("ssh -T "), "{server}");
+        assert!(
+            server.contains(" -- me@box ")
+                && server.contains("--headless")
+                && server.contains("--mute-local-audio"),
+            "{server}"
+        );
+        assert_eq!(
+            state["defaults_commands"]["client"],
+            "RUST_LOG=info gliff user@host"
+        );
+        let r = shared.resolve("me@box", &Settings::default());
+        assert_eq!(
+            server_args(&r, Some("display-1")),
+            ["--output", "display-1", "--mute-local-audio"]
         );
     }
 }

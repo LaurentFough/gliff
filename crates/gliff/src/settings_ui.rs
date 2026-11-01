@@ -14,11 +14,25 @@ use libadwaita as adw;
 use crate::recent::Config;
 use crate::settings::{Field, Resolved, Screen, Settings, Video};
 
+/// What a machine's settings come to on the command line (the Command line
+/// group shows and copies them).
+pub struct Commands {
+    /// `gliff …` with its flags, to open the machine from a terminal.
+    pub client: String,
+    /// The ssh command that starts its server, to debug the connection.
+    pub server: String,
+}
+
+/// Builds the command lines for a machine (or `user@host`) and its options.
+pub type CommandsFn = Rc<dyn Fn(&str, &Resolved) -> Commands>;
+
 /// What the window needs from the app.
 pub struct Env {
     pub config_path: PathBuf,
     /// What the command line sets for every machine.
     pub cli: Settings,
+    /// The command lines for a machine (or `user@host`) and its options.
+    pub commands: CommandsFn,
     /// Called after a change is saved, for the app to apply it.
     pub changed: Rc<dyn Fn()>,
 }
@@ -57,6 +71,8 @@ struct View {
     scroller: gtk::ScrolledWindow,
     reset_all: gtk::Button,
     rows: RefCell<Vec<RowRef>>,
+    /// The Command line group's rows: client, then server.
+    command_rows: RefCell<Vec<adw::ActionRow>>,
     /// Set while a row is brought in line, so that does not count as an edit.
     syncing: Cell<bool>,
 }
@@ -105,6 +121,7 @@ fn build(env: Rc<Env>, machine: Option<String>) -> (Rc<View>, adw::Dialog) {
         scroller: scroller.clone(),
         reset_all: reset_all.clone(),
         rows: RefCell::new(Vec::new()),
+        command_rows: RefCell::new(Vec::new()),
         syncing: Cell::new(false),
     });
 
@@ -343,6 +360,19 @@ impl View {
             (row.sync)(&resolved, discard_edits);
         }
         self.syncing.set(false);
+        let machine = match &*self.scope.borrow() {
+            Scope::Machine(m) => m.clone(),
+            Scope::Defaults => "user@host".to_string(),
+        };
+        let lines = (self.env.commands)(&machine, &resolved);
+        for (row, text) in self
+            .command_rows
+            .borrow()
+            .iter()
+            .zip([&lines.client, &lines.server])
+        {
+            row.set_subtitle(text);
+        }
         self.reset_all.set_sensitive(!layer.is_empty());
         self.reset_all.set_label(if defaults_scope {
             "Reset all to built-in"
@@ -383,6 +413,7 @@ impl View {
 
     fn build_page(self: &Rc<Self>) {
         self.rows.borrow_mut().clear();
+        self.command_rows.borrow_mut().clear();
         let page = adw::PreferencesPage::new();
 
         // A machine says what it follows and how to change that.
@@ -476,6 +507,40 @@ impl View {
             |s, v| s.server_bin = Some(v),
         );
         page.add(&connection);
+
+        //= What these settings come to on the command line, to run or debug
+        //= the machine from a terminal; refresh() fills them in.
+        let commands = group(
+            "Command line",
+            Some("The server line speaks Gliff's protocol on stdout: read its errors on stderr, then Ctrl+C"),
+        );
+        for title in [
+            "Client, from a terminal (logs there)",
+            "Server over ssh, to debug the connection",
+        ] {
+            let row = adw::ActionRow::builder()
+                .title(title)
+                .use_markup(false)
+                .subtitle_selectable(true)
+                .css_classes(["property"])
+                .build();
+            let copy = gtk::Button::builder()
+                .icon_name("edit-copy-symbolic")
+                .tooltip_text("Copy")
+                .valign(gtk::Align::Center)
+                .css_classes(["flat"])
+                .build();
+            let weak = row.downgrade();
+            copy.connect_clicked(move |button| {
+                if let Some(text) = weak.upgrade().and_then(|r| r.subtitle()) {
+                    button.clipboard().set_text(&text);
+                }
+            });
+            row.add_suffix(&copy);
+            commands.add(&row);
+            self.command_rows.borrow_mut().push(row);
+        }
+        page.add(&commands);
 
         self.scroller.set_child(Some(&page));
         self.filter();
@@ -715,6 +780,10 @@ mod tests {
         Rc::new(Env {
             config_path: dir.join("config.toml"),
             cli: Settings::default(),
+            commands: Rc::new(|machine: &str, _: &Resolved| Commands {
+                client: format!("gliff {machine}"),
+                server: format!("ssh -- {machine}"),
+            }),
             changed: Rc::new(|| {}),
         })
     }

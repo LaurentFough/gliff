@@ -2,6 +2,7 @@
 //!
 //! - [`model`]: the options, how the layers stack, and what a session runs
 //!   with ([`Settings`], [`Resolved`]). See `docs/settings.md`.
+//! - [`command`]: the client command line a machine's settings come to.
 //! - [`store`]: reading and writing `~/.config/gliff/config.toml` without
 //!   disturbing the keys a client does not own.
 //!
@@ -10,6 +11,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod command;
 pub mod model;
 pub mod store;
 
