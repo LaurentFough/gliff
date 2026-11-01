@@ -155,11 +155,11 @@ Support today:
 
 | Host → client | Sound |
 |---|---|
-| Linux → Linux | Yes (#80) |
+| Linux → Linux | Yes (#80; tested on the working branch 2026-10-31) |
 | Linux → Mac | Yes (tested 2026-10-29), including `--mute-local-audio` |
 | Mac → any | No: the Mac host does not send sound yet |
 
-- [ ] Linux host → Linux client with sound, on the merged working branch.
+- [x] Linux host → Linux client with sound, on the merged working branch (tested 2026-10-31).
 
 ### Deferred testing
 
@@ -225,6 +225,9 @@ Support today:
 ## Log
 
 Newest first. Format: `### YYYY-MM-DD — summary (commit)`, then a line or two.
+
+### 2026-11-01 — Linux → Linux sound tested
+Sound from a Linux host to a Linux client works on the working branch. README / ForkNews status updated.
 
 ### 2026-11-01 — Linux: #98 settings and auto-reconnect tested
 #98's settings window on the Linux client, and `auto_reconnect = false` on Linux (not reopened, not retried), confirmed working. README / ForkNews status updated.

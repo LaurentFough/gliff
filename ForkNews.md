@@ -83,7 +83,7 @@ The new features are outlined in red.
 | Mac: Settings and New Tab in the viewer, Connect from Settings | Tested (2026-10-31) |
 | Mac: quit on last window, About Gliff | Tested (2026-10-31) |
 | Mac discovery (Bonjour) | Tested (2026-10-30); the host must run `gliff-discovery` (`gliff-enable-discovery`) |
-| Linux host → Linux client sound | Not retested on the merged branch |
+| Linux host → Linux client sound | Tested (2026-10-31) |
 | Sound from a Mac host | Not built yet |
 
 Feedback and issues welcome on the fork.
