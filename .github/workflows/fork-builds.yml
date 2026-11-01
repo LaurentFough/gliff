@@ -1,0 +1,137 @@
+#= ==========================================================================
+#= fork-builds.yml — build-once packages for LaurentFough/gliff, on demand
+#= Version: 1.0.0
+#=
+#= Runs only when started (Actions ▸ Fork builds ▸ Run workflow, or
+#= `make release-ci`, which uses `gh workflow run`). For the chosen branch it:
+#=   1. runs scripts/check.sh and packages the Mac app (Apple Silicon, and
+#=      Intel unless turned off): bin/package-macos --development, an ad-hoc
+#=      signed ZIP the receiving Mac re-signs (bin/install-macos-package);
+#=   2. runs the checks (fmt, clippy, tests) and builds the Arch package in an Arch
+#=      container: bin/package-linux, as a non-root user (makepkg refuses root);
+#=   3. publishes one pre-release, tag build-COMMIT12, with every package and
+#=      its .sha256. `make install-release` finds it on either system.
+#= Upstream's ci.yml (push to main, v* tags, Developer ID releases) is left
+#= as it is.
+#= Ref: https://docs.github.com/actions/using-workflows/events-that-trigger-workflows#workflow_dispatch
+#= ==========================================================================
+name: Fork builds
+
+on:
+  workflow_dispatch:
+    inputs:
+      intel:
+        description: "Also build the Intel Mac ZIP (not tested on a Mac yet)"
+        type: boolean
+        default: true
+      checks:
+        description: "Run scripts/check.sh before packaging"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fork-builds-${{ github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  macos:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: ${{ fromJSON(inputs.intel && '["macos-15","macos-15-intel"]' || '["macos-15"]') }}
+    runs-on: ${{ matrix.runner }}
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "13.0"
+    steps:
+      - uses: actions/checkout@v7
+      - name: Checks
+        if: inputs.checks
+        run: scripts/check.sh
+      - name: Package (ad-hoc signed; re-signed on install)
+        run: bin/package-macos --development
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gliff-macos-${{ runner.arch }}
+          path: |
+            target/macos/*.zip
+            target/macos/*.sha256
+          if-no-files-found: error
+
+  arch:
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    steps:
+      #= git before checkout, so the checkout keeps .git (the build ID needs it).
+      - name: Tools
+        run: pacman -Syu --noconfirm --needed git sudo python
+      - uses: actions/checkout@v7
+      - name: Build user and dependencies
+        shell: bash
+        run: |
+          #= makepkg refuses to run as root: a build user with passwordless
+          #= sudo for pacman (makepkg -s installs the build dependencies).
+          useradd -m builder
+          echo 'builder ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/builder
+          git config --system --add safe.directory '*'
+          chown -R builder: "$GITHUB_WORKSPACE"
+          #= The PKGBUILD's dependencies, for the checks (makepkg would
+          #= install them later anyway).
+          startdir="$GITHUB_WORKSPACE/pkgbuild"
+          # shellcheck disable=SC1091
+          . pkgbuild/PKGBUILD
+          pacman -S --noconfirm --needed "${depends[@]}" "${makedepends[@]}"
+      - name: "Checks, as upstream CI (fmt, clippy, tests)"
+        if: inputs.checks
+        run: |
+          sudo -u builder env HOME=/home/builder sh -c '
+            cargo fmt --all --check &&
+            cargo clippy --workspace --all-targets --locked -- -D warnings &&
+            cargo test --workspace --locked'
+      - name: Package
+        run: sudo -u builder env HOME=/home/builder bin/package-linux
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gliff-linux-x86_64
+          path: |
+            target/linux/*.pkg.tar.*
+          if-no-files-found: error
+
+  release:
+    needs: [macos, arch]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: gliff-*
+          path: dist
+          merge-multiple: true
+      - name: Publish build-COMMIT
+        shell: bash
+        run: |
+          set -euo pipefail
+          ls -l dist
+          tag="build-${GITHUB_SHA::12}"
+          notes="Gliff build ${GITHUB_SHA::12} from \`${GITHUB_REF_NAME}\`, built by CI ([run](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID})).
+
+          Development packages: the Mac ZIPs are ad-hoc signed and not notarized (the installer re-signs them with the receiving Mac's identity); the Arch package is unsigned. Check the SHA-256 files.
+
+          Install from a checkout of the fork:
+
+              make install-release TAG=${tag}
+
+          (Mac: Apple Silicon, or Intel if included; Arch Linux / Omarchy: x86_64.)"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" dist/* --clobber
+          else
+            gh release create "$tag" dist/* --target "$GITHUB_SHA" --prerelease \
+              --title "Gliff build ${GITHUB_SHA::12}" --notes "$notes"
+          fi
+          echo "Published $tag" >> "$GITHUB_STEP_SUMMARY"

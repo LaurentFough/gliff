@@ -198,7 +198,7 @@ Support today:
 - [x] #3 (tested and merged 2026-10-31): build-once installs on `feature/macos-install-reuse` (`make install` twice, the second skips; a change then `make install` rebuilds; About Gliff shows the same build ID as `GliffBuildID`; `make package` → `make install-package` on a second Mac; `make release-upload` → `make install-release`), then merge.
 - [ ] Intel Macs: a universal (arm64 + x86_64) package, or per-architecture releases. Deferred (2026-10-31): no Intel Mac on macOS to test with (the Intel Mac runs Omarchy, so it is covered by the Linux packages).
 - [x] Linux prebuilt packages (tested and merged 2026-10-31): `make package` on an Arch/Omarchy machine; `make install` twice (the second skips); `make install-package PKG=…` on a second machine; `make release-upload` → `make install-release`.
-- [ ] Releases from CI: attach the macOS runners' packages to `macos-*` releases instead of building locally.
+- [ ] Releases built by CI, on `feature/ci-releases` (testing pending): `make release-ci` → the "Fork builds" run passes (macOS arm64 + Intel, Arch) → release `build-COMMIT` with all packages and checksums → `make install-release` on a Mac and on Arch/Omarchy.
 
 ### Ideas (not decided)
 
@@ -225,6 +225,9 @@ Support today:
 ## Log
 
 Newest first. Format: `### YYYY-MM-DD — summary (commit)`, then a line or two.
+
+### 2026-11-01 — Releases built by CI (`feature/ci-releases`)
+`.github/workflows/fork-builds.yml` (manual: Actions ▸ Fork builds, or `make release-ci`): checks and `bin/package-macos --development` on macos-15 and macos-15-intel; checks and `bin/package-linux` in an Arch container as a non-root build user; one pre-release `build-COMMIT12` with every package and `.sha256`. `bin/release-ci` (dispatch, find the run, watch it; refuses a dirty or unpushed branch); `install-*-release` also pick `build-*` releases; Makefile 0.6.0 `release-ci`. Upstream's `ci.yml` untouched. Workflow YAML and shell syntax checked here; not run yet.
 
 ### 2026-10-31 — Merge `feature/linux-packages` (build once, install on other Arch/Omarchy machines)
 Tested on Arch/Omarchy: `make install` (and the skip on a second run, through doas), `make package`, `make install-package`, releases. No-fast-forward merge; README / ForkNews marked tested.

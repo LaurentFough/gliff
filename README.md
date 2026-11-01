@@ -43,6 +43,7 @@ This fork ([LaurentFough/gliff](https://github.com/LaurentFough/gliff)) builds o
 - **Makefile**: one front end for `bin/` and `scripts/`. `make macos` builds, signs, installs and verifies; `make install` on Arch; also `make check`, `make video-check` and `make distclean`; a project-wide `.gitignore`.
 - **Build once, install on other Macs**: `make install` skips an unchanged build (a build ID in the app); `make install-package` installs a ZIP from another Mac and re-signs it locally; `make release-upload` / `make install-release` carry it through GitHub Releases. Apple Silicon. *(Tested.)*
 - **Build once, install on other Arch/Omarchy machines**: the same `make package` / `install-package` / `release-upload` / `install-release` with a pacman package (`PKG=`, `linux-COMMIT` releases); `make install` skips an unchanged build. *(Tested.)*
+- **Releases built by CI**: `make release-ci` runs the fork's "Fork builds" workflow on GitHub Actions for the pushed branch (checks, Mac ZIPs for Apple Silicon and Intel, the Arch package) and publishes one `build-COMMIT` pre-release that `make install-release` finds on either system. *(New; testing pending.)*
 - **Checks**: `make video-check` checks GPU output against the CPU decoder and benchmarks both; the ssh login-shell test no longer depends on your shell setup.
 - **Fixes**: Mac install and signing (`plutil`, a custom cargo `target-dir`); the client ignores stray sound packets from a host.
 - **Planned**: an iOS/iPadOS client; see [docs/feature-future/ios-ipados-plan.md](docs/feature-future/ios-ipados-plan.md). Several clients on one desktop (hardening, view-only, a shared stream); see [docs/feature-future/multi-client-plan.md](docs/feature-future/multi-client-plan.md).
@@ -244,6 +245,15 @@ pre-releases tagged `linux-COMMIT`, next to the Mac's `macos-COMMIT`
 `gh release delete linux-COMMIT --cleanup-tag`). Afterwards, run
 `gliff-enable-discovery` on a host that should be found on the LAN.
 
+**Or let GitHub build them.** `make release-ci` (from any machine with `gh`)
+starts the fork's "Fork builds" workflow for the current branch, once it is
+committed and pushed: it runs the checks, builds the Mac ZIPs (Apple Silicon
+and Intel) and the Arch package, and publishes them together as a
+pre-release `build-COMMIT`. `make install-release` on a Mac or an
+Arch/Omarchy machine then picks the newest `build-*` (or `macos-*` /
+`linux-*`) release. The workflow can also be started from the Actions tab
+(Fork builds ▸ Run workflow).
+
 To build from source, see [docs/development.md](docs/development.md).
 
 ### Make targets
@@ -273,6 +283,7 @@ exit status.
 | `make install-package` | installs a `make package` file from another machine (`ZIP=` on macOS, re-signed locally; `PKG=` on Arch, `pacman -U`): checks the SHA-256 (`FORCE=1`) |
 | `make release-upload` | publishes this commit's package as a GitHub release, `macos-COMMIT` or `linux-COMMIT` (`TAG=`, `ZIP=`/`PKG=`, `REPO=`; needs `gh`) |
 | `make install-release` | downloads and installs the newest release for this system (`TAG=`, `REPO=`, `FORCE=1`) |
+| `make release-ci` | builds every package on GitHub Actions (Mac Apple Silicon and Intel, Arch x86_64) for the current pushed branch and publishes them as one pre-release `build-COMMIT` (`BRANCH=`, `INTEL=0`, `CHECKS=0`, `WATCH=0`; needs `gh`) |
 | `make package-release` | `bin/package-macos`: Developer ID, notarized (`GLIFF_NOTARY_PROFILE`) |
 | `make icon` | `bin/export-macos-icon` |
 | `make dev` / `make install-dev` | `bin/dev` / `bin/install-dev` (Linux) |

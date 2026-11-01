@@ -180,7 +180,12 @@ Notes:
   Both show the same ID.
 - **Removing a release** you no longer want (they are public on the fork):
   `gh release delete macos-COMMIT --cleanup-tag --repo LaurentFough/gliff`.
-- **Apple Silicon only** for now; Intel Macs are on the backlog.
+- **Apple Silicon only** for now; Intel Macs are on the backlog. CI
+  (`make release-ci`, the "Fork builds" workflow) also builds an Intel ZIP,
+  not yet tested on an Intel Mac.
+- **Built by CI:** `make release-ci` builds and publishes every package as
+  `build-COMMIT` on GitHub's runners, so no Mac has to build;
+  `make install-release` finds those releases too.
 
 ## Mac packages and release signing
 

@@ -2,10 +2,11 @@
 #= Download an Arch package published by bin/release-linux and install it
 #= with bin/install-linux-package (checksum, name, architecture, pacman -U).
 #= Usage: bin/install-linux-release [--force] [TAG]
-#= Without TAG: the newest release whose tag starts with linux- (needs the
+#= Without TAG: the newest release whose tag starts with linux- or build-
+#= (CI, .github/workflows/fork-builds.yml) (needs the
 #= GitHub CLI). With TAG, plain curl works too, for public repositories.
 #= Repository: GLIFF_RELEASE_REPO (default LaurentFough/gliff).
-#= Version: 1.0.0
+#= Version: 1.1.0
 set -eu
 ROOT="$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)"
 . "$ROOT/bin/lib/linux-install.sh"
@@ -30,7 +31,7 @@ GLIFF_GLOB="gliff-*-linux-$GLIFF_ARCH-*.pkg.tar.*"
 if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
     if [ -z "$GLIFF_TAG" ]; then
         GLIFF_TAG=$(gh release list --repo "$GLIFF_RELEASE_REPO" --limit 50 --json tagName \
-            --jq '[.[] | select(.tagName | startswith("linux-"))][0].tagName // empty')
+            --jq '[.[] | select((.tagName | startswith("linux-")) or (.tagName | startswith("build-")))][0].tagName // empty')
         [ -n "$GLIFF_TAG" ] || { gliff_log err "no linux- release on $GLIFF_RELEASE_REPO yet (make release-upload on the build machine)"; exit 1; }
     fi
     gliff_log info "downloading $GLIFF_TAG from $GLIFF_RELEASE_REPO"
