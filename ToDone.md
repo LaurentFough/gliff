@@ -172,7 +172,7 @@ Support today:
 ### Follow-ups
 
 - [ ] A decode (GPU/CPU) option in the Mac settings window (config-only for now).
-- [ ] Host speakers setting, on `feature/settings-reconnect-speakers` (testing pending): shared `mute_host_speakers` (default off) adds `--mute-local-audio`; Linux Settings ▸ Sound, Mac Settings ▸ Host speakers; a change reconnects.
+- [x] Host speakers setting (tested and merged 2026-11-01): shared `mute_host_speakers` (default off) adds `--mute-local-audio`; Linux Settings ▸ Sound, Mac Settings ▸ Host speakers; a change reconnects.
 - [ ] Sound from a Mac host (ScreenCaptureKit audio capture + #80's Opus encoder).
 - [ ] A warning when "Private screen" is chosen with a Mac host.
 - [x] Tabs on the Mac: merged 2026-10-29 (one viewer process for every connection); several connections in tabs tested 2026-10-30; the rest under Deferred testing.
@@ -188,7 +188,7 @@ Support today:
 - [x] `feature/macos-panels-in-viewer`: Settings ▸ Connect, or double-clicking a machine, opens it in a new tab (viewer only).
 - [x] `feature/macos-panels-in-viewer`: Gliff ▸ About Gliff shows the version and build (commit, `-dirty`, arch).
 - [x] `feature/macos-panels-in-viewer`: Settings ▸ General ▸ Quit Gliff when its last window closes (`quit_on_last_window`, default off). Off: last tab closed, Gliff stays open; ⌘T or the Dock icon opens the connection window; the Machine menu is greyed out. On: closing the last tab quits and the machine reopens at the next launch.
-- [ ] Linux settings window shows `auto_reconnect` (Settings ▸ Reconnect), on `feature/settings-reconnect-speakers` (testing pending).
+- [x] Linux settings window shows `auto_reconnect` (Settings ▸ Reconnect) (tested and merged 2026-11-01).
 - [x] Discovery on the Mac (resolved 2026-10-30): the hosts were not running the `gliff-discovery` user service. `gliff-enable-discovery` on each host fixes it; the package now says so after install, and docs/macos.md leads with it.
 - [ ] An iOS/iPadOS client: plan, effort and open decisions in [docs/feature-future/ios-ipados-plan.md](docs/feature-future/ios-ipados-plan.md) (Phase 0 spike first).
 - [ ] Several clients on one desktop: plan, levels and open decisions in [docs/feature-future/multi-client-plan.md](docs/feature-future/multi-client-plan.md) (Level 0 test first; for later).
@@ -225,6 +225,9 @@ Support today:
 ## Log
 
 Newest first. Format: `### YYYY-MM-DD — summary (commit)`, then a line or two.
+
+### 2026-11-01 — Merge `feature/settings-reconnect-speakers`
+Tested on Linux and the Mac: the Reconnect switch in the Linux settings window, and Host speakers on both clients. Includes the Linux clippy fixes (also cherry-picked earlier as `7648e09`).
 
 ### 2026-11-01 — Auto-reconnect in the Linux settings window; Host speakers setting (`feature/settings-reconnect-speakers`)
 New shared setting `mute_host_speakers` (gliff-settings; default off; `Resolved::server_flags` adds `--mute-local-audio`), used by both clients' server arguments. Linux settings window: Sound (mute the machine's speakers) and Reconnect (`auto_reconnect`) groups. Mac Settings: a Host speakers row; a change reconnects (`settings::change`). Tests: model, field names, Mac edit and change. README, docs/macos.md, docs/settings.md. Not compiled here.
