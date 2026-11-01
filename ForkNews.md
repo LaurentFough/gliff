@@ -32,7 +32,7 @@ A quick look at what this fork adds. The README carries the same list; [ToDone.m
 
 - **Tabs on the Mac**: every connection is a native macOS tab in one viewer. The tab bar's **+** or File ▸ New Tab adds a machine; tabs stay connected, only the visible one plays sound, and open tabs reopen at launch. *(Tested.)*
 - **Known machines in the connection window**: a sidebar lists every machine you have connected to (searchable, **+** to add one, **−** to forget one), and the SSH Address field autocompletes from them, at launch and for File ▸ New Tab. *(Tested.)*
-- **Per-machine auto-reconnect**: Machine ▸ Reconnect Automatically, or Reconnect in Settings (`auto_reconnect`). Off, the machine is not reopened at launch and a dropped session waits for Reconnect; the Linux client honours it too. *(Tested on the Mac.)*
+- **Per-machine auto-reconnect**: Machine ▸ Reconnect Automatically, or Reconnect in Settings (`auto_reconnect`). Off, the machine is not reopened at launch and a dropped session waits for Reconnect; the Linux client honours it too. *(Tested.)*
 - **One app on the Mac**: Settings and File ▸ New Tab open inside the viewer (one Dock icon and ⌘-Tab entry, one menu bar). New Tab is a sheet over a tab that is not connected, else its own window; ⌘, brings an open Settings forward, and Settings can **Connect** a machine (or double-click it) in a new tab. The connection window's list grows with the window. *(Tested.)*
 - **Quit on last window, and About**: Settings ▸ General ▸ Quit Gliff when its last window closes (`quit_on_last_window`, default off: Gliff stays open, and ⌘T or the Dock icon opens the connection window). Gliff ▸ About Gliff shows the version and build (commit, arch). *(Tested.)*
 - **Reconnect on the Mac**: a dropped or failed session shows a **Reconnect** button; sessions that had connected retry automatically (5 × 1.5 s, as on Linux), without repeating SSH prompts. *(Tested.)*
@@ -78,7 +78,8 @@ The new features are outlined in red.
 | Mac tabs: sound, clipboard, Machine menu, Window menu, restore at launch | Tested (2026-10-30) |
 | Mac reconnect | Tested (2026-10-30) |
 | Known machines (sidebar, + / −, autocomplete) | Tested (2026-10-30) |
-| Per-machine auto-reconnect | Tested on the Mac; Linux pending |
+| Per-machine auto-reconnect | Tested on the Mac and Linux (2026-10-31) |
+| #98 settings on the Linux client | Tested (2026-10-31) |
 | Mac: Settings and New Tab in the viewer, Connect from Settings | Tested (2026-10-31) |
 | Mac: quit on last window, About Gliff | Tested (2026-10-31) |
 | Mac discovery (Bonjour) | Tested (2026-10-30); the host must run `gliff-discovery` (`gliff-enable-discovery`) |

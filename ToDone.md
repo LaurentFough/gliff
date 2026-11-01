@@ -163,7 +163,7 @@ Support today:
 
 ### Deferred testing
 
-- [ ] #98's settings on the Linux client.
+- [x] #98's settings on the Linux client (tested 2026-10-31).
 - [x] Mac tabs: several machines connected at once, each in its own tab (tested 2026-10-30).
 - [x] Mac tabs (tested 2026-10-30): sound follows the visible tab, and stays off for a hidden tab across a reconnect and while minimised; drag a tab out; the Machine menu follows the active tab; clipboard to the active tab's machine; quit with two tabs and relaunch (both reopen); close one, quit, relaunch (only the other).
 - [x] Mac tabs: Window ▸ Merge All Windows (T5) works since the Window menu lists the tab commands (retested 2026-10-30).
@@ -181,7 +181,7 @@ Support today:
 - [x] Connection window's known machines: list, search, choosing, double-click, autocomplete, File ▸ New Tab (tested 2026-10-30).
 - [x] + (adds the typed address) and − (asks, then forgets the machine and its settings) (tested 2026-10-30).
 - [x] Auto-reconnect on the Mac (tested 2026-10-30): Machine ▸ Reconnect Automatically off skips the launch reopen and drop retries; Settings ▸ Reconnect matches.
-- [ ] Auto-reconnect on Linux: a machine with `auto_reconnect = false` is not reopened and not retried.
+- [x] Auto-reconnect on Linux (tested 2026-10-31): a machine with `auto_reconnect = false` is not reopened and not retried.
 - [x] `feature/macos-panels-in-viewer`: the connection window's nearby list takes the extra height when the window is made taller (reported and tested 2026-10-30).
 - [x] `feature/macos-panels-in-viewer`: Settings and File ▸ New Tab open inside the viewer, not as separate apps (reported 2026-10-30; tested 2026-10-30): one Dock icon and ⌘-Tab entry; New Tab's connection window is a sheet on the front tab; Settings is a window of the viewer and ⌘, brings an open one forward; Edit ▸ Paste works in both. The connection window at launch (no viewer yet) is still its own process.
 - [x] `feature/macos-panels-in-viewer`: File ▸ New Tab is a sheet over a tab with no live session (connecting, failed or dropped), else its own window (connected tab, or no tab) — corrected 2026-10-31.
@@ -225,6 +225,9 @@ Support today:
 ## Log
 
 Newest first. Format: `### YYYY-MM-DD — summary (commit)`, then a line or two.
+
+### 2026-11-01 — Linux: #98 settings and auto-reconnect tested
+#98's settings window on the Linux client, and `auto_reconnect = false` on Linux (not reopened, not retried), confirmed working. README / ForkNews status updated.
 
 ### 2026-11-01 — Releases built by CI (`feature/ci-releases`)
 `.github/workflows/fork-builds.yml` (manual: Actions ▸ Fork builds, or `make release-ci`): checks and `bin/package-macos --development` on macos-15 and macos-15-intel; checks and `bin/package-linux` in an Arch container as a non-root build user; one pre-release `build-COMMIT12` with every package and `.sha256`. `bin/release-ci` (dispatch, find the run, watch it; refuses a dirty or unpushed branch); `install-*-release` also pick `build-*` releases; Makefile 0.6.0 `release-ci`. Upstream's `ci.yml` untouched. Workflow YAML and shell syntax checked here; not run yet.
