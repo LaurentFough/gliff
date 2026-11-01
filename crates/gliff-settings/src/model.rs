@@ -66,6 +66,11 @@ pub struct Settings {
     /// waits for the user (default on).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_reconnect: Option<bool>,
+    /// Mute the machine's own speakers while this client plays its sound
+    /// (the server's `--mute-local-audio`; Linux hosts with PipeWire).
+    /// Default off: the speakers keep playing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mute_host_speakers: Option<bool>,
 }
 
 /// An option, to ask where its value comes from or to clear it.
@@ -76,15 +81,17 @@ pub enum Field {
     Decode,
     ServerBin,
     AutoReconnect,
+    MuteHostSpeakers,
 }
 
 impl Field {
-    pub const ALL: [Field; 5] = [
+    pub const ALL: [Field; 6] = [
         Field::Screen,
         Field::Clipboard,
         Field::Decode,
         Field::ServerBin,
         Field::AutoReconnect,
+        Field::MuteHostSpeakers,
     ];
 }
 
@@ -96,6 +103,7 @@ impl Settings {
             Field::Decode => self.decode.is_some(),
             Field::ServerBin => self.server_bin.is_some(),
             Field::AutoReconnect => self.auto_reconnect.is_some(),
+            Field::MuteHostSpeakers => self.mute_host_speakers.is_some(),
         }
     }
 
@@ -106,6 +114,7 @@ impl Settings {
             Field::Decode => self.decode = None,
             Field::ServerBin => self.server_bin = None,
             Field::AutoReconnect => self.auto_reconnect = None,
+            Field::MuteHostSpeakers => self.mute_host_speakers = None,
         }
     }
 
@@ -134,6 +143,7 @@ impl Settings {
             decode: self.decode.or(below.decode),
             server_bin: self.server_bin.clone().or_else(|| below.server_bin.clone()),
             auto_reconnect: self.auto_reconnect.or(below.auto_reconnect),
+            mute_host_speakers: self.mute_host_speakers.or(below.mute_host_speakers),
         }
     }
 
@@ -149,6 +159,7 @@ impl Settings {
                 .clone()
                 .unwrap_or_else(|| DEFAULT_SERVER_BIN.to_string()),
             auto_reconnect: self.auto_reconnect.unwrap_or(true),
+            mute_host_speakers: self.mute_host_speakers.unwrap_or(false),
         }
     }
 }
@@ -161,6 +172,19 @@ pub struct Resolved {
     pub decode: Video,
     pub server_bin: String,
     pub auto_reconnect: bool,
+    pub mute_host_speakers: bool,
+}
+
+impl Resolved {
+    /// Server arguments these options add (the screen is handled by each
+    /// client, as `--output` can override it).
+    pub fn server_flags(&self) -> Vec<String> {
+        let mut flags = Vec::new();
+        if self.mute_host_speakers {
+            flags.push("--mute-local-audio".to_string());
+        }
+        flags
+    }
 }
 
 #[cfg(test)]
@@ -178,6 +202,23 @@ mod tests {
             r.auto_reconnect,
             "reconnecting is on unless a machine turns it off"
         );
+        assert!(!r.mute_host_speakers, "the host's speakers keep playing");
+        assert!(r.server_flags().is_empty());
+    }
+
+    #[test]
+    fn muting_the_host_speakers_adds_the_server_flag() {
+        let defaults = Settings {
+            mute_host_speakers: Some(true),
+            ..Settings::default()
+        };
+        let r = Settings::default().over(&defaults).resolve();
+        assert_eq!(r.server_flags(), vec!["--mute-local-audio".to_string()]);
+        let machine = Settings {
+            mute_host_speakers: Some(false),
+            ..Settings::default()
+        };
+        assert!(machine.over(&defaults).resolve().server_flags().is_empty());
     }
 
     #[test]

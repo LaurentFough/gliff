@@ -82,6 +82,7 @@ opening another.
 | Screen | Mirror the machine's screen, or a private Linux screen that follows the window | reconnects the machine |
 | Clipboard | Share the clipboard in both directions | at once |
 | Reconnect | Reopen the machine at launch if it was open at quit, and retry a dropped session (`auto_reconnect`, default on) | at the next launch or failure |
+| Host speakers | Mute the Linux host's own speakers while the Mac plays its sound (`mute_host_speakers`, default off; the server's `--mute-local-audio`, PipeWire hosts) | reconnects the machine |
 | Server command | The command started over SSH, e.g. `gliff-server --low-bandwidth` | reconnects the machine |
 | General ▸ Quit Gliff when its last window closes | For the app, not a machine (`quit_on_last_window`, default off). Off: closing the last tab leaves Gliff running with no windows; File ▸ New Tab (⌘T) or clicking the Dock icon opens the connection window. On: closing the last tab quits, and that machine reopens at the next launch | at once |
 
@@ -112,9 +113,10 @@ support). Sound is Opus at 128 kbit/s through the same jitter buffer as on
 Linux, and the output device is opened only while sound plays.
 
 The Linux host keeps playing on its own speakers too. To hear it only on the
-Mac, set the machine's **Server command** in Settings to
-`gliff-server --mute-local-audio`: the host mutes its default output while
-the Mac plays its sound, and restores it afterwards (see the
+Mac, turn on **Host speakers** for the machine in Settings
+(`mute_host_speakers`; it adds `--mute-local-audio` to the server command):
+the host mutes its default output while the Mac plays its sound, and
+restores it afterwards (see the
 [README](../README.md#use)).
 
 The command line sits below a machine's saved settings, as on Linux:
