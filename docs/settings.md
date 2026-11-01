@@ -41,7 +41,9 @@ is the exception and is handled where the server arguments are built
 Linux:
 
 - **Settings window** (`settings_ui.rs`): header gear or Ctrl+,. Machines
-  first, then Defaults. Every change is saved at once; a row shows
+  first, then Defaults. Groups: Display, Clipboard, Video, Sound (mute the
+  machine's speakers, `mute_host_speakers`), Reconnect (`auto_reconnect`) and
+  Connection. Every change is saved at once; a row shows
   "Default"/"Built-in" while it follows the layer below and a reset button
   once it is set. The search box filters rows by title and subtitle.
 - **Tab menu** (`install_tab_menu` in `linux.rs`): the everyday choices only.
@@ -53,7 +55,8 @@ macOS (`crates/gliff-macos/src/settings.rs`, UI in `native/Gliff.swift`):
   viewer, or the picker's Settings… button. All Machines (the defaults) and
   each machine, with a search box, the same "Default"/"Built-in" origin and
   a Reset button per row. It offers the screen, the clipboard, Reconnect
-  (`auto_reconnect`) and the server command; the decode pipeline is Linux-only (the Mac viewer decodes on the
+  (`auto_reconnect`), Host speakers (`mute_host_speakers`) and the server
+  command; the decode pipeline is Linux-only (the Mac viewer decodes on the
   CPU) and is kept in the file but not shown.
 - **Machine menu** in the viewer: Mirror Screen / Private Screen, Share
   Clipboard, Reconnect, Reconnect Automatically — the Mac's equivalent of

@@ -444,6 +444,28 @@ impl View {
         );
         page.add(&video);
 
+        let sound = group("Sound", Some("A change reconnects the machine"));
+        self.switch(
+            &sound,
+            Field::MuteHostSpeakers,
+            "Mute the machine's speakers",
+            "While this client plays the machine's sound, its own speakers are silent; restored when sound stops or the session ends. Needs PipeWire on the machine",
+            |r| r.mute_host_speakers,
+            |s, v| s.mute_host_speakers = Some(v),
+        );
+        page.add(&sound);
+
+        let reconnect = group("Reconnect", None);
+        self.switch(
+            &reconnect,
+            Field::AutoReconnect,
+            "Reconnect automatically",
+            "Reopen the machine at launch if it was open at quit, and retry a dropped session. Off, the tab waits for a click",
+            |r| r.auto_reconnect,
+            |s, v| s.auto_reconnect = Some(v),
+        );
+        page.add(&reconnect);
+
         let connection = group("Connection", Some("A change reconnects the machine"));
         self.entry(
             &connection,

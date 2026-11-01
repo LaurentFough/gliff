@@ -2221,6 +2221,10 @@ final class SettingsWindow: NSObject, PanelWindow, NSApplicationDelegate, NSWind
     let reconnectBox = NSButton(checkboxWithTitle: "Reconnect automatically", target: nil, action: nil)
     let reconnectOrigin = NSTextField(labelWithString: "")
     let reconnectReset = NSButton(title: "Reset", target: nil, action: nil)
+    // Host speakers: mute_host_speakers (the server's --mute-local-audio).
+    let speakersBox = NSButton(checkboxWithTitle: "Mute the machine's speakers while I listen", target: nil, action: nil)
+    let speakersOrigin = NSTextField(labelWithString: "")
+    let speakersReset = NSButton(title: "Reset", target: nil, action: nil)
     // General: options for Gliff itself, not a machine (state["app"]).
     let quitBox = NSButton(checkboxWithTitle: "Quit Gliff when its last window closes", target: nil, action: nil)
     // Connect: open the selected machine in a new tab (inside the viewer
@@ -2309,11 +2313,11 @@ final class SettingsWindow: NSObject, PanelWindow, NSApplicationDelegate, NSWind
     }
     /// The window and its controls; showing it is the caller's.
     func build() {
-        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 780, height: 540), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
+        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 780, height: 600), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
         w.title = "Gliff Settings"; w.delegate = self
         // A window of its own, never a tab of the viewer.
         w.tabbingMode = .disallowed; w.isReleasedWhenClosed = false
-        w.contentMinSize = NSSize(width: 700, height: 500)
+        w.contentMinSize = NSSize(width: 700, height: 560)
         let view = w.contentView!
 
         search.placeholderString = "Search machines"; search.delegate = self
@@ -2343,6 +2347,8 @@ final class SettingsWindow: NSObject, PanelWindow, NSApplicationDelegate, NSWind
         clipboardBox.target = self; clipboardBox.action = #selector(clipboardChanged)
         reconnectBox.target = self; reconnectBox.action = #selector(reconnectChanged)
         reconnectReset.identifier = NSUserInterfaceItemIdentifier("auto_reconnect")
+        speakersBox.target = self; speakersBox.action = #selector(speakersChanged)
+        speakersReset.identifier = NSUserInterfaceItemIdentifier("mute_host_speakers")
         serverBin.target = self; serverBin.action = #selector(serverChanged)
         serverBin.cell?.sendsActionOnEndEditing = true
         serverBin.setAccessibilityLabel("Server command")
@@ -2353,8 +2359,9 @@ final class SettingsWindow: NSObject, PanelWindow, NSApplicationDelegate, NSWind
         let display = row("Screen", screen, screenOrigin, screenReset, "Mirror shows the machine's screen; Private makes a separate Linux screen that follows this window.")
         let clip = row("Clipboard", clipboardBox, clipboardOrigin, clipboardReset, "Copy on one machine and paste on the other. Turn off for machines you do not trust.")
         let again = row("Reconnect", reconnectBox, reconnectOrigin, reconnectReset, "Reopen the machine at launch if it was open at quit, and retry a dropped session. Off, it waits for Reconnect.")
+        let speakers = row("Host speakers", speakersBox, speakersOrigin, speakersReset, "While Gliff plays the machine's sound, its own speakers stay silent; restored when sound stops or the session ends. Linux hosts with PipeWire.")
         let server = row("Server command", serverBin, serverOrigin, serverReset, "Starts the server over SSH, e.g. gliff-server --low-bandwidth. Blank uses the inherited command.")
-        let rule = label("A screen or server command change reconnects the machine; the clipboard and Reconnect change at once. Changes are saved as you make them.", secondary: true)
+        let rule = label("A screen, host speakers or server command change reconnects the machine; the clipboard and Reconnect change at once. Changes are saved as you make them.", secondary: true)
         rule.preferredMaxLayoutWidth = 480; rule.lineBreakMode = .byWordWrapping; rule.maximumNumberOfLines = 3
         pathLabel.font = NSFont.systemFont(ofSize: 11); pathLabel.textColor = .tertiaryLabelColor
         pathLabel.preferredMaxLayoutWidth = 480
@@ -2372,7 +2379,7 @@ final class SettingsWindow: NSObject, PanelWindow, NSApplicationDelegate, NSWind
         let headerRow = NSStackView(views: [heading, NSView(), connectButton])
         headerRow.orientation = .horizontal; headerRow.alignment = .centerY; headerRow.spacing = 8
         heading.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        let form = NSStackView(views: [headerRow, scopeNote, display, clip, again, server, rule, rule2, generalStack, errorLabel, NSView(), pathLabel])
+        let form = NSStackView(views: [headerRow, scopeNote, display, clip, again, speakers, server, rule, rule2, generalStack, errorLabel, NSView(), pathLabel])
         form.orientation = .vertical; form.alignment = .leading; form.spacing = 14
         form.translatesAutoresizingMaskIntoConstraints = false
         rule2.widthAnchor.constraint(equalTo: form.widthAnchor).isActive = true
@@ -2440,6 +2447,9 @@ final class SettingsWindow: NSObject, PanelWindow, NSApplicationDelegate, NSWind
         let r = effective("auto_reconnect")
         reconnectBox.state = r.value as? Bool == false ? .off : .on
         reconnectOrigin.stringValue = r.origin; reconnectReset.isHidden = !r.here
+        let m = effective("mute_host_speakers")
+        speakersBox.state = m.value as? Bool == true ? .on : .off
+        speakersOrigin.stringValue = m.origin; speakersReset.isHidden = !m.here
         quitBox.state = (state["app"] as? [String: Any])?["quit_on_last_window"] as? Bool == true ? .on : .off
         let b = effective("server_bin")
         serverBin.placeholderString = inherited("server_bin").0 as? String ?? "gliff-server"
@@ -2457,6 +2467,7 @@ final class SettingsWindow: NSObject, PanelWindow, NSApplicationDelegate, NSWind
     @objc func screenChanged(_ sender: Any?) { if !updating { edit("screen", screen.indexOfSelectedItem == 1 ? "private" : "mirror") } }
     @objc func clipboardChanged(_ sender: Any?) { if !updating { edit("clipboard", clipboardBox.state == .on) } }
     @objc func reconnectChanged(_ sender: Any?) { if !updating { edit("auto_reconnect", reconnectBox.state == .on) } }
+    @objc func speakersChanged(_ sender: Any?) { if !updating { edit("mute_host_speakers", speakersBox.state == .on) } }
     /// Connect, or a double-click on a machine: the viewer opens it in a new
     /// tab (an app event, so the client's tab loop handles it).
     @objc func connectMachine(_ sender: Any?) {

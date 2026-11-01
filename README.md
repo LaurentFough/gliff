@@ -37,7 +37,7 @@ This fork ([LaurentFough/gliff](https://github.com/LaurentFough/gliff)) builds o
 - **Reconnect on the Mac**: a dropped or failed session shows a **Reconnect** button; sessions that had connected retry automatically (5 × 1.5 s, as on Linux), without repeating SSH prompts. *(Tested.)*
 - **GPU video on the Mac viewer**: VideoToolbox hardware H.264 decode, Metal 4:4:4 recombine, `CAMetalLayer` presentation; asks for 4:4:4 first, falls back to OpenH264 (`--video cpu` forces it). 4K 4:4:4: about 6.9 ms per frame on the GPU vs 18.8 ms on the CPU.
 - **Sound on the Mac viewer**: plays Linux hosts' sound through #80's `gliff-audio` (CoreAudio). **Machine ▸ Play Sound** shares the Linux client's mute switch; `--no-audio` starts muted.
-- **Host speaker mute**: `gliff-server --mute-local-audio` mutes the Linux host's speakers while the client plays, and restores them on stop, disconnect or crash.
+- **Host speaker mute**: `gliff-server --mute-local-audio` mutes the Linux host's speakers while the client plays, and restores them on stop, disconnect or crash. Per machine in Settings on both clients (`mute_host_speakers`). *(Settings: testing pending.)*
 - **Shared settings**: a `gliff-settings` crate; both clients read and write `~/.config/gliff/config.toml`. On the Mac: a settings window (⌘,) and a Machine menu.
 - **Local signing**: no paid Apple Developer account needed (a self-signed `gliff-local` identity), so privacy permissions survive rebuilds.
 - **Makefile**: one front end for `bin/` and `scripts/`. `make macos` builds, signs, installs and verifies; `make install` on Arch; also `make check`, `make video-check` and `make distclean`; a project-wide `.gitignore`.
@@ -357,8 +357,9 @@ play except Gliff itself, so when two machines show each other, neither hears
 its own sound come back. A host missing either sends its whole output, Gliff
 included, and two such machines that show each other echo; mute one side to
 stop it. Hosts keep playing their sound on their own speakers, unless the
-host runs `gliff-server --mute-local-audio` (set it as the machine's server
-command in Settings): then the host's speakers are muted while the client
+machine's **Mute the machine's speakers** setting is on (Settings ▸ Sound on
+Linux, Settings ▸ Host speakers on the Mac; `mute_host_speakers`, which runs
+`gliff-server --mute-local-audio`): then the host's speakers are muted while the client
 plays its sound and restored when sound stops or the session ends, even if
 the server is killed. That needs PipeWire with WirePlumber on the host
 (`pw-dump`, `pw-record`, `wpctl`). Sound is Opus
@@ -477,8 +478,10 @@ gliff 0.4.1).
   it. `make video-check` checks the output and compares decode times (4K
   4:4:4: 6.9 ms GPU against 18.8 ms CPU). See
   [macOS support](docs/macos.md).
-- **Host speakers muted while streaming.** `gliff-server --mute-local-audio`
-  mutes the Linux host's default output while a client plays its sound, follows
+- **Host speakers muted while streaming.** `gliff-server --mute-local-audio`,
+  switched per machine with the shared `mute_host_speakers` setting (Settings
+  on both clients, default off), mutes the Linux host's default output while
+  a client plays its sound, follows
   a new default output, and restores what it changed on sound off, session end
   or a crash (a detached watchdog). Only when the host records each
   application directly (PipeWire), so the client never hears the mute.

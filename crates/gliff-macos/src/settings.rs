@@ -27,11 +27,12 @@ use serde_json::{json, Map, Value};
 use tokio::sync::watch;
 
 /// The options this client offers, in window order.
-pub const OFFERED: [Field; 4] = [
+pub const OFFERED: [Field; 5] = [
     Field::Screen,
     Field::Clipboard,
     Field::ServerBin,
     Field::AutoReconnect,
+    Field::MuteHostSpeakers,
 ];
 /// Longest server command accepted from the UI.
 const MAX_SERVER_BIN: usize = 1024;
@@ -215,6 +216,7 @@ pub fn cli_layer(
         server_bin: (server_bin.trim() != DEFAULT_SERVER_BIN && !server_bin.trim().is_empty())
             .then(|| server_bin.trim().to_string()),
         auto_reconnect: None,
+        mute_host_speakers: None,
     }
 }
 
@@ -255,6 +257,9 @@ fn layer_json(s: &Settings) -> Value {
     if let Some(auto) = s.auto_reconnect {
         m.insert("auto_reconnect".into(), auto.into());
     }
+    if let Some(mute) = s.mute_host_speakers {
+        m.insert("mute_host_speakers".into(), mute.into());
+    }
     Value::Object(m)
 }
 
@@ -274,6 +279,7 @@ pub fn state_json(store: &Store) -> Value {
             "clipboard": builtin.clipboard,
             "server_bin": builtin.server_bin,
             "auto_reconnect": builtin.auto_reconnect,
+            "mute_host_speakers": builtin.mute_host_speakers,
         },
         "defaults": layer_json(&store.defaults()),
         "machines": machines,
@@ -337,6 +343,13 @@ fn set_field(s: &mut Settings, field: Field, value: Option<&Value>) -> Result<()
                 value
                     .as_bool()
                     .context("auto_reconnect must be true or false")?,
+            );
+        }
+        Field::MuteHostSpeakers => {
+            s.mute_host_speakers = Some(
+                value
+                    .as_bool()
+                    .context("mute_host_speakers must be true or false")?,
             );
         }
         Field::Decode => unreachable!("not offered"),
@@ -415,7 +428,12 @@ pub enum Change {
 pub fn change(old: &Resolved, new: &Resolved, screen_locked: bool) -> Change {
     let screen = !screen_locked && old.screen != new.screen;
     //= The decode path is chosen when the session starts.
-    if screen || old.server_bin != new.server_bin || old.decode != new.decode {
+    //= Muting the host's speakers is a server flag, so it reconnects too.
+    if screen
+        || old.server_bin != new.server_bin
+        || old.decode != new.decode
+        || old.mute_host_speakers != new.mute_host_speakers
+    {
         Change::Reconnect
     } else if old.clipboard != new.clipboard {
         Change::Clipboard(new.clipboard)
@@ -583,6 +601,9 @@ mod tests {
         let mut r = base.clone();
         r.server_bin = "other".into();
         assert_eq!(change(&base, &r, true), Change::Reconnect);
+        let mut r = base.clone();
+        r.mute_host_speakers = true;
+        assert_eq!(change(&base, &r, true), Change::Reconnect, "a server flag");
         assert_eq!(change(&base, &base, false), Change::None);
     }
 
@@ -664,5 +685,30 @@ mod tests {
         assert!(apply_edit(&shared, &bad).is_err());
         let unknown = json!({"scope": "app", "field": "dock_icon", "value": true});
         assert!(apply_edit(&shared, &unknown).is_err());
+    }
+
+    #[test]
+    fn the_settings_window_sets_mute_host_speakers() {
+        let shared = shared();
+        assert_eq!(shared.state()["builtin"]["mute_host_speakers"], false);
+        let edit = json!({"scope": "machine", "machine": "m@h", "field": "mute_host_speakers", "value": true});
+        apply_edit(&shared, &edit).unwrap();
+        let r = shared.resolve("m@h", &Settings::default());
+        assert!(r.mute_host_speakers);
+        assert_eq!(r.server_flags(), vec!["--mute-local-audio".to_string()]);
+        assert!(
+            !shared
+                .resolve("other@h", &Settings::default())
+                .mute_host_speakers
+        );
+        let bad = json!({"scope": "defaults", "field": "mute_host_speakers", "value": "yes"});
+        assert!(apply_edit(&shared, &bad).is_err());
+        let clear = json!({"scope": "machine", "machine": "m@h", "field": "mute_host_speakers", "value": null});
+        apply_edit(&shared, &clear).unwrap();
+        assert!(
+            !shared
+                .resolve("m@h", &Settings::default())
+                .mute_host_speakers
+        );
     }
 }

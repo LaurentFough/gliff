@@ -349,6 +349,8 @@ async fn visit(
             } else if opts.screen == gliff_settings::Screen::Own {
                 target.server_args.push("--headless".into());
             }
+            //= Settings ▸ Host speakers: mute the host while this client plays.
+            target.server_args.extend(opts.server_flags());
             match spawn_ssh(&target) {
                 Ok(mut ssh) => {
                     let r = run_session(ssh.stdout, ssh.stdin, &host, cli.check_frames, live).await;

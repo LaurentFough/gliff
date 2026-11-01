@@ -303,11 +303,14 @@ fn resolved_for(cli: &Cli, config: &Config, machine: &str) -> Resolved {
 /// What the server shows: the screen `--output` names, which beats the
 /// settings, else a private one of its own or the focused one.
 fn server_args(cli: &Cli, opts: &Resolved) -> Vec<String> {
-    match (&cli.output, opts.screen) {
+    let mut args: Vec<String> = match (&cli.output, opts.screen) {
         (Some(name), _) => vec!["--output".into(), name.clone()],
         (None, Screen::Own) => vec!["--headless".into()],
         (None, Screen::Mirror) => vec!["--output".into(), "auto".into()],
-    }
+    };
+    //= Settings ▸ Sound: mute the host's speakers while this client plays.
+    args.extend(opts.server_flags());
+    args
 }
 
 /// The tab name for an endpoint.

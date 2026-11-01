@@ -25,6 +25,7 @@ impl Field {
             Field::Decode => "decode",
             Field::ServerBin => "server_bin",
             Field::AutoReconnect => "auto_reconnect",
+            Field::MuteHostSpeakers => "mute_host_speakers",
         }
     }
 
@@ -51,6 +52,7 @@ mod tests {
             decode: Some(Video::Cpu),
             server_bin: Some("x".into()),
             auto_reconnect: Some(false),
+            mute_host_speakers: Some(true),
         };
         let text = toml::to_string(&s).unwrap();
         for field in Field::ALL {
