@@ -422,6 +422,7 @@ async fn visit(
 /// Automatic reconnects in a row before the window waits for the user, as on
 /// Linux, and the pause before each.
 const MAX_RETRIES: u32 = 5;
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 const RETRY_DELAY: Duration = Duration::from_millis(1500);
 
 /// The server speaks another protocol: reconnecting cannot help, so it is

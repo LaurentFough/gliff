@@ -181,6 +181,8 @@ impl Panel {
 impl Drop for Panel {
     /// Close the window: a helper process is killed (`kill_on_drop`); a
     /// window in the viewer is told to close and its route is dropped.
+    //= Off macOS there is no Process variant, so the pattern always matches.
+    #[cfg_attr(not(target_os = "macos"), allow(irrefutable_let_patterns))]
     fn drop(&mut self) {
         if let Panel::Viewer { id, host, .. } = self {
             host.routes.borrow_mut().remove(id);
