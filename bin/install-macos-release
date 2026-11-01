@@ -2,10 +2,11 @@
 # Download a Mac build published by bin/release-macos and install it with
 # bin/install-macos-package (checksum, quarantine, local re-sign).
 #= Usage: bin/install-macos-release [--force] [TAG]
-#= Without TAG: the newest release whose tag starts with macos- (needs the
+#= Without TAG: the newest release whose tag starts with macos- or build-
+#= (CI, .github/workflows/fork-builds.yml) (needs the
 #= GitHub CLI). With TAG, plain curl works too, for public repositories.
 #= Repository: GLIFF_RELEASE_REPO (default LaurentFough/gliff).
-#= Version: 1.0.0
+#= Version: 1.1.0
 set -eu
 [ "$(uname -s)" = Darwin ] || { echo 'Run bin/install-macos-release on the Mac.' >&2; exit 1; }
 ROOT="$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)"
@@ -28,7 +29,7 @@ trap 'exit 1' HUP INT TERM
 if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
     if [ -z "$GLIFF_TAG" ]; then
         GLIFF_TAG=$(gh release list --repo "$GLIFF_RELEASE_REPO" --limit 50 --json tagName \
-            --jq '[.[] | select(.tagName | startswith("macos-"))][0].tagName // empty')
+            --jq '[.[] | select((.tagName | startswith("macos-")) or (.tagName | startswith("build-")))][0].tagName // empty')
         [ -n "$GLIFF_TAG" ] || { printf 'No macos- release on %s yet (make release-upload on the build Mac).\n' "$GLIFF_RELEASE_REPO" >&2; exit 1; }
     fi
     printf 'Downloading %s from %s\n' "$GLIFF_TAG" "$GLIFF_RELEASE_REPO"

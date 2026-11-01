@@ -25,7 +25,7 @@
 #=   CHECK=1                  `make macos`: run scripts/check.sh before installing
 #=   SIGNING=0                `make macos`: skip creating the gliff-local identity
 
-MAKEFILE_VERSION := 0.5.0
+MAKEFILE_VERSION := 0.6.0
 
 #= bash for pipefail, so `cmd | tee log` fails when cmd fails. Present on
 #= macOS (/bin/bash 3.2) and every Linux this repo targets. make 3.81
@@ -97,7 +97,7 @@ endef
 .PHONY: help version doctor \
         build check fix test e2e clean \
         macos verify video-check signing signing-show app install package package-release icon \
-        install-package release-upload install-release \
+        install-package release-upload install-release release-ci \
         dev install-dev discovery discovery-off \
         logs-clean distclean
 
@@ -285,6 +285,12 @@ ifeq ($(OS),Darwin)
 else
 	$(call run,install-release,$(if $(REPO),GLIFF_RELEASE_REPO="$(REPO)") bin/install-linux-release $(if $(filter 1,$(FORCE)),--force) $(TAG))
 endif
+
+#= CI builds every package (Mac arm64 + Intel, Arch x86_64) for the current,
+#= pushed branch and publishes build-COMMIT (.github/workflows/fork-builds.yml).
+release-ci: ## Build and publish all packages on GitHub Actions (BRANCH=, INTEL=0, CHECKS=0, WATCH=0; needs gh)
+	$(call need_tool,gh,brew install gh / sudo pacman -S github-cli && gh auth login)
+	$(call run,release-ci,$(if $(REPO),GLIFF_RELEASE_REPO="$(REPO)") bin/release-ci $(if $(filter 0,$(INTEL)),--no-intel) $(if $(filter 0,$(CHECKS)),--no-checks) $(if $(filter 0,$(WATCH)),--no-watch) $(BRANCH))
 
 package-release: ## Notarized ZIP; needs Developer ID + GLIFF_NOTARY_PROFILE (bin/package-macos)
 	$(call need_os,Darwin,package-release)

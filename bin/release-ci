@@ -1,0 +1,54 @@
+#!/bin/sh
+#= Ask GitHub Actions to build and publish this commit's packages: the Mac
+#= ZIPs (Apple Silicon, Intel) and the Arch package, as one pre-release
+#= build-COMMIT12 (.github/workflows/fork-builds.yml). Works from any system
+#= with the GitHub CLI; nothing is built here.
+#= Usage: bin/release-ci [--no-intel] [--no-checks] [--no-watch] [BRANCH]
+#= BRANCH defaults to the current one; it must be pushed and clean, so the
+#= release matches what you have.
+#= Repository: GLIFF_RELEASE_REPO (default LaurentFough/gliff).
+#= Version: 1.0.0
+set -eu
+ROOT="$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)"
+. "$ROOT/bin/lib/build-id.sh"
+GLIFF_RELEASE_REPO="${GLIFF_RELEASE_REPO:-LaurentFough/gliff}"
+WORKFLOW=fork-builds.yml
+log() { printf 'release-ci: %s\n' "$*" >&2; [ "${SYSLOG:-0}" != 1 ] || logger -t gliff-release-ci -- "$*" 2>/dev/null || true; }
+usage() { echo 'Usage: bin/release-ci [--no-intel] [--no-checks] [--no-watch] [BRANCH]' >&2; exit 1; }
+INTEL=true; CHECKS=true; WATCH=1; BRANCH=""
+for arg in "$@"; do
+    case "$arg" in
+        --no-intel) INTEL=false ;;
+        --no-checks) CHECKS=false ;;
+        --no-watch) WATCH=0 ;;
+        -h|--help) usage ;;
+        -*) log "unknown option $arg"; usage ;;
+        *) [ -z "$BRANCH" ] || usage; BRANCH="$arg" ;;
+    esac
+done
+command -v gh >/dev/null 2>&1 || { log 'needs the GitHub CLI (brew install gh / pacman -S github-cli), then gh auth login'; exit 1; }
+gh auth status >/dev/null 2>&1 || { log 'the GitHub CLI is not signed in: gh auth login'; exit 1; }
+[ -n "$BRANCH" ] || BRANCH=$(git -C "$ROOT" rev-parse --abbrev-ref HEAD)
+[ "$BRANCH" != HEAD ] || { log 'detached HEAD: name a branch'; exit 1; }
+case "$(gliff_build_id "$ROOT")" in
+    *-dirty+*) log 'uncommitted changes: commit and push first'; exit 1 ;;
+esac
+LOCAL=$(git -C "$ROOT" rev-parse "$BRANCH")
+REMOTE=$(gh api "repos/$GLIFF_RELEASE_REPO/commits/$BRANCH" --jq .sha 2>/dev/null || true)
+[ "$LOCAL" = "$REMOTE" ] || { log "$BRANCH on $GLIFF_RELEASE_REPO is ${REMOTE:-missing}, here it is $LOCAL: push first"; exit 1; }
+TAG="build-$(printf %s "$LOCAL" | cut -c1-12)"
+log "starting $WORKFLOW on $BRANCH ($TAG; intel=$INTEL, checks=$CHECKS)"
+gh workflow run "$WORKFLOW" --repo "$GLIFF_RELEASE_REPO" --ref "$BRANCH" -f intel="$INTEL" -f checks="$CHECKS"
+[ "$WATCH" = 1 ] || { log "started; follow it with: gh run list --workflow $WORKFLOW --repo $GLIFF_RELEASE_REPO"; exit 0; }
+#= The run appears a moment after the dispatch.
+RUN=""
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+    sleep 3
+    RUN=$(gh run list --repo "$GLIFF_RELEASE_REPO" --workflow "$WORKFLOW" --branch "$BRANCH" \
+        --event workflow_dispatch --limit 1 --json databaseId,headSha \
+        --jq ".[] | select(.headSha == \"$LOCAL\") | .databaseId" 2>/dev/null || true)
+    [ -z "$RUN" ] || break
+done
+[ -n "$RUN" ] || { log 'the run did not show up; check: gh run list --workflow '"$WORKFLOW"; exit 1; }
+gh run watch "$RUN" --repo "$GLIFF_RELEASE_REPO" --exit-status
+log "published $TAG: make install-release TAG=$TAG (on a Mac or an Arch/Omarchy machine)"
