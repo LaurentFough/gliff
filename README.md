@@ -126,14 +126,55 @@ The new features are outlined in red.
 Install gliff on both machines: your machine runs `gliff`, the remote one
 runs `gliff-server`.
 
-Gliff is currently available on the **edge** channel of the [Omarchy Package
-Repository (OPR)](https://github.com/omacom/omarchy-pkgs):
+### Build from source (this fork)
+
+This fork's features come only from building it (or from its releases, see
+"build once" below). Clone it once; its default branch,
+`acrogenesis/macos-client-host`, is the working branch:
+
+```
+git clone https://github.com/LaurentFough/gliff.git
+cd gliff
+```
+
+**macOS** (13 Ventura or later; Apple Silicon is tested). Install the Xcode
+Command Line Tools and Rust (rustup reads the repository's
+`rust-toolchain.toml` and fetches the pinned version), then build, sign,
+install and verify:
+
+```
+xcode-select --install                                           # once
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh   # once, or: brew install rustup && rustup-init
+make macos
+```
+
+**Arch Linux / Omarchy** (x86_64). Install the build tools, then build the
+package and install it (`makepkg` fetches the other build dependencies;
+`pacman -U` runs through sudo, doas or su):
+
+```
+sudo pacman -S --needed base-devel git    # once
+make install                              # or: bin/install
+gliff-enable-discovery                    # on a host the Mac should find on the LAN
+```
+
+`make check` (`scripts/check.sh`) runs the CI checks before you push;
+`make help` lists every target. The sections below cover each platform's
+details.
+
+### Upstream package
+
+Upstream gliff is on the **edge** channel of the [Omarchy Package
+Repository (OPR)](https://github.com/omacom/omarchy-pkgs). It installs
+upstream's release, **without this fork's features**:
 
 ```
 omarchy pkg add gliff
 ```
 
 Then open **Gliff** from the app launcher, or run `gliff` in a terminal.
+
+### macOS details
 
 On macOS, build and install the native app from this checkout (Rust and
 Xcode Command Line Tools are required; an Apple Developer Program membership
@@ -217,17 +258,11 @@ if SSH uses a different port, or `--disable` to stop advertising. Discovery
 lists computers; selecting **Connect** starts the SSH and desktop session.
 SSH host confirmation and authentication use native prompts on the Mac.
 
-If your channel reports `target not found: gliff`, or you use Arch without
-OPR, build and install the package from source:
+### Arch Linux / Omarchy details
 
-```
-git clone https://github.com/omacom/gliff.git
-cd gliff
-bin/install
-```
-
-This uses the current checkout, including fixes newer than the last release.
-`bin/install` (or `make install`) skips an unchanged build: the package
+`make install` (or `bin/install`) builds the package from the current
+checkout and installs it, as under [Build from source](#build-from-source-this-fork).
+It skips an unchanged build: the package
 records its build ID in `/usr/share/gliff/build-id`; `FORCE=1` rebuilds.
 
 **Other Arch/Omarchy machines: build once.** Build the package on one
@@ -261,7 +296,9 @@ Arch/Omarchy machine then picks the newest `build-*` (or `macos-*` /
 `linux-*`) release. The workflow can also be started from the Actions tab
 (Fork builds ▸ Run workflow).
 
-To build from source, see [docs/development.md](docs/development.md).
+For the build layout, development builds and testing tools, see
+[docs/development.md](docs/development.md) (upstream's guide; it applies to
+this fork too).
 
 ### Make targets
 
