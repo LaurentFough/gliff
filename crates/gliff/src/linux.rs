@@ -82,6 +82,10 @@ struct Cli {
     /// it on and off, and the window remembers the choice.
     #[arg(long)]
     no_audio: bool,
+    /// Mute the host's own speakers while this client plays its sound (the
+    /// server's --mute-local-audio; as the machine's Sound setting).
+    #[arg(long)]
+    mute_host_speakers: bool,
 }
 
 /// Everything the UI shares with its callbacks.
@@ -290,6 +294,7 @@ fn cli_settings(cli: &Cli) -> Settings {
         },
         server_bin: (cli.server_bin != settings::DEFAULT_SERVER_BIN)
             .then(|| cli.server_bin.clone()),
+        mute_host_speakers: cli.mute_host_speakers.then_some(true),
         ..Settings::default()
     }
 }
@@ -303,8 +308,14 @@ fn resolved_for(cli: &Cli, config: &Config, machine: &str) -> Resolved {
 /// What the server shows: the screen `--output` names, which beats the
 /// settings, else a private one of its own or the focused one.
 fn server_args(cli: &Cli, opts: &Resolved) -> Vec<String> {
-    let mut args: Vec<String> = match (&cli.output, opts.screen) {
-        (Some(name), _) => vec!["--output".into(), name.clone()],
+    server_args_for(cli.output.as_deref(), opts)
+}
+
+/// `server_args` with the command line's `--output` given directly (the
+/// settings window's command line uses it).
+fn server_args_for(output: Option<&str>, opts: &Resolved) -> Vec<String> {
+    let mut args: Vec<String> = match (output, opts.screen) {
+        (Some(name), _) => vec!["--output".into(), name.to_string()],
         (None, Screen::Own) => vec!["--headless".into()],
         (None, Screen::Mirror) => vec!["--output".into(), "auto".into()],
     };
@@ -1197,6 +1208,18 @@ fn open_settings_for(ui: &Rc<App>, machine: Option<String>) {
     let env = Rc::new(settings_ui::Env {
         config_path: ui.config_path.clone(),
         cli: cli_settings(&ui.cli),
+        commands: {
+            let output = ui.cli.output.clone();
+            Rc::new(move |machine: &str, opts: &Resolved| {
+                let mut target = SshTarget::new(machine.to_string());
+                target.server_bin = opts.server_bin.clone();
+                target.server_args = server_args_for(output.as_deref(), opts);
+                settings_ui::Commands {
+                    client: settings::command::client_line("gliff", machine, None, opts),
+                    server: gliff_transport::ssh_command_line(&target),
+                }
+            })
+        },
         changed: Rc::new(move || {
             if let Some(ui) = weak.upgrade() {
                 settings_changed(&ui);

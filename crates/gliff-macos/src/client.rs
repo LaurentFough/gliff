@@ -52,6 +52,10 @@ struct Cli {
     /// turns it back on). Sound plays from hosts that send it (Linux).
     #[arg(long)]
     no_audio: bool,
+    /// Mute the host's own speakers while this client plays its sound (the
+    /// server's --mute-local-audio; as the machine's Host speakers setting).
+    #[arg(long)]
+    mute_host_speakers: bool,
     /// Decode a fixed number of frames without opening a window (integration test).
     #[arg(long)]
     check_frames: Option<u32>,
@@ -105,6 +109,7 @@ pub fn client_main() -> Result<()> {
             cli.no_clipboard,
             &cli.server_bin,
             cli.video.as_deref(),
+            cli.mute_host_speakers,
         );
         if cli.check_frames.is_some() {
             //= Integration run: one session, no window.
@@ -342,15 +347,11 @@ async fn visit(
             if cli.check_frames.is_none() {
                 target.askpass = Some(native::helper_path()?);
             }
-            if let Some(output) = &cli.output {
-                target
-                    .server_args
-                    .extend(["--output".into(), output.clone()]);
-            } else if opts.screen == gliff_settings::Screen::Own {
-                target.server_args.push("--headless".into());
-            }
-            //= Settings ▸ Host speakers: mute the host while this client plays.
-            target.server_args.extend(opts.server_flags());
+            //= --output, else the screen setting, then Host speakers
+            //= (the same rule Settings shows as the server command line).
+            target
+                .server_args
+                .extend(crate::settings::server_args(&opts, cli.output.as_deref()));
             match spawn_ssh(&target) {
                 Ok(mut ssh) => {
                     let r = run_session(ssh.stdout, ssh.stdin, &host, cli.check_frames, live).await;

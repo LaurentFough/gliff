@@ -24,7 +24,7 @@ use std::io::IoSlice;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 pub use listener::bind_development_listener;
-pub use ssh::{spawn_ssh, SshTarget};
+pub use ssh::{command_line as ssh_command_line, shell_word, spawn_ssh, SshTarget};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

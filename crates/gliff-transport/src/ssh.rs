@@ -98,9 +98,69 @@ fn shell_quote(arg: &str) -> String {
     format!("'{}'", arg.replace('\'', "'\\''"))
 }
 
+/// `arg` for a POSIX shell, quoted only when it needs to be, so a command
+/// line shown to a person stays readable.
+pub fn shell_word(arg: &str) -> String {
+    let plain = !arg.is_empty()
+        && arg
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "@%+=:,./_-".contains(c));
+    if plain {
+        arg.to_string()
+    } else {
+        shell_quote(arg)
+    }
+}
+
+/// The ssh command `spawn_ssh` runs for `target`, as one line to paste into
+/// a terminal (Settings shows it, for debugging a connection by hand). The
+/// GUI password prompt (`askpass`) is left out: a terminal asks itself.
+/// Run as is, the server speaks the binary protocol on stdout; its errors
+/// and logs are on stderr.
+pub fn command_line(target: &SshTarget) -> String {
+    let cmd = ssh_command(&SshTarget {
+        askpass: None,
+        ..target.clone()
+    });
+    let std = cmd.as_std();
+    std::iter::once(std.get_program().to_string_lossy().into_owned())
+        .chain(std.get_args().map(|a| shell_word(&a.to_string_lossy())))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_command_line_is_what_spawn_ssh_runs() {
+        let mut target = SshTarget::new("me@box");
+        target.server_bin = "env RUST_LOG=debug gliff-server".into();
+        target.server_args = vec!["--headless".into(), "--mute-local-audio".into()];
+        target.ssh_args = vec!["-p".into(), "2222".into()];
+        target.askpass = Some("/native/helper".into());
+        let line = command_line(&target);
+        assert!(
+            line.starts_with("ssh -T -o Compression=no -o IPQoS=lowdelay -p 2222 -- me@box '"),
+            "{line}"
+        );
+        //= The remote command is one quoted word holding the server and its flags.
+        let remote = remote_command(&target);
+        assert_eq!(
+            line,
+            format!(
+                "ssh -T -o Compression=no -o IPQoS=lowdelay -p 2222 -- me@box {}",
+                shell_quote(&remote)
+            )
+        );
+        assert!(remote.contains("--stdio") && remote.contains("'--mute-local-audio'"));
+        assert!(!line.contains("helper"), "no GUI prompt in a terminal line");
+        assert_eq!(shell_word("a b"), "'a b'");
+        assert_eq!(shell_word("it's"), r"'it'\''s'");
+        assert_eq!(shell_word(""), "''");
+        assert_eq!(shell_word("user@host.local"), "user@host.local");
+    }
 
     #[test]
     fn host_cannot_supply_ssh_options() {

@@ -2227,6 +2227,10 @@ final class SettingsWindow: NSObject, PanelWindow, NSApplicationDelegate, NSWind
     let speakersReset = NSButton(title: "Reset", target: nil, action: nil)
     // General: options for Gliff itself, not a machine (state["app"]).
     let quitBox = NSButton(checkboxWithTitle: "Quit Gliff when its last window closes", target: nil, action: nil)
+    // Command line: what the selected scope's settings come to (state's
+    // "commands" / "defaults_commands"), to run or debug from a terminal.
+    let clientLine = NSTextField(wrappingLabelWithString: "")
+    let serverLine = NSTextField(wrappingLabelWithString: "")
     // Connect: open the selected machine in a new tab (inside the viewer
     // only; the settings helper at launch leaves that to the connection window).
     let connectButton = NSButton(title: "Connect", target: nil, action: nil)
@@ -2313,11 +2317,11 @@ final class SettingsWindow: NSObject, PanelWindow, NSApplicationDelegate, NSWind
     }
     /// The window and its controls; showing it is the caller's.
     func build() {
-        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 780, height: 600), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
+        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 780, height: 760), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
         w.title = "Gliff Settings"; w.delegate = self
         // A window of its own, never a tab of the viewer.
         w.tabbingMode = .disallowed; w.isReleasedWhenClosed = false
-        w.contentMinSize = NSSize(width: 700, height: 560)
+        w.contentMinSize = NSSize(width: 700, height: 700)
         let view = w.contentView!
 
         search.placeholderString = "Search machines"; search.delegate = self
@@ -2375,11 +2379,35 @@ final class SettingsWindow: NSObject, PanelWindow, NSApplicationDelegate, NSWind
         quitHelp.lineBreakMode = .byWordWrapping; quitHelp.maximumNumberOfLines = 3; quitHelp.preferredMaxLayoutWidth = 480
         let rule2 = NSBox(); rule2.boxType = .separator
         let generalStack = NSStackView(views: [general, quitBox, quitHelp])
+        // Command line: selectable, monospaced, each with Copy.
+        let commandTitle = label("Command line")
+        commandTitle.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
+        func commandRow(_ caption: String, _ field: NSTextField, _ tag: Int) -> NSStackView {
+            field.isSelectable = true
+            field.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
+            field.preferredMaxLayoutWidth = 420
+            field.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+            let copy = NSButton(title: "Copy", target: self, action: #selector(SettingsWindow.copyCommand(_:)))
+            copy.bezelStyle = .inline; copy.controlSize = .small; copy.tag = tag
+            copy.setAccessibilityLabel("Copy: \(caption)")
+            let line = NSStackView(views: [field, copy]); line.orientation = .horizontal; line.alignment = .top; line.spacing = 8
+            let both = NSStackView(views: [label(caption, secondary: true), line])
+            both.orientation = .vertical; both.alignment = .leading; both.spacing = 2
+            return both
+        }
+        let commandStack = NSStackView(views: [
+            commandTitle,
+            commandRow("Client, from a terminal (logs there)", clientLine, 0),
+            commandRow("Server over SSH, to debug the connection", serverLine, 1),
+        ])
+        commandStack.orientation = .vertical; commandStack.alignment = .leading; commandStack.spacing = 6
+        serverLine.toolTip = "Runs gliff-server as Gliff does. It speaks Gliff's binary protocol on stdout; read its errors and logs on stderr, then press Ctrl+C."
+        clientLine.toolTip = "Opens this machine from a terminal with these settings; RUST_LOG=info prints the connection log there."
         generalStack.orientation = .vertical; generalStack.alignment = .leading; generalStack.spacing = 4
         let headerRow = NSStackView(views: [heading, NSView(), connectButton])
         headerRow.orientation = .horizontal; headerRow.alignment = .centerY; headerRow.spacing = 8
         heading.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        let form = NSStackView(views: [headerRow, scopeNote, display, clip, again, speakers, server, rule, rule2, generalStack, errorLabel, NSView(), pathLabel])
+        let form = NSStackView(views: [headerRow, scopeNote, display, clip, again, speakers, server, rule, commandStack, rule2, generalStack, errorLabel, NSView(), pathLabel])
         form.orientation = .vertical; form.alignment = .leading; form.spacing = 14
         form.translatesAutoresizingMaskIntoConstraints = false
         rule2.widthAnchor.constraint(equalTo: form.widthAnchor).isActive = true
@@ -2451,6 +2479,11 @@ final class SettingsWindow: NSObject, PanelWindow, NSApplicationDelegate, NSWind
         speakersBox.state = m.value as? Bool == true ? .on : .off
         speakersOrigin.stringValue = m.origin; speakersReset.isHidden = !m.here
         quitBox.state = (state["app"] as? [String: Any])?["quit_on_last_window"] as? Bool == true ? .on : .off
+        let commands: [String: Any]? = selected.isEmpty
+            ? state["defaults_commands"] as? [String: Any]
+            : (state["machines"] as? [[String: Any]] ?? []).first(where: { $0["name"] as? String == selected })?["commands"] as? [String: Any]
+        clientLine.stringValue = commands?["client"] as? String ?? ""
+        serverLine.stringValue = commands?["server"] as? String ?? ""
         let b = effective("server_bin")
         serverBin.placeholderString = inherited("server_bin").0 as? String ?? "gliff-server"
         // Do not replace text the user is typing.
@@ -2479,6 +2512,13 @@ final class SettingsWindow: NSObject, PanelWindow, NSApplicationDelegate, NSWind
         }
         guard !name.isEmpty else { return }
         event(["type": "connect_machine", "host": name])
+    }
+    /// Copy (Command line): the client line (tag 0) or the server line (1).
+    @objc func copyCommand(_ sender: NSButton) {
+        let text = sender.tag == 0 ? clientLine.stringValue : serverLine.stringValue
+        guard !text.isEmpty else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
     }
     @objc func quitChanged(_ sender: Any?) {
         guard !updating else { return }
