@@ -274,6 +274,19 @@ completes from the same list: the rest of the newest matching machine is
 filled in and selected, so typing on replaces it and Tab or Return keeps it.
 Deleting never brings a completion back.
 
+### Machines on a mesh VPN
+
+Bonjour stays on one LAN. Machines on a mesh VPN this Mac is part of are
+listed too, after the nearby computers: **Tailscale** (and Headscale, which
+uses the same client; Linux and macOS peers, by MagicDNS name) and
+**Rayfish** (each network's peers, as `HOST.NETWORK.ray`). Gliff runs
+`tailscale status --json` and `ray status --json` (from the PATH, or
+Tailscale.app, Homebrew and `~/.local/bin`) when the window opens and on
+Refresh; a missing or stopped client is skipped. A peer has no user, so
+ssh uses your SSH configuration's (add `user@` in SSH Address, or a `User`
+line in `~/.ssh/config`). On Linux, the network button next to the address
+bar lists the same machines.
+
 ### When nothing is found
 
 The usual cause is the host: installing gliff does not start advertising.
