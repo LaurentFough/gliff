@@ -14,6 +14,31 @@ back to the CPU where that is unavailable.
 
 ![A gliff window showing a terminal on a remote machine](.github/assets/screenshot.png)
 
+## Contents
+
+<!-- Generated from the headings; update it when a heading changes. -->
+
+- [New in this fork](#new-in-this-fork)
+  - [Upstream PRs included](#upstream-prs-included)
+  - [Fork features](#fork-features)
+  - [Screenshots](#screenshots)
+  - [Status](#status)
+- [What you get](#what-you-get)
+- [Requirements](#requirements)
+- [Install](#install)
+  - [Build from source (this fork)](#build-from-source-this-fork)
+  - [Upstream package](#upstream-package)
+  - [macOS details](#macos-details)
+  - [Arch Linux / Omarchy details](#arch-linux--omarchy-details)
+  - [Make targets](#make-targets)
+- [Use](#use)
+- [If something does not work](#if-something-does-not-work)
+- [Changes in this fork](#changes-in-this-fork)
+  - [Upstream pull requests merged](#upstream-pull-requests-merged)
+  - [macOS](#macos)
+  - [Build and checks](#build-and-checks)
+- [More](#more)
+
 ## New in this fork
 
 This fork ([LaurentFough/gliff](https://github.com/LaurentFough/gliff)) builds on acrogenesis' macOS client and host and adds the features below. See [ForkNews.md](ForkNews.md) for more details, and [ToDone.md](ToDone.md) for the full state and log; the detailed notes are under [Changes in this fork](#changes-in-this-fork).

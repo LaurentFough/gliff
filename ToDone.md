@@ -228,6 +228,9 @@ Support today:
 
 Newest first. Format: `### YYYY-MM-DD — summary (commit)`, then a line or two.
 
+### 2026-11-02 — README: table of contents
+A Contents list (every `##` and `###` heading, GitHub anchors) after the introduction, before "New in this fork".
+
 ### 2026-11-02 — README: build from source for this fork
 Install now starts with "Build from source (this fork)": clone LaurentFough/gliff, then macOS (`xcode-select --install`, rustup, `make macos`) and Arch/Omarchy (`base-devel git`, `make install`, `gliff-enable-discovery`). The OPR package is labelled as upstream (without the fork's features); the old `git clone omacom/gliff` source build is gone; macOS and Arch details have their own headings.
 
