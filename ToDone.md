@@ -204,7 +204,7 @@ Support today:
 
 ### Ideas (not decided)
 
-- [ ] Tailnet machines in the connection window (Tailscale peers, for hosts mDNS cannot reach).
+- [ ] Mesh VPN machines, on `feature/mesh-peers` (testing pending): Tailscale/Headscale and Rayfish peers in the Mac connection window (after the Bonjour computers; Refresh asks again) and in a menu by the Linux address bar. Later: NetBird (`netbird status --json`, ½ day), ZeroTier (Central API token or ZeroNSD, 1–1½ days).
 - [ ] Settings ▸ Connect: switch to the machine's open tab instead of opening a second one.
 - [ ] Connect in the stand-alone Settings window at launch (opened from the launch connection window; today only inside the viewer).
 - [ ] Open the launch connection window inside the viewer too, so Gliff is one process from the start.
@@ -227,6 +227,9 @@ Support today:
 ## Log
 
 Newest first. Format: `### YYYY-MM-DD — summary (commit)`, then a line or two.
+
+### 2026-11-02 — Mesh VPN machines: Tailscale/Headscale and Rayfish (`feature/mesh-peers`)
+`gliff_transport::mesh`: runs `tailscale status --json` (Linux and macOS peers; MagicDNS name, else first IP; Headscale uses the same client) and `ray status --json` (each network's peers as `HOST.NETWORK.ray`, else IPv6; offline only after a failed reach), each with a 4 s timeout, found on PATH or their usual places (Tailscale.app, Homebrew, ~/.local/bin); addresses checked like the connection window's; JSON that is not the expected status (another `ray`) yields nothing. Mac: the connection window lists them after the Bonjour computers (`mesh_peers`; Refresh sends `refresh_mesh`). Linux: a mesh menu button in the address bar, filled when it opens; choosing a peer connects. Tests: both parsers, address checks, missing programs, the Mac command. Clippy (Linux, stubbed libraries) and rustfmt clean.
 
 ### 2026-11-02 — README: table of contents
 A Contents list (every `##` and `###` heading, GitHub anchors) after the introduction, before "New in this fork".

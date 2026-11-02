@@ -1729,6 +1729,9 @@ final class ComputerPicker: NSObject, PanelWindow, NSApplicationDelegate, NSWind
     var window: NSWindow?
     var listHeight: NSLayoutConstraint?
     var rows: [NearbyComputer] = []
+    // Mesh VPN peers from the client (mesh_peers: Tailscale/Headscale,
+    // Rayfish), listed after the Bonjour computers.
+    var meshRows: [NearbyComputer] = []
     var updating = false
     var finished = false
     var selectedID: String?
@@ -1964,6 +1967,19 @@ final class ComputerPicker: NSObject, PanelWindow, NSApplicationDelegate, NSWind
     func handle(_ cmd: [String: Any]) {
         if cmd["type"] as? String == "close_panel" { dismiss(); return }
         if cmd["type"] as? String == "cancel" { self.cancel(nil) }
+        if cmd["type"] as? String == "mesh_peers" {
+            let peers = cmd["peers"] as? [[String: Any]] ?? []
+            meshRows = peers.compactMap { p in
+                guard let address = p["address"] as? String, ComputerPicker.validAddress(address) else { return nil }
+                let source = p["source"] as? String ?? "Mesh"
+                let name = p["name"] as? String ?? address
+                let network = (p["network"] as? String).map { " \($0)" } ?? ""
+                let state = p["online"] as? Bool == false ? ", offline" : ""
+                return NearbyComputer(id: "mesh:\(source):\(address)", name: "\(name) · \(source)\(network)\(state)",
+                                      host: address, port: 22, user: "", platform: source.lowercased())
+            }
+            update()
+        }
         if cmd["type"] as? String == "machine_settings" {
             self.configScreens = cmd["screens"] as? [String: String] ?? [:]
             self.pinned = Set(cmd["pinned"] as? [String] ?? [])
@@ -1982,7 +1998,10 @@ final class ComputerPicker: NSObject, PanelWindow, NSApplicationDelegate, NSWind
         }
     }
     func update() {
-        updating = true; rows = nearby.computers; table.reloadData()
+        //= Bonjour first, then mesh peers whose address is not already listed.
+        let local = nearby.computers
+        let seen = Set(local.map { $0.host })
+        updating = true; rows = local + meshRows.filter { !seen.contains($0.host) }; table.reloadData()
         if let index = rows.firstIndex(where: { $0.id == selectedID }) {
             table.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false)
         }
@@ -2132,7 +2151,7 @@ final class ComputerPicker: NSObject, PanelWindow, NSApplicationDelegate, NSWind
         if note.object as? NSTextField === address { autocompleteAddress() }
         restoreScreenPreference()
     }
-    @objc func refresh(_ sender: Any?) { nearby.start() }
+    @objc func refresh(_ sender: Any?) { nearby.start(); send(["type": "refresh_mesh"]) }
     func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
         if commandSelector == #selector(NSResponder.insertNewline(_:)) { connect(nil); return true }
         if commandSelector == #selector(NSResponder.cancelOperation(_:)) { cancel(nil); return true }

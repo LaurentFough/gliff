@@ -547,6 +547,11 @@ gliff 0.4.1).
   it. `make video-check` checks the output and compares decode times (4K
   4:4:4: 6.9 ms GPU against 18.8 ms CPU). See
   [macOS support](docs/macos.md).
+- **Mesh VPN machines.** The connection window (and, on Linux, a menu by
+  the address bar) lists peers from Tailscale/Headscale and Rayfish, for
+  hosts mDNS cannot reach: `tailscale status --json` / `ray status --json`
+  through `gliff_transport::mesh`, with a timeout, skipped when the client
+  is missing. See [macOS support](docs/macos.md#machines-on-a-mesh-vpn).
 - **Command line in Settings.** Both settings windows show what the selected
   machine's settings come to on the command line, with Copy: the client
   (`RUST_LOG=info gliff [flags] user@host`) and the exact ssh command that

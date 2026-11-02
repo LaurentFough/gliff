@@ -362,8 +362,15 @@ fn build_ui(app: &adw::Application, cli: &Cli) {
         .icon_name(CONNECT_ICON)
         .tooltip_text("Connect")
         .build();
+    //= Machines on the mesh VPNs this computer is on (Tailscale/Headscale,
+    //= Rayfish); install_mesh_menu fills the list each time it opens.
+    let mesh_btn = gtk::MenuButton::builder()
+        .icon_name("network-workgroup-symbolic")
+        .tooltip_text("Machines on your mesh VPNs (Tailscale, Rayfish)")
+        .build();
     let address_bar = gtk::Box::builder().css_classes(["linked"]).build();
     address_bar.append(&entry);
+    address_bar.append(&mesh_btn);
     address_bar.append(&connect_btn);
     let add_revealer = gtk::Revealer::builder()
         .transition_type(gtk::RevealerTransitionType::SlideRight)
@@ -527,6 +534,7 @@ fn build_ui(app: &adw::Application, cli: &Cli) {
     }
     install_sound_button(&ui);
     install_address_bar(&ui, &connect_btn);
+    install_mesh_menu(&ui, &mesh_btn);
     refresh_tabs(&ui);
 
     // Fullscreen toggle.
@@ -686,6 +694,89 @@ fn install_address_bar(ui: &Rc<App>, connect_btn: &gtk::Button) {
         });
     }
     ui.entry.add_controller(keys);
+}
+
+/// The mesh VPN menu: when it opens, ask every mesh client for its peers
+/// (off the UI thread, `gliff_transport::mesh`), then list them; choosing
+/// one connects to it like typing it into the address bar.
+fn install_mesh_menu(ui: &Rc<App>, button: &gtk::MenuButton) {
+    let list = gtk::ListBox::builder()
+        .selection_mode(gtk::SelectionMode::None)
+        .css_classes(["navigation-sidebar"])
+        .build();
+    let status = gtk::Label::builder()
+        .css_classes(["dim-label"])
+        .margin_top(6)
+        .margin_bottom(6)
+        .margin_start(12)
+        .margin_end(12)
+        .wrap(true)
+        .max_width_chars(36)
+        .build();
+    let scroll = gtk::ScrolledWindow::builder()
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .propagate_natural_height(true)
+        .max_content_height(360)
+        .child(&list)
+        .build();
+    let body = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    body.append(&status);
+    body.append(&scroll);
+    let popover = gtk::Popover::builder().child(&body).build();
+    button.set_popover(Some(&popover));
+    {
+        let (ui, list, status) = (Rc::downgrade(ui), list.clone(), status.clone());
+        popover.connect_show(move |popover| {
+            while let Some(row) = list.first_child() {
+                list.remove(&row);
+            }
+            status.set_label("Asking Tailscale and Rayfish…");
+            status.set_visible(true);
+            let (ui, list, status, popover) =
+                (ui.clone(), list.clone(), status.clone(), popover.clone());
+            glib::spawn_future_local(async move {
+                let peers =
+                    gio::spawn_blocking(|| gliff_transport::mesh::discover(Duration::from_secs(4)))
+                        .await
+                        .unwrap_or_default();
+                if peers.is_empty() {
+                    status.set_label(
+                        "No machines found. Is Tailscale or Rayfish running and logged in?",
+                    );
+                    return;
+                }
+                status.set_visible(false);
+                for peer in peers {
+                    let network = peer
+                        .network
+                        .as_deref()
+                        .map(|n| format!(" {n}"))
+                        .unwrap_or_default();
+                    let state = if peer.online { "" } else { ", offline" };
+                    let row = adw::ActionRow::builder()
+                        .title(&peer.name)
+                        .subtitle(format!(
+                            "{} · {}{network}{state}",
+                            peer.address, peer.source
+                        ))
+                        .use_markup(false)
+                        .activatable(true)
+                        .build();
+                    let (ui, popover, address) =
+                        (ui.clone(), popover.clone(), peer.address.clone());
+                    row.connect_activated(move |_| {
+                        popover.popdown();
+                        if let Some(ui) = ui.upgrade() {
+                            //= user@ comes from ssh's config, as for a typed name.
+                            ui.entry.set_text(&address);
+                            connect_from_address_bar(&ui);
+                        }
+                    });
+                    list.append(&row);
+                }
+            });
+        });
+    }
 }
 
 /// Show the address bar in place of the +, or fold it back. With no tabs
