@@ -228,6 +228,9 @@ Support today:
 
 Newest first. Format: `### YYYY-MM-DD — summary (commit)`, then a line or two.
 
+### 2026-11-02 — README brought in sync
+Fork features: auto-reconnect on both settings windows, shared settings rows, checks (Rust version check, toolchain pin, Linux clippy) and fixes (doas installs, discovery hint); status rows for build-once installs, Host speakers / Linux Reconnect, the Command line, CI releases (not run yet) and Intel packages (untested). Detailed notes: CI releases, Rust version, Linux root installs, screenshots and plans. ForkNews matches. The Settings screenshot predates Host speakers and the Command line.
+
 ### 2026-11-02 — Merge `feature/command-preview`
 Tested on both clients: the Command line section, Copy, the client and server lines. No-fast-forward merge into the working branch.
 
