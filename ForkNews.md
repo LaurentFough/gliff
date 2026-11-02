@@ -5,7 +5,7 @@ slug: gliff-fork-news
 author: LaurentFough
 type: changelog
 date-created: 2026-10-29
-date-modified: 2026-10-31
+date-modified: 2026-11-02
 date-published:
 source: https://github.com/LaurentFough/gliff
 domain: remote-desktop
@@ -44,7 +44,7 @@ A quick look at what this fork adds. The README carries the same list; [ToDone.m
 - **Makefile**: one front end for `bin/` and `scripts/`. `make macos` builds, signs, installs and verifies; `make install` on Arch; also `make check`, `make video-check` and `make distclean`; a project-wide `.gitignore`.
 - **Build once, install on other Macs**: `make install` skips an unchanged build (a build ID in the app); `make install-package` installs a ZIP from another Mac and re-signs it locally; `make release-upload` / `make install-release` carry it through GitHub Releases. Apple Silicon. *(Tested.)*
 - **Build once, install on other Arch/Omarchy machines**: the same `make package` / `install-package` / `release-upload` / `install-release` with a pacman package (`PKG=`, `linux-COMMIT` releases); `make install` skips an unchanged build. *(Tested.)*
-- **Command line in Settings**: each machine's client command (`RUST_LOG=info gliff [flags] user@host`) and the exact ssh server command, with Copy, in both clients' Settings, for running or debugging a connection from a terminal; new `--mute-host-speakers` flag. *(New; testing pending.)*
+- **Command line in Settings**: each machine's client command (`RUST_LOG=info gliff [flags] user@host`) and the exact ssh server command, with Copy, in both clients' Settings, for running or debugging a connection from a terminal; new `--mute-host-speakers` flag. *(Tested.)*
 - **Releases built by CI**: `make release-ci` runs the fork's "Fork builds" workflow on GitHub Actions for the pushed branch (checks, Mac ZIPs for Apple Silicon and Intel, the Arch package) and publishes one `build-COMMIT` pre-release that `make install-release` finds on either system. *(New; testing pending.)*
 - **Checks**: `make video-check` checks GPU output against the CPU decoder and benchmarks both; the ssh login-shell test no longer depends on your shell setup.
 - **Fixes**: Mac install and signing (`plutil`, a custom cargo `target-dir`); the client ignores stray sound packets from a host.

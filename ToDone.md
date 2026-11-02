@@ -5,7 +5,7 @@ slug: gliff-macos-todone
 author: LaurentFough
 type: report
 date-created: 2026-10-29
-date-modified: 2026-10-31
+date-modified: 2026-11-02
 date-published:
 source: https://github.com/LaurentFough/gliff
 domain: remote-desktop
@@ -193,7 +193,7 @@ Support today:
 - [ ] An iOS/iPadOS client: plan, effort and open decisions in [docs/feature-future/ios-ipados-plan.md](docs/feature-future/ios-ipados-plan.md) (Phase 0 spike first).
 - [ ] Several clients on one desktop: plan, levels and open decisions in [docs/feature-future/multi-client-plan.md](docs/feature-future/multi-client-plan.md) (Level 0 test first; for later).
 
-- [ ] Command line in Settings, on `feature/command-preview` (testing pending): Linux Settings ▸ Command line and Mac Settings ▸ Command line show the client and ssh server lines for the selected machine (and `user@host` for the defaults), follow setting changes, and Copy works; the copied client line opens the machine; the copied server line starts `gliff-server` (protocol on stdout, errors on stderr).
+- [x] Command line in Settings (tested and merged 2026-11-02): Linux Settings ▸ Command line and Mac Settings ▸ Command line show the client and ssh server lines for the selected machine (and `user@host` for the defaults), follow setting changes, and Copy works; the copied client line opens the machine; the copied server line starts `gliff-server` (protocol on stdout, errors on stderr).
 
 ### Build and release
 
@@ -227,6 +227,9 @@ Support today:
 ## Log
 
 Newest first. Format: `### YYYY-MM-DD — summary (commit)`, then a line or two.
+
+### 2026-11-02 — Merge `feature/command-preview`
+Tested on both clients: the Command line section, Copy, the client and server lines. No-fast-forward merge into the working branch.
 
 ### 2026-11-01 — Command line in Settings (`feature/command-preview`)
 `gliff_settings::command` (client line: `RUST_LOG=info gliff` with every option that has a flag; `shell_word` quoting) and `gliff_transport::ssh_command_line` (the exact ssh argv `spawn_ssh` runs, without the GUI askpass). Mac: `settings::server_args` shared by the session and Settings; `settings_state` carries `commands` per machine and `defaults_commands`; Settings gains a Command line section (selectable, monospaced, Copy). Linux: `server_args_for`; settings window gains a Command line group (selectable subtitles, copy buttons) through `Env::commands`. Both clients: `--mute-host-speakers`. Checked here: tests for gliff-settings and gliff-transport pass; clippy -D warnings on gliff, gliff-settings, gliff-transport, gliff-macos (Linux, stubbed system libraries) passes; rustfmt clean.
