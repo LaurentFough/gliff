@@ -174,7 +174,7 @@ Support today:
 - [ ] A decode (GPU/CPU) option in the Mac settings window (config-only for now).
 - [x] Host speakers setting (tested and merged 2026-11-01): shared `mute_host_speakers` (default off) adds `--mute-local-audio`; Linux Settings ▸ Sound, Mac Settings ▸ Host speakers; a change reconnects.
 - [ ] Sound from a Mac host (ScreenCaptureKit audio capture + #80's Opus encoder).
-- [ ] A warning when "Private screen" is chosen with a Mac host.
+- [x] A warning when "Private screen" is chosen with a Mac host (tested 2026-11-03): the Mac server refuses `--headless` ("macOS supports mirroring physical displays; --headless requires a Hyprland host") and the client shows it.
 - [x] Tabs on the Mac: merged 2026-10-29 (one viewer process for every connection); several connections in tabs tested 2026-10-30; the rest under Deferred testing.
 - [x] Reconnect for dead sessions on the Mac: merged 2026-10-29; testing tabled, see Deferred testing.
 - [ ] Viewer and client CPU use and frame rate in a live GPU session (Activity Monitor).
@@ -227,6 +227,9 @@ Support today:
 ## Log
 
 Newest first. Format: `### YYYY-MM-DD — summary (commit)`, then a line or two.
+
+### 2026-11-03 — Private screen with a Mac host: tested
+Choosing Private screen for a Mac host shows the Mac server's refusal as a warning; the follow-up is ticked.
 
 ### 2026-11-03 — First CI release run passed
 "Fork builds" run 41574690995 (`make release-ci` on c331ac1): checks and packages passed on macos-15, macos-15-intel and Arch; pre-release `build-c331ac1b2d81` holds the arm64 and x86_64 Mac ZIPs, the Arch package and their `.sha256`. Installing from it (`make install-release TAG=build-c331ac1b2d81`) is the remaining test. README and ForkNews status updated.
