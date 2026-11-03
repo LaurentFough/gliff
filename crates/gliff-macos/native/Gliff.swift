@@ -1631,9 +1631,12 @@ struct NearbyComputer {
     let user: String
     let platform: String
     var address: String { user.isEmpty ? host : "\(user)@\(host)" }
+    // The Computer column: "hostname (local)" for a Bonjour computer; a mesh
+    // peer's name already reads "hostname (ts.net)" or "hostname (rayfish)".
     var displayName: String {
+        if id.hasPrefix("mesh:") { return name }
         let hostname = host.hasSuffix(".local") ? String(host.dropLast(6)) : host
-        return name == "Gliff on \(hostname) (\(user))" ? hostname : name
+        return "\(hostname) (local)"
     }
     var value: [String: Any] { ["name": name, "host": host, "port": port, "user": user, "platform": platform] }
 }
@@ -1972,10 +1975,9 @@ final class ComputerPicker: NSObject, PanelWindow, NSApplicationDelegate, NSWind
             meshRows = peers.compactMap { p in
                 guard let address = p["address"] as? String, ComputerPicker.validAddress(address) else { return nil }
                 let source = p["source"] as? String ?? "Mesh"
+                let label = p["label"] as? String ?? source.lowercased()
                 let name = p["name"] as? String ?? address
-                let network = (p["network"] as? String).map { " \($0)" } ?? ""
-                let state = p["online"] as? Bool == false ? ", offline" : ""
-                return NearbyComputer(id: "mesh:\(source):\(address)", name: "\(name) · \(source)\(network)\(state)",
+                return NearbyComputer(id: "mesh:\(source):\(address)", name: "\(name) (\(label))",
                                       host: address, port: 22, user: "", platform: source.lowercased())
             }
             update()

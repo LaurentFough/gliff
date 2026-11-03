@@ -228,6 +228,9 @@ Support today:
 
 Newest first. Format: `### YYYY-MM-DD — summary (commit)`, then a line or two.
 
+### 2026-11-03 — Mesh peers: Tailscale found on the Mac; short labels; `gliff --mesh`
+First test: no Tailscale machines in the Mac list. Cause: the Mac's Tailscale CLI is Tailscale.app's binary, which opens the app instead of answering unless it looks run from a terminal; every query now sets `TAILSCALE_BE_CLI=1` (Tailscale's documented switch), with a regression test. Computer column: `hostname (local)`, `hostname (ts.net)`, `hostname (rayfish)` (Linux menu the same). New `gliff --mesh` on both clients prints each source's program, outcome (ok, not installed, timed out, failed with its first stderr line, not JSON) and peers.
+
 ### 2026-11-02 — Mesh VPN machines: Tailscale/Headscale and Rayfish (`feature/mesh-peers`)
 `gliff_transport::mesh`: runs `tailscale status --json` (Linux and macOS peers; MagicDNS name, else first IP; Headscale uses the same client) and `ray status --json` (each network's peers as `HOST.NETWORK.ray`, else IPv6; offline only after a failed reach), each with a 4 s timeout, found on PATH or their usual places (Tailscale.app, Homebrew, ~/.local/bin); addresses checked like the connection window's; JSON that is not the expected status (another `ray`) yields nothing. Mac: the connection window lists them after the Bonjour computers (`mesh_peers`; Refresh sends `refresh_mesh`). Linux: a mesh menu button in the address bar, filled when it opens; choosing a peer connects. Tests: both parsers, address checks, missing programs, the Mac command. Clippy (Linux, stubbed libraries) and rustfmt clean.
 

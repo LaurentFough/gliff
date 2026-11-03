@@ -86,6 +86,10 @@ struct Cli {
     /// server's --mute-local-audio; as the machine's Sound setting).
     #[arg(long)]
     mute_host_speakers: bool,
+    /// Show what each mesh VPN client (Tailscale/Headscale, Rayfish) answers
+    /// and the machines it lists, then exit.
+    #[arg(long)]
+    mesh: bool,
 }
 
 /// Everything the UI shares with its callbacks.
@@ -246,6 +250,20 @@ pub(crate) fn main() -> glib::ExitCode {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
     let cli = Cli::parse();
+    if cli.mesh {
+        //= What each mesh VPN client answered, to see why a machine is missing.
+        for r in gliff_transport::mesh::reports(Duration::from_secs(4)) {
+            let program = r
+                .program
+                .map_or_else(|| "-".to_string(), |p| p.display().to_string());
+            println!("{}: {} ({program})", r.source, r.outcome);
+            for p in r.peers {
+                let state = if p.online { "online" } else { "offline" };
+                println!("  {} ({})  {}  {state}", p.name, p.label(), p.address);
+            }
+        }
+        return glib::ExitCode::SUCCESS;
+    }
     // GTK uses the program name as the Wayland app ID.
     glib::set_prgname(Some(APP_NAME));
     let app = adw::Application::builder().build();
@@ -747,18 +765,10 @@ fn install_mesh_menu(ui: &Rc<App>, button: &gtk::MenuButton) {
                 }
                 status.set_visible(false);
                 for peer in peers {
-                    let network = peer
-                        .network
-                        .as_deref()
-                        .map(|n| format!(" {n}"))
-                        .unwrap_or_default();
-                    let state = if peer.online { "" } else { ", offline" };
+                    let state = if peer.online { "" } else { " · offline" };
                     let row = adw::ActionRow::builder()
-                        .title(&peer.name)
-                        .subtitle(format!(
-                            "{} · {}{network}{state}",
-                            peer.address, peer.source
-                        ))
+                        .title(format!("{} ({})", peer.name, peer.label()))
+                        .subtitle(format!("{}{state}", peer.address))
                         .use_markup(false)
                         .activatable(true)
                         .build();

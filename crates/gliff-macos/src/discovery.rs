@@ -108,6 +108,7 @@ pub fn mesh_json(peers: &[gliff_transport::mesh::MeshPeer]) -> serde_json::Value
                 "name": p.name,
                 "address": p.address,
                 "online": p.online,
+                "label": p.label(),
                 "os": p.os,
             })
         })
@@ -118,6 +119,22 @@ pub fn mesh_json(peers: &[gliff_transport::mesh::MeshPeer]) -> serde_json::Value
 /// How long a mesh status command may take before it is skipped.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 const MESH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(4);
+
+/// `gliff --mesh`: what each mesh VPN client answered, and the peers.
+pub fn mesh_report(timeout: std::time::Duration) -> serde_json::Value {
+    let list: Vec<serde_json::Value> = gliff_transport::mesh::reports(timeout)
+        .into_iter()
+        .map(|r| {
+            serde_json::json!({
+                "source": r.source,
+                "program": r.program.map(|p| p.display().to_string()),
+                "outcome": r.outcome,
+                "peers": mesh_json(&r.peers)["peers"],
+            })
+        })
+        .collect();
+    serde_json::Value::Array(list)
+}
 
 /// Ask every mesh VPN client for its peers, off the UI thread.
 #[cfg(target_os = "macos")]
@@ -308,6 +325,7 @@ mod tests {
         assert_eq!(v["peers"][0]["address"], "omarchy.lab.ray");
         assert_eq!(v["peers"][0]["source"], "Rayfish");
         assert_eq!(v["peers"][0]["online"], true);
+        assert_eq!(v["peers"][0]["label"], "rayfish");
     }
     use serde_json::json;
 

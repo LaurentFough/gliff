@@ -15,11 +15,15 @@
 //!   `HOSTNAME.NETWORK.ray` (Rayfish Magic DNS; else the peer's IPv6), online
 //!   unless Rayfish marked them offline after a failed reach.
 //!
+//! On macOS the Tailscale CLI is the app's own binary, which opens the app
+//! window instead of answering unless it looks run from a terminal; every
+//! command here sets `TAILSCALE_BE_CLI=1`, which forces the CLI.
+//!
 //! Refs: <https://tailscale.com/kb/1080/cli>,
 //! <https://github.com/rayfish/rayfish> (`ray status --json`,
 //! `ray-proto/src/ipc.rs` NetworkStatus / PeerStatus).
 //!
-//! Version: 1.0.0
+//! Version: 1.1.0
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -43,6 +47,34 @@ pub struct MeshPeer {
     pub online: bool,
     /// The machine's system, when the source says.
     pub os: Option<String>,
+}
+
+impl MeshPeer {
+    /// The short tag the connection window shows after the name:
+    /// `ts.net` for Tailscale/Headscale, `rayfish` for Rayfish.
+    pub fn label(&self) -> &'static str {
+        label_for(self.source)
+    }
+}
+
+/// The short tag for a source (see [`MeshPeer::label`]).
+pub fn label_for(source: &str) -> &'static str {
+    match source {
+        "Tailscale" => "ts.net",
+        "Rayfish" => "rayfish",
+        _ => "mesh",
+    }
+}
+
+/// What asking one source came to, for `gliff --mesh`.
+#[derive(Debug, Clone)]
+pub struct Report {
+    pub source: &'static str,
+    /// The program run, if one was found.
+    pub program: Option<PathBuf>,
+    /// "ok", "not installed", "timed out", "failed: …" or "not its status".
+    pub outcome: String,
+    pub peers: Vec<MeshPeer>,
 }
 
 /// A mesh VPN client: its program, where it may be installed (GUI apps on
@@ -202,18 +234,34 @@ fn is_executable(p: &Path) -> bool {
 
 /// Run one source's status command, giving up after `timeout`.
 pub fn query(source: &Source, timeout: Duration) -> Vec<MeshPeer> {
+    report(source, timeout).peers
+}
+
+/// Run one source's status command and say how it went.
+pub fn report(source: &Source, timeout: Duration) -> Report {
+    let done = |program: Option<PathBuf>, outcome: String, peers: Vec<MeshPeer>| {
+        tracing::debug!(source = source.name, %outcome, peers = peers.len(), "mesh status");
+        Report {
+            source: source.name,
+            program,
+            outcome,
+            peers,
+        }
+    };
     let Some(program) = find_program(source) else {
-        return Vec::new();
+        return done(None, "not installed".into(), Vec::new());
     };
     let child = Command::new(&program)
         .args(source.args)
+        //= macOS Tailscale.app: answer as the CLI, do not open the window.
+        .env("TAILSCALE_BE_CLI", "1")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn();
-    let Ok(child) = child else {
-        tracing::debug!(source = source.name, "mesh status did not start");
-        return Vec::new();
+    let child = match child {
+        Ok(child) => child,
+        Err(e) => return done(Some(program), format!("failed: {e}"), Vec::new()),
     };
     let (tx, rx) = mpsc::channel();
     let pid = child.id();
@@ -222,25 +270,46 @@ pub fn query(source: &Source, timeout: Duration) -> Vec<MeshPeer> {
     });
     let output = match rx.recv_timeout(timeout) {
         Ok(Ok(out)) if out.status.success() => out.stdout,
-        Ok(_) => {
-            tracing::debug!(source = source.name, "mesh status failed");
-            return Vec::new();
+        Ok(Ok(out)) => {
+            let err = String::from_utf8_lossy(&out.stderr);
+            let first = err
+                .lines()
+                .find(|l| !l.trim().is_empty())
+                .unwrap_or_default();
+            let first: String = first.chars().take(200).collect();
+            return done(
+                Some(program),
+                format!("failed: {}: {first}", out.status),
+                Vec::new(),
+            );
         }
+        Ok(Err(e)) => return done(Some(program), format!("failed: {e}"), Vec::new()),
         Err(_) => {
-            tracing::debug!(source = source.name, "mesh status timed out");
             //= The waiting thread reaps it once it exits.
             let _ = Command::new("kill").arg(pid.to_string()).status();
-            return Vec::new();
+            return done(Some(program), "timed out".into(), Vec::new());
         }
     };
     match serde_json::from_slice::<Value>(&output) {
         Ok(v) => {
             let peers = (source.parse)(&v);
-            tracing::debug!(source = source.name, peers = peers.len(), "mesh peers");
-            peers
+            done(Some(program), "ok".into(), peers)
         }
-        Err(_) => Vec::new(),
+        Err(_) => done(
+            Some(program),
+            "not its status (output is not JSON)".into(),
+            Vec::new(),
+        ),
     }
+}
+
+/// Every source's report, in parallel (`gliff --mesh`).
+pub fn reports(timeout: Duration) -> Vec<Report> {
+    let handles: Vec<_> = SOURCES
+        .iter()
+        .map(|s| std::thread::spawn(move || report(s, timeout)))
+        .collect();
+    handles.into_iter().filter_map(|h| h.join().ok()).collect()
 }
 
 /// Every source at once: online peers first, then by mesh and name, one
@@ -331,6 +400,45 @@ mod tests {
     }
 
     #[test]
+    fn the_tailscale_app_is_asked_for_its_cli() {
+        //= A stand-in for /Applications/Tailscale.app/Contents/MacOS/Tailscale:
+        //= it answers only when TAILSCALE_BE_CLI=1 (else the real one opens a window).
+        let dir = std::env::temp_dir().join(format!("gliff-mesh-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("Tailscale");
+        std::fs::write(
+            &path,
+            "#!/bin/sh\n[ \"$TAILSCALE_BE_CLI\" = 1 ] || exit 3\n\
+             echo '{\"BackendState\":\"Running\",\"Peer\":{\"k\":{\"HostName\":\"omarchy\",\
+             \"DNSName\":\"omarchy.tail1.ts.net.\",\"OS\":\"linux\",\"Online\":true}}}'\n",
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let place: &'static str = Box::leak(path.display().to_string().into_boxed_str());
+        let places: &'static [&'static str] = Box::leak(vec![place].into_boxed_slice());
+        let s = Source {
+            name: "Tailscale",
+            program: "gliff-no-such-tailscale",
+            places,
+            args: &["status", "--json"],
+            parse: parse_tailscale,
+        };
+        let r = report(&s, Duration::from_secs(5));
+        assert_eq!(r.outcome, "ok");
+        assert_eq!(r.peers.len(), 1);
+        assert_eq!(r.peers[0].address, "omarchy.tail1.ts.net");
+        assert_eq!(r.peers[0].label(), "ts.net");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn labels_are_short() {
+        assert_eq!(label_for("Tailscale"), "ts.net");
+        assert_eq!(label_for("Rayfish"), "rayfish");
+    }
+
+    #[test]
     fn missing_programs_are_skipped() {
         let s = Source {
             name: "None",
@@ -340,5 +448,9 @@ mod tests {
             parse: parse_rayfish,
         };
         assert!(query(&s, Duration::from_millis(100)).is_empty());
+        assert_eq!(
+            report(&s, Duration::from_millis(100)).outcome,
+            "not installed"
+        );
     }
 }

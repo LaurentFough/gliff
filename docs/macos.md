@@ -282,7 +282,13 @@ uses the same client; Linux and macOS peers, by MagicDNS name) and
 **Rayfish** (each network's peers, as `HOST.NETWORK.ray`). Gliff runs
 `tailscale status --json` and `ray status --json` (from the PATH, or
 Tailscale.app, Homebrew and `~/.local/bin`) when the window opens and on
-Refresh; a missing or stopped client is skipped. A peer has no user, so
+Refresh; a missing or stopped client is skipped. The Computer column reads
+`hostname (local)` for a Bonjour computer, `hostname (ts.net)` for a
+Tailscale peer and `hostname (rayfish)` for a Rayfish one. Tailscale.app's
+CLI is asked with `TAILSCALE_BE_CLI=1`, as Tailscale documents for scripts
+(without it, the app opens its window instead of answering). When a machine
+is missing, `~/.local/bin/gliff --mesh` prints what each client answered and
+the machines it listed. A peer has no user, so
 ssh uses your SSH configuration's (add `user@` in SSH Address, or a `User`
 line in `~/.ssh/config`). On Linux, the network button next to the address
 bar lists the same machines.
