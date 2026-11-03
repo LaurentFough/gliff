@@ -157,7 +157,7 @@ Support today:
 |---|---|
 | Linux → Linux | Yes (#80; tested on the working branch 2026-10-31) |
 | Linux → Mac | Yes (tested 2026-10-29), including `--mute-local-audio` |
-| Mac → any | No: the Mac host does not send sound yet |
+| Mac → any | Built on `feature/mac-host-sound-info` (ScreenCaptureKit audio → Opus); testing pending. Host speakers does not mute a Mac host yet |
 
 - [x] Linux host → Linux client with sound, on the merged working branch (tested 2026-10-31).
 
@@ -171,13 +171,14 @@ Support today:
 
 ### Follow-ups
 
-- [ ] A decode (GPU/CPU) option in the Mac settings window (config-only for now).
+- [ ] A decode (GPU/CPU) option in the Mac settings window: built on `feature/mac-host-sound-info` (Settings ▸ Decode: Automatic, GPU, CPU); testing pending.
 - [x] Host speakers setting (tested and merged 2026-11-01): shared `mute_host_speakers` (default off) adds `--mute-local-audio`; Linux Settings ▸ Sound, Mac Settings ▸ Host speakers; a change reconnects.
-- [ ] Sound from a Mac host (ScreenCaptureKit audio capture + #80's Opus encoder).
+- [ ] Sound from a Mac host: built on `feature/mac-host-sound-info` (ScreenCaptureKit `capturesAudio` while a client plays sound, kind 7 PCM packets, `host_audio.rs` Opus); testing pending: Mac → Mac, Mac → Linux, Play Sound off/on, a background tab, a long session.
+- [ ] Host speakers on a Mac host (mute the Mac's output while a client listens; ScreenCaptureKit may record after the mute: to check). `--mute-local-audio` is accepted and ignored for now.
 - [x] A warning when "Private screen" is chosen with a Mac host (tested 2026-11-03): the Mac server refuses `--headless` ("macOS supports mirroring physical displays; --headless requires a Hyprland host") and the client shows it.
 - [x] Tabs on the Mac: merged 2026-10-29 (one viewer process for every connection); several connections in tabs tested 2026-10-30; the rest under Deferred testing.
 - [x] Reconnect for dead sessions on the Mac: merged 2026-10-29; testing tabled, see Deferred testing.
-- [ ] Viewer and client CPU use and frame rate in a live GPU session (Activity Monitor).
+- [ ] Viewer and client CPU use and frame rate in a live GPU session: Connection Info overlay built on `feature/mac-host-sound-info` (ⓘ title-bar button, Machine ▸ Show Connection Info ⌥⌘I: size, colour, tiers, fps, Mbit/s, decode ms, round trip, sound buffer, client and viewer CPU); testing pending, then compare with Activity Monitor.
 - [x] Connection window's known machines: list, search, choosing, double-click, autocomplete, File ▸ New Tab (tested 2026-10-30).
 - [x] + (adds the typed address) and − (asks, then forgets the machine and its settings) (tested 2026-10-30).
 - [x] Auto-reconnect on the Mac (tested 2026-10-30): Machine ▸ Reconnect Automatically off skips the launch reopen and drop retries; Settings ▸ Reconnect matches.
@@ -227,6 +228,9 @@ Support today:
 ## Log
 
 Newest first. Format: `### YYYY-MM-DD — summary (commit)`, then a line or two.
+
+### 2026-11-03 — Mac host sound, Decode in Settings, Connection Info (feature/mac-host-sound-info)
+Mac host: ScreenCaptureKit audio (48 kHz stereo, own process excluded) while the client wants sound (`audio` command → `capturesAudio`), kind 7 PCM to `host_audio.rs` (Opus, numbered, lossy queue via `Writer::offer`), `FEATURE_AUDIO` offered; `--mute-local-audio` accepted. Settings ▸ Decode (`decode`: auto/gpu/cpu, reconnects). Connection Info: `info.rs` meter (fps, Mbit/s, decode ms, ping RTT, stream, tiers, sound buffer) sent each second as `connection_info`; the viewer's translucent overlay adds client/viewer CPU (`proc_pid_rusage`). Rust clippy/fmt clean here; meter and Opus tests run here; Swift not compiled here.
 
 ### 2026-11-03 — Private screen with a Mac host: tested
 Choosing Private screen for a Mac host shows the Mac server's refusal as a warning; the follow-up is ticked.

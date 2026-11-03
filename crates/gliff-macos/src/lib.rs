@@ -12,7 +12,11 @@ pub mod settings;
 #[cfg(any(target_os = "macos", test))]
 mod encoder;
 #[cfg(any(target_os = "macos", test))]
+mod host_audio;
+#[cfg(any(target_os = "macos", test))]
 mod host_bridge;
+#[cfg(any(target_os = "macos", test))]
+mod info;
 
 #[cfg(any(target_os = "macos", test))]
 mod client;

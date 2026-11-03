@@ -1003,6 +1003,10 @@ where
         crate::clipboard::Bridge::new(gliff_transport::clipboard::Side::Client, display_tx.clone());
     let mut clips = clipboard.take_outbound();
     let mut deadline = Box::pin(tokio::time::sleep(Duration::from_secs(20)));
+    //= Connection Info: counted always, reported to a window once a second.
+    let mut meter = crate::info::Meter::new(host);
+    let mut info_tick = tokio::time::interval(crate::info::INTERVAL);
+    info_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let result: Result<Outcome> = async {
     loop {
         tokio::select! {
@@ -1010,6 +1014,13 @@ where
                 // An idle Linux desktop sends no video after refinement.
                 // Ask for a reply so the response timeout measures liveness.
                 out.send((ClientMsg::Ping { t: now_ms() }, Bytes::new())).await?;
+            }
+            _ = info_tick.tick(), if visible => {
+                //= A ping a second keeps the round trip current.
+                out.send((ClientMsg::Ping { t: now_ms() }, Bytes::new())).await?;
+                let report = meter.report(gpu, sound.audio_ms());
+                //= Dropped when the window is busy: the next one follows in a second.
+                let _ = display_tx.try_send((native::EVENT, serde_json::to_vec(&report)?));
             }
             _ = &mut deadline => bail!("server stopped responding for 20 seconds"),
             result = &mut writes => { result??; bail!("network writer stopped"); }
@@ -1042,6 +1053,7 @@ where
                     if let Some(frame_id) = ev["frame_id"].as_u64() {
                         gpu_errors = 0;
                         frames += 1;
+                        meter.decoded(ev["ms"].as_f64());
                         out.send((ClientMsg::FrameAck { frame_id, decoded_at_ms: now_ms() }, Bytes::new())).await?;
                     }
                 }
@@ -1133,6 +1145,7 @@ where
                     if let Some(frame) = decoder.flush()? {
                         show(&display_tx, visible, frame, scale).await?;
                         frames += 1;
+                        meter.decoded(None);
                         out.send((ClientMsg::FrameAck { frame_id: last_id, decoded_at_ms: now_ms() }, Bytes::new())).await?;
                     }
                 }
@@ -1161,7 +1174,7 @@ where
                                 display_tx.send((native::EVENT, serde_json::to_vec(&state)?)).await?;
                             }
                         }
-                        ServerMsg::StreamConfig { codec, chroma, width, height, scale_milli, .. } => {
+                        ServerMsg::StreamConfig { codec, chroma, width, height, scale_milli, pipeline, fps_cap, .. } => {
                             ensure!(got_hello && codec == Codec::H264 && width > 0 && height > 0 && scale_milli > 0, "unsupported stream configuration");
                             ensure!(matches!(chroma, ChromaMode::Single420 | ChromaMode::Dual420), "unsupported chroma mode");
                             // Pace, scale and pipeline metadata can change without
@@ -1182,12 +1195,15 @@ where
                                 display_tx.send((native::EVENT, serde_json::to_vec(&command)?)).await?;
                             }
                             scale = scale_milli;
+                            let stream = crate::info::Stream { width, height, full_colour: chroma == ChromaMode::Dual420, fps_cap };
+                            meter.configured(stream, pipeline.map(|p| p == gliff_proto::VideoPipeline::Gpu));
                             tracing::info!(width, height, scale_milli, ?chroma, gpu, "stream configured");
                         }
                         ServerMsg::VideoFrame { frame_id, data_len, aux_len, .. } if gpu => {
                             ensure!(payload.len() == data_len as usize + aux_len as usize, "invalid video payload");
                             ensure!(coded_stream.is_some(), "video before configuration");
                             last_id = frame_id;
+                            meter.received(payload.len());
                             //= Coded frames are never dropped (a lost P-frame corrupts
                             //= the next ones): wait for the window instead. The ack
                             //= follows its `decoded` event.
@@ -1198,14 +1214,20 @@ where
                             ensure!(payload.len() == data_len as usize + aux_len as usize, "invalid video payload");
                             let decoder = decoder.as_mut().context("video before configuration")?;
                             last_id = frame_id;
+                            meter.received(payload.len());
+                            let started = std::time::Instant::now();
                             match decoder.decode(&payload[..data_len as usize], &payload[data_len as usize..]) {
-                                Ok(Some(frame)) => { show(&display_tx, visible, frame, scale).await?; frames += 1; }
+                                Ok(Some(frame)) => {
+                                    meter.decoded(Some(started.elapsed().as_secs_f64() * 1000.0));
+                                    show(&display_tx, visible, frame, scale).await?; frames += 1;
+                                }
                                 Ok(None) => {}
                                 Err(e) => { tracing::warn!(error = %e, "decode failed; requesting keyframe"); out.send((ClientMsg::RequestKeyframe, Bytes::new())).await?; }
                             }
                             out.send((ClientMsg::FrameAck { frame_id, decoded_at_ms: now_ms() }, Bytes::new())).await?;
                         }
                         ServerMsg::Ping { t } => { out.send((ClientMsg::Pong { t }, Bytes::new())).await?; }
+                        ServerMsg::Pong { t, .. } => meter.pong(t, now_ms()),
                         ServerMsg::AudioStart { codec, sample_rate, channels } => sound.start(codec, sample_rate, channels),
                         ServerMsg::AudioFrame { seq, data_len } => {
                             ensure!(payload.len() == data_len as usize, "invalid audio payload");

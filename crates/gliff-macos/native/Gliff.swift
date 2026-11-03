@@ -420,6 +420,24 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate {
     let input = Input()
     var scale: UInt32 = 1000
     var config: SCStreamConfiguration?
+    // Sound for the client (crates/gliff-macos/src/host_audio.rs): on only
+    // while the client asked for it; packets are kind 7, interleaved 48 kHz
+    // stereo f32. Read on the audio queue, set on the main thread.
+    var audioOn = false
+    let audioQueue = DispatchQueue(label: "gliff.audio", qos: .userInteractive)
+    var audioFormatWarned = false
+    // Main thread: the stream is running, so its configuration can change.
+    var capturing = false
+    func setAudio(_ on: Bool) {
+        audioOn = on
+        // Before capture starts, start() applies it once running.
+        guard capturing, let stream = stream, let config = config, config.capturesAudio != on else { return }
+        config.capturesAudio = on
+        Task {
+            do { try await stream.updateConfiguration(config) }
+            catch { diagnostic("Gliff sound: could not turn capture \(on ? "on" : "off"): \(error.localizedDescription)") }
+        }
+    }
     func resize(_ width: Int, _ height: Int) {
         guard let stream = stream, let config = config else { return }
         let pw = CGDisplayPixelsWide(input.display), ph = CGDisplayPixelsHigh(input.display)
@@ -455,19 +473,59 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate {
             config.colorSpaceName = CGColorSpace.sRGB
             config.minimumFrameInterval = CMTime(value: 1, timescale: Int32(fps))
             config.queueDepth = 3; config.showsCursor = true
+            // Sound: off until the client asks (setAudio); Gliff's own sound
+            // is never sent back.
+            config.capturesAudio = false
+            config.sampleRate = 48_000; config.channelCount = 2
+            config.excludesCurrentProcessAudio = true
             self.config = config
             let filter = SCContentFilter(display: display, excludingWindows: [])
             let stream = SCStream(filter: filter, configuration: config, delegate: self)
             try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: DispatchQueue(label: "gliff.capture", qos: .userInteractive))
+            try stream.addStreamOutput(self, type: .audio, sampleHandlerQueue: audioQueue)
             self.stream = stream
             event(["type": "ready", "width": width, "height": height, "scale_milli": scale, "output": "display-\(display.displayID)"])
             try await stream.startCapture()
-            DispatchQueue.main.async { clipboard.start() }
+            DispatchQueue.main.async { self.capturing = true; if self.audioOn { self.setAudio(true) }; clipboard.start() }
         } catch { fail("Screen capture failed: \(error.localizedDescription)") }
     }
     func stream(_ stream: SCStream, didStopWithError error: Error) { fail("Screen capture stopped: \(error.localizedDescription)") }
     func stream(_ stream: SCStream, didOutputSampleBuffer sample: CMSampleBuffer, of type: SCStreamOutputType) {
-        autoreleasepool { sendFrame(sample, type) }
+        autoreleasepool { if type == .audio { sendAudio(sample) } else { sendFrame(sample, type) } }
+    }
+    /// One ScreenCaptureKit audio buffer as a kind 7 packet: interleaved
+    /// stereo f32 (mono is doubled). Other formats are dropped, once noted.
+    func sendAudio(_ sample: CMSampleBuffer) {
+        guard audioOn, sample.isValid, let desc = sample.formatDescription,
+              let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(desc)?.pointee else { return }
+        let float = asbd.mFormatID == kAudioFormatLinearPCM && asbd.mFormatFlags & kAudioFormatFlagIsFloat != 0 && asbd.mBitsPerChannel == 32
+        guard float, asbd.mSampleRate == 48_000, (1...2).contains(asbd.mChannelsPerFrame) else {
+            if !audioFormatWarned { audioFormatWarned = true; diagnostic("Gliff sound: unsupported capture format \(asbd.mSampleRate) Hz, \(asbd.mChannelsPerFrame) ch, flags \(asbd.mFormatFlags)") }
+            return
+        }
+        let frames = CMSampleBufferGetNumSamples(sample)
+        guard frames > 0, frames <= 48_000 else { return }
+        let channels = Int(asbd.mChannelsPerFrame)
+        let interleaved = asbd.mFormatFlags & kAudioFormatFlagIsNonInterleaved == 0
+        var out = [Float](repeating: 0, count: frames * 2)
+        do {
+            try sample.withAudioBufferList { list, _ in
+                guard let first = list.first, let left = first.mData?.assumingMemoryBound(to: Float.self) else { return }
+                if interleaved {
+                    let n = min(frames, Int(first.mDataByteSize) / 4 / channels)
+                    for i in 0..<n {
+                        out[2 * i] = left[i * channels]
+                        out[2 * i + 1] = channels > 1 ? left[i * channels + 1] : left[i * channels]
+                    }
+                } else {
+                    // Planar: one buffer per channel.
+                    let right = list.count > 1 ? list[1].mData?.assumingMemoryBound(to: Float.self) : nil
+                    let n = min(frames, Int(first.mDataByteSize) / 4)
+                    for i in 0..<n { out[2 * i] = left[i]; out[2 * i + 1] = right?[i] ?? left[i] }
+                }
+            }
+        } catch { return }
+        packet(7, out.withUnsafeBufferPointer { Data(buffer: $0) })
     }
     func sendFrame(_ sample: CMSampleBuffer, _ type: SCStreamOutputType) {
         guard type == .screen, sample.isValid, let buffer = sample.imageBuffer else { return }
@@ -1048,6 +1106,90 @@ final class GPUVideo {
     }
 }
 
+// MARK: - Connection Info
+//
+// A translucent panel over a tab's picture (RustDesk/AnyDesk-style): what
+// the client measures each second (crates/gliff-macos/src/info.rs,
+// "connection_info") plus the CPU use of the client and this viewer. Shown
+// for every tab while Machine ▸ Show Connection Info (or the window's ⓘ
+// button) is on; the choice is kept in this Mac's user defaults.
+
+/// CPU use of a process, as Activity Monitor shows it (100% = one core).
+final class CPUMeter {
+    private var last: [pid_t: (cpu: Double, at: Double)] = [:]
+    private var percent: [pid_t: Double] = [:]
+    private let timebase: Double = {
+        var t = mach_timebase_info_data_t(); mach_timebase_info(&t)
+        return t.denom == 0 ? 1 : Double(t.numer) / Double(t.denom)
+    }()
+    /// User + system time in seconds (rusage times are Mach ticks).
+    func cpuSeconds(_ pid: pid_t) -> Double? {
+        var info = rusage_info_v2()
+        let result = withUnsafeMutableBytes(of: &info) { raw -> Int32 in
+            guard let base = raw.baseAddress else { return -1 }
+            return proc_pid_rusage(pid, RUSAGE_INFO_V2, base.assumingMemoryBound(to: rusage_info_t?.self))
+        }
+        guard result == 0 else { return nil }
+        return Double(info.ri_user_time &+ info.ri_system_time) * timebase / 1_000_000_000
+    }
+    /// The percentage since the previous sample (at least half a second ago).
+    func sample(_ pid: pid_t) -> Double? {
+        guard pid > 1, let cpu = cpuSeconds(pid) else { return nil }
+        let now = ProcessInfo.processInfo.systemUptime
+        if let prev = last[pid] {
+            if now - prev.at < 0.5 { return percent[pid] }
+            percent[pid] = max(0, (cpu - prev.cpu) / (now - prev.at) * 100)
+        }
+        last[pid] = (cpu, now)
+        return percent[pid]
+    }
+}
+
+final class InfoOverlay: NSVisualEffectView {
+    // A wrapping label honours the report's line breaks.
+    let text = NSTextField(wrappingLabelWithString: "Connection Info\nWaiting for the first second…")
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        // Dark in light mode too, so it reads over any picture.
+        appearance = NSAppearance(named: .darkAqua)
+        material = .hudWindow; blendingMode = .withinWindow; state = .active
+        wantsLayer = true; layer?.cornerRadius = 8; layer?.masksToBounds = true
+        layer?.zPosition = 100; alphaValue = 0.9
+        text.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
+        text.textColor = .labelColor; text.maximumNumberOfLines = 0; text.preferredMaxLayoutWidth = 520
+        text.setAccessibilityLabel("Connection Info")
+        addSubview(text)
+        isHidden = true
+    }
+    required init?(coder: NSCoder) { nil }
+    // Clicks and the pointer go through to the remote picture.
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+    func place(in parent: NSView) {
+        let size = text.fittingSize
+        text.frame = NSRect(x: 10, y: 8, width: size.width, height: size.height)
+        frame = NSRect(x: 12, y: 12, width: size.width + 20, height: size.height + 16)
+    }
+    /// One report from the client, with the CPU figures sampled here.
+    func update(_ info: [String: Any], client: Double?, viewer: Double?) {
+        func num(_ key: String, _ digits: Int = 1) -> String? {
+            guard let v = info[key] as? Double ?? (info[key] as? Int).map(Double.init) else { return nil }
+            return String(format: "%.\(digits)f", v)
+        }
+        func pct(_ v: Double?) -> String { v.map { String(format: "%.0f%%", $0) } ?? "–" }
+        var lines = [info["host"] as? String ?? "Connection Info"]
+        let size = (info["width"] as? Int).flatMap { w in (info["height"] as? Int).map { "\(w)×\($0)" } } ?? "–"
+        lines.append("Video    \(size) \(info["colour"] as? String ?? "") · \(info["video"] as? String ?? "?")")
+        let cap = (info["fps_cap"] as? Int).map { " (cap \($0))" } ?? ""
+        lines.append("Rate     \(num("fps", 0) ?? "0") fps\(cap) · \(num("mbit") ?? "0") Mbit/s")
+        lines.append("Decode   \(num("decode_ms").map { "\($0) ms" } ?? "–")")
+        lines.append("Latency  \(num("rtt_ms", 0).map { "\($0) ms round trip" } ?? "–")")
+        lines.append("Sound    \(num("audio_ms", 0).map { "\($0) ms buffered" } ?? "off")")
+        lines.append("CPU      client \(pct(client)) · viewer \(pct(viewer))")
+        text.stringValue = lines.joined(separator: "\n")
+        if let parent = superview { place(in: parent) }
+    }
+}
+
 final class RemoteView: NSView {
     // The picture comes from the CPU path (image, drawn below) or the GPU
     // path (gpuSize, drawn by `presenter`'s CAMetalLayer over this view).
@@ -1082,6 +1224,8 @@ final class RemoteView: NSView {
     /// This view's window (tab) id: its events carry it.
     var tab: UInt32 = 0
     func send(_ value: [String: Any]) { event(value, window: tab) }
+    // Connection Info, over the top-left of the view (App.showInfo).
+    let info = InfoOverlay(frame: .zero)
     // Shown under the message when a session failed or dropped; sends "reconnect".
     let reconnectButton = NSButton(title: "Reconnect", target: nil, action: nil)
     func showReconnect(_ show: Bool) {
@@ -1129,7 +1273,7 @@ final class RemoteView: NSView {
         CATransaction.commit()
         if show { presenter.draw() }
     }
-    override func layout() { super.layout(); placeGPU(); if !reconnectButton.isHidden { placeReconnect() } }
+    override func layout() { super.layout(); placeGPU(); if !reconnectButton.isHidden { placeReconnect() }; info.place(in: self) }
     override func viewDidChangeBackingProperties() { super.viewDidChangeBackingProperties(); placeGPU() }
     override func draw(_ dirty: NSRect) {
         NSColor.black.setFill(); bounds.fill()
@@ -1268,6 +1412,12 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
     // Machine > Reconnect Automatically: the machine's auto_reconnect setting
     // (reopen at launch, retry a dropped session).
     let autoReconnectItem = NSMenuItem(title: "Reconnect Automatically", action: #selector(App.toggleAutoReconnect), keyEquivalent: "")
+    // Machine > Show Connection Info (⌥⌘I) and each window's ⓘ button: the
+    // overlay on every tab; kept in user defaults.
+    let infoItem = NSMenuItem(title: "Show Connection Info", action: #selector(App.toggleInfo), keyEquivalent: "i")
+    var infoButtons: [NSButton] = []
+    var showInfo = UserDefaults.standard.bool(forKey: "GliffConnectionInfo")
+    let cpu = CPUMeter()
 
     func tab(_ id: UInt32) -> Tab? { tabsLock.lock(); defer { tabsLock.unlock() }; return tabs[id] }
     func tab(for window: NSWindow?) -> Tab? {
@@ -1314,6 +1464,9 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let reconnect = machineMenu.addItem(withTitle: "Reconnect", action: #selector(App.reconnect), keyEquivalent: "")
         reconnect.target = self; reconnectItem = reconnect
         autoReconnectItem.target = self; machineMenu.addItem(autoReconnectItem)
+        machineMenu.addItem(NSMenuItem.separator())
+        infoItem.keyEquivalentModifierMask = [.command, .option]
+        infoItem.target = self; infoItem.state = showInfo ? .on : .off; machineMenu.addItem(infoItem)
         // The Window menu: Minimize, the tab commands, and the window list
         // (AppKit fills that in, as windowsMenu).
         let windowItem = NSMenuItem(); menu.addItem(windowItem)
@@ -1358,12 +1511,23 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
         view.reconnectButton.target = self; view.reconnectButton.action = #selector(App.reconnectClicked(_:))
         view.reconnectButton.bezelStyle = .rounded; view.reconnectButton.isHidden = true
         view.addSubview(view.reconnectButton)
+        view.addSubview(view.info); view.info.isHidden = !showInfo
         let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1100, height: 720), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
         w.title = title
         w.subtitle = "Shift+Esc releases keyboard"
         w.contentView = view; w.delegate = self; w.acceptsMouseMovedEvents = true
         w.isReleasedWhenClosed = false
         w.tabbingMode = .preferred; w.tabbingIdentifier = "gliff-viewer"
+        // The ⓘ button at the right of the title bar: Connection Info.
+        let infoButton = NSButton(image: NSImage(systemSymbolName: "info.circle", accessibilityDescription: "Connection Info") ?? NSImage(), target: self, action: #selector(App.toggleInfo))
+        infoButton.setButtonType(.pushOnPushOff); infoButton.isBordered = false
+        infoButton.state = showInfo ? .on : .off; infoButton.contentTintColor = showInfo ? .controlAccentColor : .secondaryLabelColor
+        infoButton.toolTip = "Connection Info: frame rate, bitrate, latency, decode and CPU"
+        infoButton.frame = NSRect(x: 0, y: 0, width: 28, height: 22)
+        let accessory = NSTitlebarAccessoryViewController()
+        accessory.view = infoButton; accessory.layoutAttribute = .right
+        w.addTitlebarAccessoryViewController(accessory)
+        infoButtons.append(infoButton)
         let front = keyTab?.window ?? NSApp.windows.first { $0.isVisible && $0.tabbingIdentifier == "gliff-viewer" }
         tab.view = view; tab.window = w
         if let front = front, front !== w {
@@ -1479,6 +1643,12 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if cmd["type"] as? String == "video_scale", let milli = cmd["scale_milli"] as? Int, milli > 0 { view.scale = Double(milli) / 1000 }
         if cmd["type"] as? String == "machine_state" { tab.state = cmd; if tab.id == keyTab?.id { showMachineState(cmd) } }
         if cmd["type"] as? String == "report_size" { resizeEvent(tab) }
+        if cmd["type"] as? String == "connection_info" {
+            // Sampled only while shown: proc_pid_rusage is cheap, but not free.
+            guard showInfo else { return }
+            view.info.update(cmd, client: cpu.sample(getppid()), viewer: cpu.sample(getpid()))
+            return
+        }
         if let message = cmd["message"] as? String {
             view.message = message; view.image = nil
             view.presenter?.current = nil; view.gpuSize = nil; view.needsDisplay = true
@@ -1544,7 +1714,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
         soundItem.state = sound != false ? .on : .off
         let available = cmd["sound_available"] as? Bool == true
         soundItem.isEnabled = available
-        soundItem.toolTip = available ? nil : "This computer does not send sound (sound comes from Linux hosts)"
+        soundItem.toolTip = available ? nil : "This computer does not send sound (its Gliff server is too old)"
     }
     // Menu commands go to the active tab's session.
     func toKeyTab(_ value: [String: Any]) { if let tab = keyTab { event(value, window: tab.id) } else { event(value) } }
@@ -1555,6 +1725,18 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
     @objc func toggleAutoReconnect() { toKeyTab(["type": "setting", "field": "auto_reconnect", "value": !(keyTab?.autoReconnect ?? true)]) }
     @objc func toggleSound() { toKeyTab(["type": "sound", "on": !(keyTab?.playSound ?? true)]) }
     @objc func reconnect() { toKeyTab(["type": "reconnect"]) }
+    /// Show or hide Connection Info on every tab.
+    @objc func toggleInfo() {
+        showInfo.toggle()
+        UserDefaults.standard.set(showInfo, forKey: "GliffConnectionInfo")
+        infoItem.state = showInfo ? .on : .off
+        for button in infoButtons {
+            button.state = showInfo ? .on : .off
+            button.contentTintColor = showInfo ? .controlAccentColor : .secondaryLabelColor
+        }
+        tabsLock.lock(); let all = Array(tabs.values); tabsLock.unlock()
+        for tab in all { tab.view?.info.isHidden = !showInfo }
+    }
     @objc func reconnectClicked(_ sender: NSButton) {
         if let tab = tab(for: sender.window) { event(["type": "reconnect"], window: tab.id) }
     }
@@ -1606,6 +1788,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         tabsLock.lock(); tabs[tab.id] = nil; let left = tabs.count; tabsLock.unlock()
         tab.gpu?.onFrame = nil
+        infoButtons.removeAll { $0.window == nil || $0.window === tab.window }
         event(["type": "closed"], window: tab.id)
         if left == 0 { disableMachineMenu() }
     }
@@ -2263,6 +2446,11 @@ final class SettingsWindow: NSObject, PanelWindow, NSApplicationDelegate, NSWind
     let scopeNote = NSTextField(wrappingLabelWithString: "")
     let screen = NSPopUpButton()
     let clipboardBox = NSButton(checkboxWithTitle: "Share the clipboard", target: nil, action: nil)
+    // Decode: decode ("auto", "gpu", "cpu"; the client's --video).
+    let decode = NSPopUpButton()
+    let decodeOrigin = NSTextField(labelWithString: "")
+    let decodeReset = NSButton(title: "Reset", target: nil, action: nil)
+    static let decodeValues = ["auto", "gpu", "cpu"]
     let reconnectBox = NSButton(checkboxWithTitle: "Reconnect automatically", target: nil, action: nil)
     let reconnectOrigin = NSTextField(labelWithString: "")
     let reconnectReset = NSButton(title: "Reset", target: nil, action: nil)
@@ -2362,11 +2550,11 @@ final class SettingsWindow: NSObject, PanelWindow, NSApplicationDelegate, NSWind
     }
     /// The window and its controls; showing it is the caller's.
     func build() {
-        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 780, height: 760), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
+        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 780, height: 820), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
         w.title = "Gliff Settings"; w.delegate = self
         // A window of its own, never a tab of the viewer.
         w.tabbingMode = .disallowed; w.isReleasedWhenClosed = false
-        w.contentMinSize = NSSize(width: 700, height: 700)
+        w.contentMinSize = NSSize(width: 700, height: 760)
         let view = w.contentView!
 
         search.placeholderString = "Search machines"; search.delegate = self
@@ -2394,6 +2582,10 @@ final class SettingsWindow: NSObject, PanelWindow, NSApplicationDelegate, NSWind
         screen.target = self; screen.action = #selector(screenChanged)
         screen.setAccessibilityLabel("Screen")
         clipboardBox.target = self; clipboardBox.action = #selector(clipboardChanged)
+        decode.addItems(withTitles: ["Automatic", "GPU (VideoToolbox + Metal)", "CPU (OpenH264)"])
+        decode.target = self; decode.action = #selector(decodeChanged)
+        decode.setAccessibilityLabel("Decode")
+        decodeReset.identifier = NSUserInterfaceItemIdentifier("decode")
         reconnectBox.target = self; reconnectBox.action = #selector(reconnectChanged)
         reconnectReset.identifier = NSUserInterfaceItemIdentifier("auto_reconnect")
         speakersBox.target = self; speakersBox.action = #selector(speakersChanged)
@@ -2407,10 +2599,11 @@ final class SettingsWindow: NSObject, PanelWindow, NSApplicationDelegate, NSWind
         serverReset.identifier = NSUserInterfaceItemIdentifier("server_bin")
         let display = row("Screen", screen, screenOrigin, screenReset, "Mirror shows the machine's screen; Private makes a separate Linux screen that follows this window.")
         let clip = row("Clipboard", clipboardBox, clipboardOrigin, clipboardReset, "Copy on one machine and paste on the other. Turn off for machines you do not trust.")
+        let decoding = row("Decode", decode, decodeOrigin, decodeReset, "Automatic uses this Mac's GPU when it can, else the CPU. The CPU uses more power; try it if the picture shows artefacts.")
         let again = row("Reconnect", reconnectBox, reconnectOrigin, reconnectReset, "Reopen the machine at launch if it was open at quit, and retry a dropped session. Off, it waits for Reconnect.")
         let speakers = row("Host speakers", speakersBox, speakersOrigin, speakersReset, "While Gliff plays the machine's sound, its own speakers stay silent; restored when sound stops or the session ends. Linux hosts with PipeWire.")
         let server = row("Server command", serverBin, serverOrigin, serverReset, "Starts the server over SSH, e.g. gliff-server --low-bandwidth. Blank uses the inherited command.")
-        let rule = label("A screen, host speakers or server command change reconnects the machine; the clipboard and Reconnect change at once. Changes are saved as you make them.", secondary: true)
+        let rule = label("A screen, decode, host speakers or server command change reconnects the machine; the clipboard and Reconnect change at once. Changes are saved as you make them.", secondary: true)
         rule.preferredMaxLayoutWidth = 480; rule.lineBreakMode = .byWordWrapping; rule.maximumNumberOfLines = 3
         pathLabel.font = NSFont.systemFont(ofSize: 11); pathLabel.textColor = .tertiaryLabelColor
         pathLabel.preferredMaxLayoutWidth = 480
@@ -2452,7 +2645,7 @@ final class SettingsWindow: NSObject, PanelWindow, NSApplicationDelegate, NSWind
         let headerRow = NSStackView(views: [heading, NSView(), connectButton])
         headerRow.orientation = .horizontal; headerRow.alignment = .centerY; headerRow.spacing = 8
         heading.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        let form = NSStackView(views: [headerRow, scopeNote, display, clip, again, speakers, server, rule, commandStack, rule2, generalStack, errorLabel, NSView(), pathLabel])
+        let form = NSStackView(views: [headerRow, scopeNote, display, clip, decoding, again, speakers, server, rule, commandStack, rule2, generalStack, errorLabel, NSView(), pathLabel])
         form.orientation = .vertical; form.alignment = .leading; form.spacing = 14
         form.translatesAutoresizingMaskIntoConstraints = false
         rule2.widthAnchor.constraint(equalTo: form.widthAnchor).isActive = true
@@ -2517,6 +2710,9 @@ final class SettingsWindow: NSObject, PanelWindow, NSApplicationDelegate, NSWind
         let c = effective("clipboard")
         clipboardBox.state = c.value as? Bool == false ? .off : .on
         clipboardOrigin.stringValue = c.origin; clipboardReset.isHidden = !c.here
+        let d = effective("decode")
+        decode.selectItem(at: SettingsWindow.decodeValues.firstIndex(of: d.value as? String ?? "auto") ?? 0)
+        decodeOrigin.stringValue = d.origin; decodeReset.isHidden = !d.here
         let r = effective("auto_reconnect")
         reconnectBox.state = r.value as? Bool == false ? .off : .on
         reconnectOrigin.stringValue = r.origin; reconnectReset.isHidden = !r.here
@@ -2543,6 +2739,10 @@ final class SettingsWindow: NSObject, PanelWindow, NSApplicationDelegate, NSWind
         send(["type": "settings_edit", "scope": selected.isEmpty ? "defaults" : "machine", "machine": selected, "field": field, "value": value])
     }
     @objc func screenChanged(_ sender: Any?) { if !updating { edit("screen", screen.indexOfSelectedItem == 1 ? "private" : "mirror") } }
+    @objc func decodeChanged(_ sender: Any?) {
+        guard !updating, SettingsWindow.decodeValues.indices.contains(decode.indexOfSelectedItem) else { return }
+        edit("decode", SettingsWindow.decodeValues[decode.indexOfSelectedItem])
+    }
     @objc func clipboardChanged(_ sender: Any?) { if !updating { edit("clipboard", clipboardBox.state == .on) } }
     @objc func reconnectChanged(_ sender: Any?) { if !updating { edit("auto_reconnect", reconnectBox.state == .on) } }
     @objc func speakersChanged(_ sender: Any?) { if !updating { edit("mute_host_speakers", speakersBox.state == .on) } }
@@ -2686,6 +2886,7 @@ if mode == "encode" {
         if clipboard.receive(cmd) { return }
         DispatchQueue.main.async {
             if cmd["type"] as? String == "resize" { capture.resize(cmd["width"] as? Int ?? 1920, cmd["height"] as? Int ?? 1200) }
+            else if cmd["type"] as? String == "audio" { capture.setAudio(cmd["enabled"] as? Bool == true) }
             else { capture.input.handle(cmd); clipboard.command(cmd) }
         }
     }

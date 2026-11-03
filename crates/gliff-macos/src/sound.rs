@@ -85,6 +85,14 @@ impl Sound {
         }
     }
 
+    /// The sound's buffered delay in milliseconds while it plays (Connection Info).
+    pub fn audio_ms(&self) -> Option<f64> {
+        self.sink
+            .stats()
+            .filter(|_| self.on)
+            .map(|(buffered, ..)| buffered)
+    }
+
     /// Add the Machine menu's sound state to a `machine_state` command:
     /// `sound` (the switch) and `sound_available` (this server sends sound).
     pub fn annotate(&self, state: &mut Value) {

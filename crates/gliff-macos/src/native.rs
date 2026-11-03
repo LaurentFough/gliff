@@ -12,6 +12,9 @@ pub const ENCODE: u8 = 4;
 pub const VIDEO: u8 = 5;
 /// Viewer bridge: the window (u32 LE) the packets after this one are for.
 pub const TARGET: u8 = 6;
+/// Capture helper: what the Mac plays, interleaved 48 kHz stereo f32 LE
+/// (ScreenCaptureKit audio; see `host_audio`).
+pub const AUDIO: u8 = 7;
 pub const MAX_PACKET: usize = 64 * 1024 * 1024;
 
 pub async fn read<R: AsyncRead + Unpin>(rd: &mut R) -> Result<(u8, Vec<u8>)> {

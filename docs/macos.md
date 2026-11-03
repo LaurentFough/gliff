@@ -81,6 +81,7 @@ opening another.
 |---|---|---|
 | Screen | Mirror the machine's screen, or a private Linux screen that follows the window | reconnects the machine |
 | Clipboard | Share the clipboard in both directions | at once |
+| Decode | Automatic (the GPU: VideoToolbox + Metal when this Mac has it, else the CPU), GPU, or CPU (OpenH264) (`decode`; the client's `--video`) | reconnects the machine |
 | Reconnect | Reopen the machine at launch if it was open at quit, and retry a dropped session (`auto_reconnect`, default on) | at the next launch or failure |
 | Host speakers | Mute the Linux host's own speakers while the Mac plays its sound (`mute_host_speakers`, default off; the server's `--mute-local-audio`, PipeWire hosts) | reconnects the machine |
 | Server command | The command started over SSH, e.g. `gliff-server --low-bandwidth` | reconnects the machine |
@@ -106,20 +107,31 @@ where its value comes from (Built-in, Default, or set here). Changes are
 saved as you make them.
 
 While connected, the **Machine** menu has the everyday choices: Mirror
-Screen / Private Screen, Share Clipboard, Play Sound, Reconnect, and
-**Reconnect Automatically**. A screen or server command change reconnects in
+Screen / Private Screen, Share Clipboard, Play Sound, Reconnect,
+**Reconnect Automatically** and **Show Connection Info**. A screen or server command change reconnects in
 the same window. Reconnect Automatically is the machine's `auto_reconnect`
 setting: off, its tab is not reopened at the next launch and a dropped
 session waits for Reconnect instead of retrying.
 
-**Sound.** The viewer plays the sound of a Linux host running a gliff with
-sound (upstream PR #80), through the Mac's default output. **Machine ▸ Play
+**Connection Info.** The ⓘ button at the right of a tab's title bar, or
+Machine ▸ Show Connection Info (⌥⌘I), shows a translucent panel over the
+top-left of the picture, on every tab: the machine, the stream (size,
+4:4:4 or 4:2:0, the encoder→decoder tiers such as `GPU→GPU`), frames per
+second against the server's cap, the bitrate, the average decode time, the
+round trip (a ping a second), the sound's buffered delay, and the CPU use of
+the Gliff client and viewer processes (100% is one core, as in Activity
+Monitor). Clicks go through it to the machine. The choice is kept for the
+next launch. It is the Linux client's stats line, with latency and CPU added.
+
+**Sound.** The viewer plays the sound of a host that sends it: a Linux host
+running a gliff with sound (upstream PR #80), or a Mac host (below), through
+the Mac's default output. **Machine ▸ Play
 Sound** switches it, at once and without reconnecting; the choice is the
 top-level `muted` key in `config.toml`, the same switch as the Linux client's
 speaker button, so it applies to every machine on both clients.
 `gliff --no-audio` starts muted without saving that. The item is disabled
-when the host does not send sound (Mac hosts, and Linux hosts without sound
-support). Sound is Opus at 128 kbit/s through the same jitter buffer as on
+when the host does not send sound (hosts with an older gliff, and Linux hosts
+without sound support). Sound is Opus at 128 kbit/s through the same jitter buffer as on
 Linux, and the output device is opened only while sound plays.
 
 The Linux host keeps playing on its own speakers too. To hear it only on the
@@ -128,6 +140,15 @@ Mac, turn on **Host speakers** for the machine in Settings
 the host mutes its default output while the Mac plays its sound, and
 restores it afterwards (see the
 [README](../README.md#use)).
+
+**Sound from a Mac host.** A Mac host sends what it plays: ScreenCaptureKit
+records the system's audio (48 kHz stereo; Gliff's own sound is left out) in
+the same host app that captures the screen, so the Screen & System Audio
+Recording permission covers it, and the server codes it as Opus, on the same
+wire as a Linux host. Recording runs only while a client plays the sound
+(Play Sound on, and the tab visible). Host speakers does not apply to a Mac
+host yet: it keeps playing on its own speakers (`--mute-local-audio` is
+accepted and ignored there, with a warning in the server log).
 
 The command line sits below a machine's saved settings, as on Linux:
 `--headless`, `--no-clipboard` and `--server-bin` apply unless the machine
@@ -397,8 +418,8 @@ logical display coordinates. macOS hosts mirror physical screens and reject
   decode it asks hosts for 4:4:4 first. Without it (some virtual machines), or
   with `--video cpu` or a saved CPU decode setting, it decodes with OpenH264
   on the CPU as before, and it switches to the CPU mid-session if the
-  hardware decoder fails. The settings window does not offer the decode
-  option yet; set `decode = "cpu"` in `config.toml` to force the CPU.
+  hardware decoder fails. Settings ▸ Decode chooses it per machine
+  (`decode = "cpu"` in `config.toml`).
 - The Mac viewer requests cursor pixels inside the video. Updated Linux
   hosts use this mode without opening a separate cursor capture session,
   avoiding Hyprland 0.56's cursor-session crash on display disconnection.
@@ -419,7 +440,8 @@ logical display coordinates. macOS hosts mirror physical screens and reject
   when the window loses focus or disconnects.
 - Shared text clipboard uses lazy paste requests, chunking and a 1 MiB cap.
   Image and copied-file clipboard transfers are not yet supported on macOS.
-- Mac viewers play sound from Linux hosts; Mac hosts do not send sound yet.
+- Mac viewers play sound from Linux and Mac hosts; Mac hosts send it with
+  ScreenCaptureKit audio (not muting their own speakers yet).
 
 ## Verify
 

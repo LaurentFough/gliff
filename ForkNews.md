@@ -37,6 +37,9 @@ A quick look at what this fork adds. The README carries the same list; [ToDone.m
 - **Quit on last window, and About**: Settings ▸ General ▸ Quit Gliff when its last window closes (`quit_on_last_window`, default off: Gliff stays open, and ⌘T or the Dock icon opens the connection window). Gliff ▸ About Gliff shows the version and build (commit, arch). *(Tested.)*
 - **Reconnect on the Mac**: a dropped or failed session shows a **Reconnect** button; sessions that had connected retry automatically (5 × 1.5 s, as on Linux), without repeating SSH prompts. *(Tested.)*
 - **GPU video on the Mac viewer**: VideoToolbox hardware H.264 decode, Metal 4:4:4 recombine, `CAMetalLayer` presentation; asks for 4:4:4 first, falls back to OpenH264 (`--video cpu` forces it). 4K 4:4:4: about 6.9 ms per frame on the GPU vs 18.8 ms on the CPU.
+- **Sound from a Mac host**: a Mac host sends what it plays (ScreenCaptureKit system audio, coded as Opus on #80's wire) while a client plays it; Linux and Mac clients hear it. Host speakers does not mute a Mac host yet. *(New; testing pending.)*
+- **Decode in Mac Settings**: Settings ▸ Decode per machine: Automatic, GPU (VideoToolbox + Metal) or CPU (OpenH264), the client's `--video`. *(New; testing pending.)*
+- **Connection Info on the Mac**: the ⓘ title-bar button or Machine ▸ Show Connection Info (⌥⌘I) shows a translucent panel over each tab: stream size and colour, GPU/CPU tiers, fps, Mbit/s, decode time, round trip, sound buffer, and the client's and viewer's CPU use. *(New; testing pending.)*
 - **Sound on the Mac viewer**: plays Linux hosts' sound through #80's `gliff-audio` (CoreAudio). **Machine ▸ Play Sound** shares the Linux client's mute switch; `--no-audio` starts muted.
 - **Host speaker mute**: `gliff-server --mute-local-audio` mutes the Linux host's speakers while the client plays, and restores them on stop, disconnect or crash. Per machine in Settings on both clients (`mute_host_speakers`). *(Tested.)*
 - **Shared settings**: a `gliff-settings` crate; both clients read and write `~/.config/gliff/config.toml`. On the Mac: a settings window (⌘,) and a Machine menu. Both settings windows offer Reconnect, Host speakers and the Command line.
@@ -63,9 +66,9 @@ The new features are outlined in red. The connection and Settings windows are re
 
 ![Two Gliff tabs, one per machine, with the + button](docs/images/macos-tabs.png)
 
-**Settings:** per machine, or for all machines: **Connect** from the selected machine, **Reconnect automatically**, **Host speakers** (mute the machine's speakers while you listen), the **Command line** that reproduces the machine's settings (client and server over SSH, each with Copy), and **General ▸ Quit Gliff when its last window closes**.
+**Settings:** per machine, or for all machines: **Connect** from the selected machine, **Decode** (Automatic, GPU or CPU), **Reconnect automatically**, **Host speakers** (mute the machine's speakers while you listen), the **Command line** that reproduces the machine's settings (client and server over SSH, each with Copy), and **General ▸ Quit Gliff when its last window closes**.
 
-<img src="docs/images/macos-settings-reconnect.png" width="784" alt="Gliff Settings with Connect, Reconnect, Host speakers, Command line and General quit options">
+<img src="docs/images/macos-settings-reconnect.png" width="784" alt="Gliff Settings with Connect, Decode, Reconnect, Host speakers, Command line and General quit options">
 
 **'Machine' menu:** Play Sound, Reconnect and Reconnect Automatically.
 
@@ -92,7 +95,9 @@ The new features are outlined in red. The connection and Settings windows are re
 | Mesh VPN machines (Tailscale/Headscale, Rayfish), `gliff --mesh` | Tested (2026-11-03) |
 | Releases built by CI (`make release-ci`) | First run passed (all three packages published); `make install-release` not tested yet |
 | Intel Mac packages | Built by CI; not tested on an Intel Mac |
-| Sound from a Mac host | Not built yet |
+| Decode in Mac Settings | Built; testing pending |
+| Connection Info overlay (Mac) | Built; testing pending |
+| Sound from a Mac host | Built; testing pending (Mac → Mac and Mac → Linux) |
 
 Feedback and issues welcome on the fork.
 

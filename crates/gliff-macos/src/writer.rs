@@ -37,6 +37,16 @@ impl Writer {
             .context("network output queue is full or closed")
     }
 
+    /// Queue a packet that may be lost (sound: the client conceals a gap in
+    /// `seq`). A full queue drops it, false; only a stopped writer is an error.
+    pub(crate) fn offer(&self, msg: ServerMsg, payloads: Vec<Bytes>) -> Result<bool> {
+        match self.outgoing.try_send((msg, payloads)) {
+            Ok(()) => Ok(true),
+            Err(mpsc::error::TrySendError::Full(_)) => Ok(false),
+            Err(mpsc::error::TrySendError::Closed(_)) => bail!("network writer stopped"),
+        }
+    }
+
     pub(crate) async fn stopped(&mut self) -> Result<()> {
         (&mut self.task).await??;
         bail!("network writer stopped")

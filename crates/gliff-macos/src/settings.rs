@@ -2,10 +2,10 @@
 //! model and `config.toml`, so a Mac and a Linux client agree on what
 //! `[defaults]` and `[overrides."user@host"]` mean.
 //!
-//! The Mac offers three options: the screen (mirror or a private Linux
-//! screen), sharing the clipboard, and the server command. The decode
-//! pipeline is kept in the file for Linux but not offered here: the Mac
-//! viewer always decodes on the CPU.
+//! The Mac offers the screen (mirror or a private Linux screen), sharing
+//! the clipboard, the decode pipeline (automatic, the GPU: VideoToolbox +
+//! Metal, or the CPU: OpenH264), the server command, Reconnect and Host
+//! speakers.
 //!
 //! The Swift windows (`native/Gliff.swift`) never touch the file. They get
 //! JSON state from here and send edits back:
@@ -27,9 +27,10 @@ use serde_json::{json, Map, Value};
 use tokio::sync::watch;
 
 /// The options this client offers, in window order.
-pub const OFFERED: [Field; 5] = [
+pub const OFFERED: [Field; 6] = [
     Field::Screen,
     Field::Clipboard,
+    Field::Decode,
     Field::ServerBin,
     Field::AutoReconnect,
     Field::MuteHostSpeakers,
@@ -277,6 +278,24 @@ pub fn screen_ui(screen: Screen) -> &'static str {
     }
 }
 
+/// The UI's name for a decode pipeline (the file's and `--video`'s words).
+pub fn decode_ui(video: Video) -> &'static str {
+    match video {
+        Video::Auto => "auto",
+        Video::Gpu => "gpu",
+        Video::Cpu => "cpu",
+    }
+}
+
+fn decode_from_ui(value: &str) -> Option<Video> {
+    match value {
+        "auto" => Some(Video::Auto),
+        "gpu" => Some(Video::Gpu),
+        "cpu" => Some(Video::Cpu),
+        _ => None,
+    }
+}
+
 fn screen_from_ui(value: &str) -> Option<Screen> {
     match value {
         "mirror" => Some(Screen::Mirror),
@@ -293,6 +312,9 @@ fn layer_json(s: &Settings) -> Value {
     }
     if let Some(clipboard) = s.clipboard {
         m.insert("clipboard".into(), clipboard.into());
+    }
+    if let Some(video) = s.decode {
+        m.insert("decode".into(), decode_ui(video).into());
     }
     if let Some(bin) = &s.server_bin {
         m.insert("server_bin".into(), bin.clone().into());
@@ -323,6 +345,7 @@ pub fn state_json(store: &Store) -> Value {
         "builtin": {
             "screen": screen_ui(builtin.screen),
             "clipboard": builtin.clipboard,
+            "decode": decode_ui(builtin.decode),
             "server_bin": builtin.server_bin,
             "auto_reconnect": builtin.auto_reconnect,
             "mute_host_speakers": builtin.mute_host_speakers,
@@ -400,7 +423,10 @@ fn set_field(s: &mut Settings, field: Field, value: Option<&Value>) -> Result<()
                     .context("mute_host_speakers must be true or false")?,
             );
         }
-        Field::Decode => unreachable!("not offered"),
+        Field::Decode => {
+            let v = value.as_str().context("decode must be a string")?;
+            s.decode = Some(decode_from_ui(v).with_context(|| format!("unknown decode `{v}`"))?);
+        }
     }
     Ok(())
 }
@@ -602,7 +628,7 @@ mod tests {
     fn bad_edits_are_refused_without_touching_the_file() {
         let sh = shared();
         for ev in [
-            json!({"scope":"machine","machine":"m@h","field":"decode","value":"cpu"}),
+            json!({"scope":"machine","machine":"m@h","field":"decode","value":"fpga"}),
             json!({"scope":"machine","machine":"m@h","field":"screen","value":"sideways"}),
             json!({"scope":"machine","machine":"m@h","field":"clipboard","value":"yes"}),
             json!({"scope":"machine","machine":"","field":"clipboard","value":true}),
@@ -758,6 +784,32 @@ mod tests {
             !shared
                 .resolve("m@h", &Settings::default())
                 .mute_host_speakers
+        );
+    }
+
+    #[test]
+    fn the_settings_window_sets_the_decode_pipeline() {
+        let shared = shared();
+        assert_eq!(shared.state()["builtin"]["decode"], "auto");
+        let edit = json!({"scope": "machine", "machine": "m@h", "field": "decode", "value": "cpu"});
+        apply_edit(&shared, &edit).unwrap();
+        let r = shared.resolve("m@h", &Settings::default());
+        assert_eq!(r.decode, Video::Cpu);
+        assert_eq!(shared.state()["machines"][0]["settings"]["decode"], "cpu");
+        let before = shared.resolve("other@h", &Settings::default());
+        assert_eq!(
+            change(&before, &r, false),
+            Change::Reconnect,
+            "chosen at session start"
+        );
+        apply_edit(
+            &shared,
+            &json!({"scope": "machine", "machine": "m@h", "field": "decode", "value": null}),
+        )
+        .unwrap();
+        assert_eq!(
+            shared.resolve("m@h", &Settings::default()).decode,
+            Video::Auto
         );
     }
 

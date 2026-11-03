@@ -1,9 +1,9 @@
 <!doctype html>
-<!-- settings-window.html v1.0.0 — the Mac Settings window, drawn to match
+<!-- settings-window.html v1.1.0 — the Mac Settings window, drawn to match
      SettingsWindow in native/Gliff.swift, for a placeholder machine.
-     Outlined: Connect, Reconnect, Host speakers, the Command line section,
+     Outlined: Connect, Decode, Host speakers, the Command line section,
      and General ▸ Quit Gliff when its last window closes.
-     Render: render.py settings-window.html ../macos-settings-reconnect.png 784 780 -->
+     Render: render.py settings-window.html ../macos-settings-reconnect.png 784 840 -->
 <html><head><meta charset="utf-8"><link rel="stylesheet" href="window.css">
 <style>
   .sidebar { top: 44px; }
@@ -39,13 +39,15 @@
       <div class="help">Mirror shows the machine's screen; Private makes a separate Linux screen that follows this window.</div></div>
     <div class="row"><div class="top"><span class="name">Clipboard</span><span class="check on">✓</span><span>Share the clipboard</span><span class="origin">Default</span></div>
       <div class="help">Copy on one machine and paste on the other. Turn off for machines you do not trust.</div></div>
-    <div class="row" data-hl="reconnect"><div class="top"><span class="name">Reconnect</span><span class="check on">✓</span><span>Reconnect automatically</span><span class="origin">Built-in</span></div>
+    <div class="row" data-hl="decode"><div class="top"><span class="name">Decode</span><span class="popup">Automatic <span>⌃⌄</span></span><span class="origin">Built-in</span></div>
+      <div class="help">Automatic uses this Mac's GPU when it can, else the CPU. The CPU uses more power; try it if the picture shows artefacts.</div></div>
+    <div class="row"><div class="top"><span class="name">Reconnect</span><span class="check on">✓</span><span>Reconnect automatically</span><span class="origin">Built-in</span></div>
       <div class="help">Reopen the machine at launch if it was open at quit, and retry a dropped session. Off, it waits for Reconnect.</div></div>
     <div class="row" data-hl="speakers"><div class="top"><span class="name">Host speakers</span><span class="check on">✓</span><span>Mute the machine's speakers while I listen</span><span class="origin">Set for this machine</span><span class="reset">Reset</span></div>
       <div class="help">While Gliff plays the machine's sound, its own speakers stay silent; restored when sound stops or the session ends. Linux hosts with PipeWire.</div></div>
     <div class="row"><div class="top"><span class="name">Server command</span><span class="field" style="width:250px">~/.local/bin/gliff-server</span><span class="origin">Set for this machine</span><span class="reset">Reset</span></div>
       <div class="help">Starts the server over SSH, e.g. gliff-server --low-bandwidth. Blank uses the inherited command.</div></div>
-    <div class="note">A screen, host speakers or server command change reconnects the machine; the clipboard and Reconnect change at once. Changes are saved as you make them.</div>
+    <div class="note">A screen, decode, host speakers or server command change reconnects the machine; the clipboard and Reconnect change at once. Changes are saved as you make them.</div>
     <div data-hl="command">
       <div class="section-title">Command line</div>
       <div class="note" style="margin-top:6px">Client, from a terminal (logs there)</div>

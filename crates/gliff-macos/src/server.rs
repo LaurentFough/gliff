@@ -41,6 +41,10 @@ pub(crate) struct Cli {
     bitrate: Option<u32>,
     #[arg(long, value_parser = ["cpu", "gpu"])]
     video: Option<String>,
+    /// Accepted for the client's Host speakers setting; a Mac host keeps
+    /// its speakers on (not supported here yet).
+    #[arg(long)]
+    mute_local_audio: bool,
     /// List the physical displays available to mirror.
     #[arg(long)]
     outputs: bool,
@@ -256,10 +260,9 @@ where
                 height,
                 scale_milli: scale,
             }],
+            //= Sound: ScreenCaptureKit audio, coded as Opus (host_audio).
             features: features()
                 .into_iter()
-                //= Sound is Linux-only so far: do not offer it from a Mac.
-                .filter(|f| f != gliff_proto::FEATURE_AUDIO)
                 .chain([FEATURE_CURSOR_IN_VIDEO.to_string()])
                 .collect(),
         })
@@ -324,6 +327,11 @@ where
     let mut refresh = tokio::time::interval(Duration::from_millis(250));
     let mut resend = false;
     let mut writer = crate::writer::Writer::spawn(writer);
+    //= Sound while the client wants it (ClientMsg::Audio).
+    let mut audio: Option<crate::host_audio::HostAudio> = None;
+    if cfg.mute_local_audio {
+        tracing::warn!("--mute-local-audio: a Mac host keeps its speakers on (not supported yet)");
+    }
     let result: Result<()> = async {
         loop {
             tokio::select! {
@@ -340,12 +348,30 @@ where
                             ClientMsg::FrameAck { frame_id: id, .. } => { ack = ack.max(id.min(frame_id)); }
                             ClientMsg::RequestKeyframe => { keyframe = true; }
                             ClientMsg::Ping { t } => writer.send(ServerMsg::Pong { t, server_now_ms: crate::client::now_ms() }, vec![])?,
+                            ClientMsg::Audio { enabled } => {
+                                //= Start before telling the helper, so its first packet has a stream.
+                                if enabled && audio.is_none() {
+                                    match crate::host_audio::HostAudio::start() {
+                                        Ok((a, start)) => { audio = Some(a); writer.send(start, vec![])?; }
+                                        Err(e) => { tracing::warn!(error = %format!("{e:#}"), "cannot start the sound encoder"); continue; }
+                                    }
+                                } else if !enabled { audio = None; }
+                                tracing::info!(enabled, "host sound");
+                                command_tx.try_send(json!({"type": "audio", "enabled": enabled}))?;
+                            }
                             other => if let Some(cmd) = input_command(other) { command_tx.try_send(cmd)?; },
                         }
                     }
                 }
                 frame = capture.recv() => {
                     let (kind, frame) = frame.context("capture stopped")??;
+                    if kind == native::AUDIO {
+                        //= Packets after the client turned sound off are dropped.
+                        if let Some(a) = &mut audio {
+                            for (msg, packet) in a.push(&frame)? { writer.offer(msg, vec![packet.into()])?; }
+                        }
+                        continue;
+                    }
                     if kind == native::EVENT { let ev: Value = serde_json::from_slice(&frame)?; if ev["type"] == "error" { bail!("{}", ev["message"]); }
                     if ev["type"] == "clipboard" { clipboard.local(&ev).await?; } else if ev["type"] == "paste" { clipboard.paste(&ev); } continue; }
                     ensure!(kind == native::PIXELS, "unknown capture packet");
