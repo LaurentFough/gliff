@@ -200,7 +200,7 @@ Support today:
 - [x] #3 (tested and merged 2026-10-31): build-once installs on `feature/macos-install-reuse` (`make install` twice, the second skips; a change then `make install` rebuilds; About Gliff shows the same build ID as `GliffBuildID`; `make package` → `make install-package` on a second Mac; `make release-upload` → `make install-release`), then merge.
 - [ ] Intel Macs: a universal (arm64 + x86_64) package, or per-architecture releases. Deferred (2026-10-31): no Intel Mac on macOS to test with (the Intel Mac runs Omarchy, so it is covered by the Linux packages).
 - [x] Linux prebuilt packages (tested and merged 2026-10-31): `make package` on an Arch/Omarchy machine; `make install` twice (the second skips); `make install-package PKG=…` on a second machine; `make release-upload` → `make install-release`.
-- [ ] Releases built by CI, on `feature/ci-releases` (testing pending): `make release-ci` → the "Fork builds" run passes (macOS arm64 + Intel, Arch) → release `build-COMMIT` with all packages and checksums → `make install-release` on a Mac and on Arch/Omarchy.
+- [ ] Releases built by CI (run passed 2026-11-03, `build-c331ac1b2d81`; `make install-release` from it still to test): `make release-ci` → the "Fork builds" run passes (macOS arm64 + Intel, Arch) → release `build-COMMIT` with all packages and checksums → `make install-release` on a Mac and on Arch/Omarchy.
 
 ### Ideas (not decided)
 
@@ -227,6 +227,9 @@ Support today:
 ## Log
 
 Newest first. Format: `### YYYY-MM-DD — summary (commit)`, then a line or two.
+
+### 2026-11-03 — First CI release run passed
+"Fork builds" run 41574690995 (`make release-ci` on c331ac1): checks and packages passed on macos-15, macos-15-intel and Arch; pre-release `build-c331ac1b2d81` holds the arm64 and x86_64 Mac ZIPs, the Arch package and their `.sha256`. Installing from it (`make install-release TAG=build-c331ac1b2d81`) is the remaining test. README and ForkNews status updated.
 
 ### 2026-11-03 — Screenshots: connection and Settings windows redrawn
 Rendered mockups (HTML + Playwright, `docs/images/src/`: window.css, outline.js, connect-window.html, settings-window.html; render.py 1.1.0 takes a size) replace the two older shots. Connection window: mesh peers labelled (ts.net)/(rayfish), offline row, show-offline checkbox. Settings: Connect, Reconnect, Host speakers, Command line, General ▸ quit on last window. README and ForkNews captions and alt text updated.
