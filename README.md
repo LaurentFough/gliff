@@ -113,6 +113,7 @@ The new features are outlined in red.
 | Build once, install elsewhere: Mac and Arch/Omarchy | Tested (2026-10-31) |
 | Host speakers setting, Reconnect in the Linux settings | Tested (2026-11-01) |
 | Command line in Settings | Tested (2026-11-02) |
+| Mesh VPN machines (Tailscale/Headscale, Rayfish), `gliff --mesh` | Tested (2026-11-03) |
 | Releases built by CI (`make release-ci`) | Built; not run yet |
 | Intel Mac packages | Built by CI; not tested on an Intel Mac |
 | Sound from a Mac host | Not built yet |
@@ -384,6 +385,15 @@ A mirrored screen keeps its own size and is fitted into the window. A private
 screen follows the window as you resize it, and is removed when you
 disconnect.
 
+To see the machines on your mesh VPNs (Tailscale/Headscale, Rayfish), the
+same ones the connection window lists:
+
+```
+gliff --mesh             # online machines: hostname, IP, source, address, state
+gliff --mesh --offline   # offline ones too
+gliff --mesh --json      # JSON
+```
+
 On Linux, every machine you connect to gets a tab in the title bar. Click a tab to
 connect to that machine, or to switch to it: each connection keeps running
 while you look at another, so switching is instant. Hover a tab for its
@@ -449,6 +459,10 @@ gliff --server-bin 'gliff-server --low-bandwidth' user@host
 
 - On Linux, run `gliff-probe all`. It checks the compositor, the GPU
   drivers and both video paths, and prints PASS or FAIL for each.
+- If a Tailscale or Rayfish machine is missing from the connection window,
+  `gliff --mesh --offline` shows what each client answered (not installed,
+  timed out, failed with its error) and every machine it knows. Nearby
+  machines need `gliff-enable-discovery` on the host.
 - If ssh cannot find `gliff-server`, give its path:
   `gliff --server-bin /path/to/gliff-server user@host`.
 - The server needs the remote user's running Hyprland session, which it
@@ -552,7 +566,13 @@ gliff 0.4.1).
   the address bar) lists peers from Tailscale/Headscale and Rayfish, for
   hosts mDNS cannot reach: `tailscale status --json` / `ray status --json`
   through `gliff_transport::mesh`, with a timeout, skipped when the client
-  is missing. See [macOS support](docs/macos.md#machines-on-a-mesh-vpn).
+  is missing (Tailscale.app's CLI is asked with `TAILSCALE_BE_CLI=1`). The
+  Computer column reads `hostname (local)`, `hostname (ts.net)` or
+  `hostname (rayfish)`. Only online machines show; "Show offline machines
+  I've connected to" adds offline known machines (`mesh_show_offline`,
+  shared by both clients). `gliff --mesh` prints a table of the machines
+  and each client's answer (`--offline`, `--json`). See
+  [macOS support](docs/macos.md#machines-on-a-mesh-vpn).
 - **Command line in Settings.** Both settings windows show what the selected
   machine's settings come to on the command line, with Copy: the client
   (`RUST_LOG=info gliff [flags] user@host`) and the exact ssh command that

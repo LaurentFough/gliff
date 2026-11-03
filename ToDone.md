@@ -228,6 +228,9 @@ Support today:
 
 Newest first. Format: `### YYYY-MM-DD — summary (commit)`, then a line or two.
 
+### 2026-11-03 — README: mesh machines throughout
+Status row for mesh machines; the detailed note covers the labels, online-only lists, the offline checkbox and `gliff --mesh`; Use shows the `--mesh` commands; "If something does not work" points to `gliff --mesh --offline` and `gliff-enable-discovery`. ForkNews matches.
+
 ### 2026-11-03 — Merge `feature/mesh-peers`; `gliff --mesh` as a table
 Mesh peers, labels, online-only lists, the offline checkbox and `--offline` confirmed on both clients. `gliff --mesh` now prints a table (HOSTNAME, IP, SOURCE, ADDRESS, STATE; sorted by hostname, IP, source) and each source's outcome; `--json` gives the JSON (now with `ip`). Shared `mesh::render_table` / `render_json`; `MeshPeer.ip`. No-fast-forward merge into the working branch.
 

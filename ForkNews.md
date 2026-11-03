@@ -89,6 +89,7 @@ The new features are outlined in red.
 | Build once, install elsewhere: Mac and Arch/Omarchy | Tested (2026-10-31) |
 | Host speakers setting, Reconnect in the Linux settings | Tested (2026-11-01) |
 | Command line in Settings | Tested (2026-11-02) |
+| Mesh VPN machines (Tailscale/Headscale, Rayfish), `gliff --mesh` | Tested (2026-11-03) |
 | Releases built by CI (`make release-ci`) | Built; not run yet |
 | Intel Mac packages | Built by CI; not tested on an Intel Mac |
 | Sound from a Mac host | Not built yet |
