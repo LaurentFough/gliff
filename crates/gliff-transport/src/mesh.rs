@@ -23,7 +23,7 @@
 //! <https://github.com/rayfish/rayfish> (`ray status --json`,
 //! `ray-proto/src/ipc.rs` NetworkStatus / PeerStatus).
 //!
-//! Version: 1.1.0
+//! Version: 1.2.0
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -163,7 +163,9 @@ pub fn parse_tailscale(v: &Value) -> Vec<MeshPeer> {
                 network: None,
                 name,
                 address,
-                online: p["Online"].as_bool().unwrap_or(false),
+                //= An expired node key cannot connect, whatever Online says.
+                online: p["Online"].as_bool().unwrap_or(false)
+                    && p["Expired"].as_bool() != Some(true),
                 os: Some(os),
             })
         })
@@ -312,8 +314,10 @@ pub fn reports(timeout: Duration) -> Vec<Report> {
     handles.into_iter().filter_map(|h| h.join().ok()).collect()
 }
 
-/// Every source at once: online peers first, then by mesh and name, one
-/// entry per address. Blocking; runs the sources in parallel.
+/// Every source at once, online peers only (a tailnet keeps machines that
+/// are switched off, expired or long gone; `reports` still lists them), by
+/// mesh and name, one entry per address. Blocking; runs the sources in
+/// parallel.
 pub fn discover(timeout: Duration) -> Vec<MeshPeer> {
     let handles: Vec<_> = SOURCES
         .iter()
@@ -323,6 +327,7 @@ pub fn discover(timeout: Duration) -> Vec<MeshPeer> {
         .into_iter()
         .flat_map(|h| h.join().unwrap_or_default())
         .collect();
+    peers.retain(|p| p.online);
     sort_and_dedup(&mut peers);
     peers
 }
@@ -367,6 +372,12 @@ mod tests {
         assert_eq!(peers[1].address, "100.64.0.4", "no MagicDNS: the IP");
         assert!(!peers[1].online);
         assert!(parse_tailscale(&json!({"BackendState": "Stopped", "Peer": {}})).is_empty());
+        let expired = json!({"BackendState": "Running", "Peer": {"k": {"HostName": "gone",
+            "DNSName": "gone.tail1.ts.net.", "OS": "linux", "Online": true, "Expired": true}}});
+        assert!(
+            !parse_tailscale(&expired)[0].online,
+            "an expired key is offline"
+        );
     }
 
     #[test]

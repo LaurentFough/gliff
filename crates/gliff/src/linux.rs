@@ -759,16 +759,15 @@ fn install_mesh_menu(ui: &Rc<App>, button: &gtk::MenuButton) {
                         .unwrap_or_default();
                 if peers.is_empty() {
                     status.set_label(
-                        "No machines found. Is Tailscale or Rayfish running and logged in?",
+                        "No machines online. Is Tailscale or Rayfish running and logged in? gliff --mesh shows what each answers.",
                     );
                     return;
                 }
                 status.set_visible(false);
                 for peer in peers {
-                    let state = if peer.online { "" } else { " · offline" };
                     let row = adw::ActionRow::builder()
                         .title(format!("{} ({})", peer.name, peer.label()))
-                        .subtitle(format!("{}{state}", peer.address))
+                        .subtitle(&peer.address)
                         .use_markup(false)
                         .activatable(true)
                         .build();

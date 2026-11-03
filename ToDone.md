@@ -228,6 +228,9 @@ Support today:
 
 Newest first. Format: `### YYYY-MM-DD — summary (commit)`, then a line or two.
 
+### 2026-11-03 — Mesh peers: online machines only
+Tailscale keeps switched-off, expired and removed machines in its status, and one that no longer exists still showed. The lists (Mac window, Linux menu) now show only online peers; a Tailscale peer with an expired key counts as offline; `gliff --mesh` still lists every peer with its state.
+
 ### 2026-11-03 — Mesh peers: Tailscale found on the Mac; short labels; `gliff --mesh`
 First test: no Tailscale machines in the Mac list. Cause: the Mac's Tailscale CLI is Tailscale.app's binary, which opens the app instead of answering unless it looks run from a terminal; every query now sets `TAILSCALE_BE_CLI=1` (Tailscale's documented switch), with a regression test. Computer column: `hostname (local)`, `hostname (ts.net)`, `hostname (rayfish)` (Linux menu the same). New `gliff --mesh` on both clients prints each source's program, outcome (ok, not installed, timed out, failed with its first stderr line, not JSON) and peers.
 
