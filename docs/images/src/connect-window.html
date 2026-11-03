@@ -1,0 +1,53 @@
+<!doctype html>
+<!-- connect-window.html v1.0.0 — the Mac connection window ("Connect to a
+     Computer"), drawn to match ComputerPicker in native/Gliff.swift, with
+     placeholder machines. Outlined: the known-machines sidebar, the nearby
+     list's local / ts.net / rayfish machines, the offline checkbox, and the
+     SSH Address field (autocomplete).
+     Render: render.py connect-window.html ../macos-connect-machines.png 871 520 -->
+<html><head><meta charset="utf-8"><link rel="stylesheet" href="window.css">
+<style>
+  .content { position: absolute; left: 252px; right: 20px; top: 52px; bottom: 20px; display: flex; flex-direction: column; gap: 12px; }
+  h1 { font-size: 18px; font-weight: 600; }
+  .list { flex: 1; border: .5px solid var(--sep); border-radius: 8px; overflow: hidden; display: flex; flex-direction: column; }
+  .head { height: 28px; display: grid; grid-template-columns: 200px 1fr; align-items: center; border-bottom: .5px solid var(--sep); padding: 0 14px; }
+  .head span + span { border-left: .5px solid var(--sep); padding-left: 10px; }
+  .row { height: 30px; display: grid; grid-template-columns: 200px 1fr; align-items: center; margin: 2px 6px; padding: 0 8px; border-radius: 6px; }
+  .row:nth-child(odd) { background: #f4f5f5; }
+  .row.sel { background: var(--accent); color: #fff; }
+  .row .name { display: flex; align-items: center; gap: 8px; }
+  .row .name svg { width: 17px; height: 15px; opacity: .75; flex: none; }
+  .status { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+  .line { display: flex; align-items: center; gap: 10px; }
+</style></head>
+<body><div class="win">
+  <div class="titlebar"><i class="dot" style="background:#ff5f57"></i><i class="dot" style="background:#febc2e"></i><i class="dot" style="background:#28c840"></i><span class="t">Gliff</span></div>
+  <div class="sidebar" data-hl="sidebar">
+    <div class="search">⌕ <span>Search machines</span></div>
+    <div class="side-item">user@host-a</div>
+    <div class="side-item">user@host-b</div>
+    <div class="side-item">user@old-mini.tail1234.ts.net</div>
+    <div class="side-item">user@studio.tail1234.ts.net</div>
+    <div class="plusminus"><span>+</span><span>−</span></div>
+  </div>
+  <div class="content">
+    <div><h1>Connect to a Computer</h1><div class="secondary" style="margin-top:4px">Choose a nearby computer or enter an SSH address.</div></div>
+    <div class="list">
+      <div class="head"><span>Computer</span><span>SSH Address</span></div>
+      <div style="padding-top:2px">
+        <div class="row sel"><span class="name"><svg viewBox="0 0 17 15"><rect x="1" y="1" width="15" height="10" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M6 14h5M8.5 11v3" stroke="currentColor" stroke-width="1.4"/></svg>host-a (local)</span><span>user@host-a.local</span></div>
+        <div class="row" data-hl="mesh"><span class="name"><svg viewBox="0 0 17 15"><rect x="1" y="1" width="15" height="10" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M6 14h5M8.5 11v3" stroke="currentColor" stroke-width="1.4"/></svg>studio (ts.net)</span><span>studio.tail1234.ts.net</span></div>
+        <div class="row" data-hl="mesh"><span class="name"><svg viewBox="0 0 17 15"><rect x="1" y="1" width="15" height="10" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M6 14h5M8.5 11v3" stroke="currentColor" stroke-width="1.4"/></svg>workbench (ts.net)</span><span>workbench.tail1234.ts.net</span></div>
+        <div class="row" data-hl="mesh"><span class="name"><svg viewBox="0 0 17 15"><rect x="1" y="1" width="15" height="10" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M6 14h5M8.5 11v3" stroke="currentColor" stroke-width="1.4"/></svg>lab (rayfish)</span><span>lab.home.ray</span></div>
+        <div class="row" data-hl="mesh"><span class="name"><svg viewBox="0 0 17 15"><rect x="1" y="1" width="15" height="10" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M6 14h5M8.5 11v3" stroke="currentColor" stroke-width="1.4"/></svg>old-mini (ts.net, offline)</span><span>old-mini.tail1234.ts.net</span></div>
+      </div>
+    </div>
+    <div class="status secondary"><span>5 computers found. SSH access is required to connect.</span><span style="color:#555">↻</span></div>
+    <div class="line" style="font-size:11px" data-hl="offline"><span class="check on">✓</span>Show offline machines I've connected to</div>
+    <div class="line"><span style="width:84px">SSH Address:</span><span class="field" style="flex:1" data-hl="address">user@host-a.local</span><span>Port:</span><span class="field" style="width:64px">22</span></div>
+    <div class="line"><span style="width:52px">Screen:</span><span class="popup">Mirror screen <span>⌃⌄</span></span><span class="secondary" style="font-size:12px">Shows the host desktop, keeping its proportions.</span></div>
+    <div class="line"><span class="btn">Settings…</span><span style="flex:1"></span><span class="btn">Cancel</span><span class="btn default">Connect</span></div>
+  </div>
+</div>
+<script src="outline.js"></script>
+</body></html>

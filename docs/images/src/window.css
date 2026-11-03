@@ -1,0 +1,32 @@
+/* window.css v1.0.0 — shared macOS look for the window mockups
+   (connect-window.html, settings-window.html), light appearance, red accent
+   as in the screenshots; Inter stands in for SF Pro. */
+:root { --accent: #B9483B; --hl: #FF3B30; --sep: rgba(0,0,0,.1); --label: #1d1d1f; --secondary: #808085; }
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font: 13px/1.25 "Inter", -apple-system, sans-serif; color: var(--label); background: #fff;
+       -webkit-font-smoothing: antialiased; letter-spacing: -0.06px; overflow: hidden; }
+.win { position: absolute; inset: 0; background: #fff; border-radius: 10px; overflow: hidden; }
+.titlebar { height: 32px; display: flex; align-items: center; gap: 8px; padding-left: 10px; }
+.dot { width: 12px; height: 12px; border-radius: 50%; }
+.titlebar .t { margin-left: 10px; font-weight: 600; color: #4d4d4d; }
+.sidebar { position: absolute; left: 12px; top: 44px; bottom: 12px; width: 220px; background: #dedede; border-radius: 8px; padding: 10px 0; }
+.search { margin: 0 10px 8px; height: 24px; border-radius: 7px; background: #fff; border: .5px solid rgba(0,0,0,.18);
+          display: flex; align-items: center; gap: 6px; padding: 0 8px; color: #8e8e93; }
+.side-item { margin: 0 8px; height: 26px; display: flex; align-items: center; padding: 0 12px; border-radius: 6px; white-space: nowrap; }
+.side-item.sel { background: var(--accent); color: #fff; font-weight: 600; }
+.side-item.bold { font-weight: 600; }
+.side-item.selgray { background: rgba(0,0,0,.1); }
+.plusminus { position: absolute; left: 10px; bottom: 6px; display: flex; gap: 4px; }
+.plusminus span { width: 20px; height: 14px; border-radius: 4px; background: rgba(0,0,0,.08); display: grid; place-items: center; font-size: 13px; color: #555; }
+.secondary { color: var(--secondary); }
+.btn { height: 28px; padding: 0 16px; border-radius: 14px; background: #ececec; display: inline-flex; align-items: center; font-size: 13px; }
+.btn.default { background: var(--accent); color: #fff; }
+.btn.small { height: 20px; padding: 0 9px; border-radius: 5px; font-size: 11px; }
+.field { height: 24px; border: .5px solid rgba(0,0,0,.2); border-radius: 6px; padding: 0 7px; display: flex; align-items: center; background: #fff; }
+.popup { height: 24px; border-radius: 6px; background: #ececec; padding: 0 10px; display: inline-flex; align-items: center; gap: 30px; }
+.check { width: 14px; height: 14px; border-radius: 4px; display: inline-grid; place-items: center; font-size: 10px; color: #fff; flex: none; }
+.check.on { background: var(--accent); }
+.check.off { border: 1px solid rgba(0,0,0,.3); background: #fff; }
+.mono { font-family: "DejaVu Sans Mono", ui-monospace, monospace; font-size: 10.5px; }
+/* feature outline: 2 pt systemRed */
+.hl { position: absolute; border: 2px solid var(--hl); border-radius: 7px; pointer-events: none; }

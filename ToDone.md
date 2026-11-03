@@ -228,6 +228,9 @@ Support today:
 
 Newest first. Format: `### YYYY-MM-DD — summary (commit)`, then a line or two.
 
+### 2026-11-03 — Screenshots: connection and Settings windows redrawn
+Rendered mockups (HTML + Playwright, `docs/images/src/`: window.css, outline.js, connect-window.html, settings-window.html; render.py 1.1.0 takes a size) replace the two older shots. Connection window: mesh peers labelled (ts.net)/(rayfish), offline row, show-offline checkbox. Settings: Connect, Reconnect, Host speakers, Command line, General ▸ quit on last window. README and ForkNews captions and alt text updated.
+
 ### 2026-11-03 — README: mesh machines throughout
 Status row for mesh machines; the detailed note covers the labels, online-only lists, the offline checkbox and `gliff --mesh`; Use shows the `--mesh` commands; "If something does not work" points to `gliff --mesh --offline` and `gliff-enable-discovery`. ForkNews matches.
 

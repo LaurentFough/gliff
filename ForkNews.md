@@ -53,19 +53,19 @@ A quick look at what this fork adds. The README carries the same list; [ToDone.m
 
 ## Screenshots
 
-The new features are outlined in red.
+The new features are outlined in red. The connection and Settings windows are rendered mockups drawn to match the code (`docs/images/src/`), with placeholder machines.
 
-**Connection window:** known machines in a sidebar (search, **+** to add, **−** to forget); the SSH Address field autocompletes from them.
+**Connection window:** known machines in a sidebar (search, **+** to add, **−** to forget); the SSH Address field autocompletes from them. Mesh peers (Tailscale/Headscale `ts.net`, Rayfish) are listed by hostname with their source, and **Show offline machines I've connected to** adds known peers that are offline.
 
-<img src="docs/images/macos-connect-machines.png" width="871" alt="Connect to a Computer window with the known-machines sidebar and the SSH Address field">
+<img src="docs/images/macos-connect-machines.png" width="871" alt="Connect to a Computer window with the known-machines sidebar, mesh peers labelled by source, the show-offline checkbox and the SSH Address field">
 
 **Tabs:** this shows two tabs in one window, one connection each (outlined separately). Any number of tabs is supported: **+** or File ▸ New Tab opens another connection.
 
 ![Two Gliff tabs, one per machine, with the + button](docs/images/macos-tabs.png)
 
-**Reconnect in Settings:** per machine, or for all machines. (Taken before the Host speakers row and the Command line section were added.)
+**Settings:** per machine, or for all machines: **Connect** from the selected machine, **Reconnect automatically**, **Host speakers** (mute the machine's speakers while you listen), the **Command line** that reproduces the machine's settings (client and server over SSH, each with Copy), and **General ▸ Quit Gliff when its last window closes**.
 
-<img src="docs/images/macos-settings-reconnect.png" width="784" alt="Gliff Settings with the Reconnect automatically row">
+<img src="docs/images/macos-settings-reconnect.png" width="784" alt="Gliff Settings with Connect, Reconnect, Host speakers, Command line and General quit options">
 
 **'Machine' menu:** Play Sound, Reconnect and Reconnect Automatically.
 
