@@ -93,6 +93,9 @@ struct Cli {
     /// With --mesh: also list offline machines.
     #[arg(long, requires = "mesh")]
     offline: bool,
+    /// With --mesh: JSON instead of the table.
+    #[arg(long, requires = "mesh")]
+    json: bool,
 }
 
 /// Everything the UI shares with its callbacks.
@@ -255,15 +258,17 @@ pub(crate) fn main() -> glib::ExitCode {
     let cli = Cli::parse();
     if cli.mesh {
         //= What each mesh VPN client answered, to see why a machine is missing.
-        for r in gliff_transport::mesh::reports(Duration::from_secs(4)) {
-            let program = r
-                .program
-                .map_or_else(|| "-".to_string(), |p| p.display().to_string());
-            println!("{}: {} ({program})", r.source, r.outcome);
-            for p in r.peers.into_iter().filter(|p| p.online || cli.offline) {
-                let state = if p.online { "online" } else { "offline" };
-                println!("  {} ({})  {}  {state}", p.name, p.label(), p.address);
-            }
+        let reports = gliff_transport::mesh::reports(Duration::from_secs(4));
+        if cli.json {
+            println!(
+                "{}",
+                gliff_transport::mesh::render_json(&reports, cli.offline)
+            );
+        } else {
+            print!(
+                "{}",
+                gliff_transport::mesh::render_table(&reports, cli.offline)
+            );
         }
         return glib::ExitCode::SUCCESS;
     }

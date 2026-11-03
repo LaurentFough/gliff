@@ -293,8 +293,10 @@ The Computer column reads
 Tailscale peer and `hostname (rayfish)` for a Rayfish one. Tailscale.app's
 CLI is asked with `TAILSCALE_BE_CLI=1`, as Tailscale documents for scripts
 (without it, the app opens its window instead of answering). When a machine
-is missing, `~/.local/bin/gliff --mesh` prints what each client answered and
-its online machines; add `--offline` for the offline ones too. A peer has no user, so
+is missing, `~/.local/bin/gliff --mesh` prints a table of the online
+machines (hostname, IP, source, address, state; sorted by hostname, then
+IP, then source) and what each client answered; `--offline` adds the
+offline machines, `--json` prints JSON instead. A peer has no user, so
 ssh uses your SSH configuration's (add `user@` in SSH Address, or a `User`
 line in `~/.ssh/config`). On Linux, the network button next to the address
 bar lists the same machines.

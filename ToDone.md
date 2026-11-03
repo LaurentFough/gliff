@@ -5,7 +5,7 @@ slug: gliff-macos-todone
 author: LaurentFough
 type: report
 date-created: 2026-10-29
-date-modified: 2026-11-02
+date-modified: 2026-11-03
 date-published:
 source: https://github.com/LaurentFough/gliff
 domain: remote-desktop
@@ -204,7 +204,7 @@ Support today:
 
 ### Ideas (not decided)
 
-- [ ] Mesh VPN machines, on `feature/mesh-peers` (testing pending): Tailscale/Headscale and Rayfish peers in the Mac connection window (after the Bonjour computers; Refresh asks again) and in a menu by the Linux address bar. Later: NetBird (`netbird status --json`, ½ day), ZeroTier (Central API token or ZeroNSD, 1–1½ days).
+- [x] Mesh VPN machines (tested and merged 2026-11-03): Tailscale/Headscale and Rayfish peers in the Mac connection window (after the Bonjour computers; Refresh asks again) and in a menu by the Linux address bar. Later: NetBird (`netbird status --json`, ½ day), ZeroTier (Central API token or ZeroNSD, 1–1½ days).
 - [ ] Settings ▸ Connect: switch to the machine's open tab instead of opening a second one.
 - [ ] Connect in the stand-alone Settings window at launch (opened from the launch connection window; today only inside the viewer).
 - [ ] Open the launch connection window inside the viewer too, so Gliff is one process from the start.
@@ -227,6 +227,9 @@ Support today:
 ## Log
 
 Newest first. Format: `### YYYY-MM-DD — summary (commit)`, then a line or two.
+
+### 2026-11-03 — Merge `feature/mesh-peers`; `gliff --mesh` as a table
+Mesh peers, labels, online-only lists, the offline checkbox and `--offline` confirmed on both clients. `gliff --mesh` now prints a table (HOSTNAME, IP, SOURCE, ADDRESS, STATE; sorted by hostname, IP, source) and each source's outcome; `--json` gives the JSON (now with `ip`). Shared `mesh::render_table` / `render_json`; `MeshPeer.ip`. No-fast-forward merge into the working branch.
 
 ### 2026-11-03 — Mesh peers: `--mesh --offline`; "Show offline machines I've connected to"
 `gliff --mesh` lists online machines only; `--offline` adds the rest. Both connection lists gain a "Show offline machines I've connected to" checkbox: on, offline mesh peers that are known machines (`machines`, with or without `user@`; `mesh::is_known`) are listed, marked offline; off removes them. Saved as the top-level `mesh_show_offline` (Store and the Linux Config), so both clients share it. The Mac window now receives every peer (`discover_all`) and filters.

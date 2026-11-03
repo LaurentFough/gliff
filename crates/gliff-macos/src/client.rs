@@ -38,6 +38,9 @@ struct Cli {
     /// With --mesh: also list offline machines.
     #[arg(long, requires = "mesh")]
     offline: bool,
+    /// With --mesh: JSON instead of the table.
+    #[arg(long, requires = "mesh")]
+    json: bool,
     /// SSH port (default: SSH configuration, or the selected computer's advertised port).
     #[arg(long, value_parser = clap::value_parser!(u16).range(1..))]
     port: Option<u16>,
@@ -98,9 +101,18 @@ pub fn client_main() -> Result<()> {
             return crate::host_bridge::app(path).await;
         }
         if cli.mesh {
-            let report =
-                crate::discovery::mesh_report(std::time::Duration::from_secs(4), cli.offline);
-            println!("{}", serde_json::to_string_pretty(&report)?);
+            let reports = gliff_transport::mesh::reports(std::time::Duration::from_secs(4));
+            if cli.json {
+                println!(
+                    "{}",
+                    gliff_transport::mesh::render_json(&reports, cli.offline)
+                );
+            } else {
+                print!(
+                    "{}",
+                    gliff_transport::mesh::render_table(&reports, cli.offline)
+                );
+            }
             return Ok(());
         }
         if cli.discover {

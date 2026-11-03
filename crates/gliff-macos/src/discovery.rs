@@ -107,6 +107,7 @@ pub fn mesh_json(peers: &[gliff_transport::mesh::MeshPeer]) -> serde_json::Value
                 "network": p.network,
                 "name": p.name,
                 "address": p.address,
+                "ip": p.ip,
                 "online": p.online,
                 "label": p.label(),
                 "os": p.os,
@@ -119,26 +120,6 @@ pub fn mesh_json(peers: &[gliff_transport::mesh::MeshPeer]) -> serde_json::Value
 /// How long a mesh status command may take before it is skipped.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 const MESH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(4);
-
-/// `gliff --mesh`: what each mesh VPN client answered, and its online
-/// peers (all of them with `offline`).
-pub fn mesh_report(timeout: std::time::Duration, offline: bool) -> serde_json::Value {
-    let list: Vec<serde_json::Value> = gliff_transport::mesh::reports(timeout)
-        .into_iter()
-        .map(|mut r| {
-            if !offline {
-                r.peers.retain(|p| p.online);
-            }
-            serde_json::json!({
-                "source": r.source,
-                "program": r.program.map(|p| p.display().to_string()),
-                "outcome": r.outcome,
-                "peers": mesh_json(&r.peers)["peers"],
-            })
-        })
-        .collect();
-    serde_json::Value::Array(list)
-}
 
 /// Ask every mesh VPN client for its peers, off the UI thread.
 #[cfg(target_os = "macos")]
@@ -330,6 +311,7 @@ mod tests {
             network: Some("lab".into()),
             name: "omarchy".into(),
             address: "omarchy.lab.ray".into(),
+            ip: Some("fd00::1".into()),
             online: true,
             os: None,
         }];
