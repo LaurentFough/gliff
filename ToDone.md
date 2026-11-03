@@ -121,7 +121,7 @@ The working branch is the fork's default branch (2026-10-31). The ten feature br
 
 ### One app on the Mac (merged 2026-10-31; tested)
 
-- Settings and File ▸ New Tab open inside the viewer (`crate::panel`, `open_panel` / `close_panel`, routed by window id like tabs): one Dock icon, ⌘-Tab entry and menu bar. The connection window at launch (no viewer yet) is still its own process.
+- Settings and File ▸ New Tab open inside the viewer (`crate::panel`, `open_panel` / `close_panel`, routed by window id like tabs): one Dock icon, ⌘-Tab entry and menu bar. The connection window at launch opens in the viewer too since 2026-11-03 (the viewer starts `idle`, without a tab).
 - New Tab: a sheet over a tab without a live session; its own window over a connected tab or with no tab. ⌘, brings an open Settings forward; the viewer has an Edit menu.
 - Settings ▸ **Connect** (or double-click a machine) opens it in a new tab (`connect_machine`).
 - The connection window's nearby list takes a taller window's height.
@@ -184,7 +184,7 @@ Support today:
 - [x] Auto-reconnect on the Mac (tested 2026-10-30): Machine ▸ Reconnect Automatically off skips the launch reopen and drop retries; Settings ▸ Reconnect matches.
 - [x] Auto-reconnect on Linux (tested 2026-10-31): a machine with `auto_reconnect = false` is not reopened and not retried.
 - [x] `feature/macos-panels-in-viewer`: the connection window's nearby list takes the extra height when the window is made taller (reported and tested 2026-10-30).
-- [x] `feature/macos-panels-in-viewer`: Settings and File ▸ New Tab open inside the viewer, not as separate apps (reported 2026-10-30; tested 2026-10-30): one Dock icon and ⌘-Tab entry; New Tab's connection window is a sheet on the front tab; Settings is a window of the viewer and ⌘, brings an open one forward; Edit ▸ Paste works in both. The connection window at launch (no viewer yet) is still its own process.
+- [x] `feature/macos-panels-in-viewer`: Settings and File ▸ New Tab open inside the viewer, not as separate apps (reported 2026-10-30; tested 2026-10-30): one Dock icon and ⌘-Tab entry; New Tab's connection window is a sheet on the front tab; Settings is a window of the viewer and ⌘, brings an open one forward; Edit ▸ Paste works in both. The connection window at launch opens in the viewer too since 2026-11-03 (the viewer starts `idle`, without a tab).
 - [x] `feature/macos-panels-in-viewer`: File ▸ New Tab is a sheet over a tab with no live session (connecting, failed or dropped), else its own window (connected tab, or no tab) — corrected 2026-10-31.
 - [x] `feature/macos-panels-in-viewer`: Settings ▸ Connect, or double-clicking a machine, opens it in a new tab (viewer only).
 - [x] `feature/macos-panels-in-viewer`: Gliff ▸ About Gliff shows the version and build (commit, `-dirty`, arch).
@@ -207,8 +207,8 @@ Support today:
 
 - [x] Mesh VPN machines (tested and merged 2026-11-03): Tailscale/Headscale and Rayfish peers in the Mac connection window (after the Bonjour computers; Refresh asks again) and in a menu by the Linux address bar. Later: NetBird (`netbird status --json`, ½ day), ZeroTier (Central API token or ZeroNSD, 1–1½ days).
 - [ ] Settings ▸ Connect: switch to the machine's open tab instead of opening a second one.
-- [ ] Connect in the stand-alone Settings window at launch (opened from the launch connection window; today only inside the viewer).
-- [ ] Open the launch connection window inside the viewer too, so Gliff is one process from the start.
+- [ ] Connect in Settings at launch: built 2026-11-03 on `feature/mac-host-sound-info` (the launch connection window and its Settings now run in the viewer; Connect answers an open connection window: it closes and the machine opens); testing pending.
+- [ ] Open the launch connection window inside the viewer too: built 2026-11-03 on `feature/mac-host-sound-info` (`Hub::open(…, idle)`, Swift `app … idle` starts with no tab and the Machine menu off); fixes the two menu bars at launch ("Gliff Edit" from the stand-alone helper when no tabs were reopened, the full one when tabs were); testing pending.
 - [ ] Screenshots still missing: the address autocomplete, the Reconnect button on a dropped session, the File and Window menus' tab commands.
 - [ ] Screenshots: a second (lighter or dashed) outline for older fork features (the Settings window itself, Mirror/Private Screen, Share Clipboard).
 - [ ] Build ID: `-dirty` can lag until the next commit or Swift change (build.rs watches HEAD, not the index).
@@ -228,6 +228,9 @@ Support today:
 ## Log
 
 Newest first. Format: `### YYYY-MM-DD — summary (commit)`, then a line or two.
+
+### 2026-11-03 — Mac: one menu bar at launch, Connect in Settings works with the connection window open
+Reported: two menu bars at launch, Connect missing in Settings, Connect doing nothing. Cause: with no tabs to reopen, the launch connection window and its Settings ran as stand-alone helpers (own "Gliff Edit" menu, no Connect); with tabs reopened they ran in the viewer. And the app loop waited on an open connection window, so Settings ▸ Connect queued until it closed. Fix: the viewer starts idle and the connection window always opens in it; the connection window runs as a task beside the app loop, and Connect closes it and opens the machine. macOS Rust now also type-checked here (cross clippy for aarch64-apple-darwin with stub compilers).
 
 ### 2026-11-03 — Mac host sound, Decode in Settings, Connection Info (feature/mac-host-sound-info)
 Mac host: ScreenCaptureKit audio (48 kHz stereo, own process excluded) while the client wants sound (`audio` command → `capturesAudio`), kind 7 PCM to `host_audio.rs` (Opus, numbered, lossy queue via `Writer::offer`), `FEATURE_AUDIO` offered; `--mute-local-audio` accepted. Settings ▸ Decode (`decode`: auto/gpu/cpu, reconnects). Connection Info: `info.rs` meter (fps, Mbit/s, decode ms, ping RTT, stream, tiers, sound buffer) sent each second as `connection_info`; the viewer's translucent overlay adds client/viewer CPU (`proc_pid_rusage`). Rust clippy/fmt clean here; meter and Opus tests run here; Swift not compiled here.

@@ -144,7 +144,9 @@ pub fn client_main() -> Result<()> {
             return visit(None, selected, cli.clone(), shared, cli_layer).await;
         }
         //= What to open: the command line's machine, else the tabs open when
-        //= Gliff last quit, else the connection window's choice.
+        //= Gliff last quit; with neither, the connection window. It opens
+        //= inside the viewer in every case (one app, one menu bar), so the
+        //= viewer starts without a tab when there is nothing to reopen.
         let initial = match cli.selection() {
             Some(selected) => vec![selected],
             None => {
@@ -163,21 +165,17 @@ pub fn client_main() -> Result<()> {
                     .collect();
                 if !restored.is_empty() {
                     tracing::info!(tabs = restored.len(), "reopening the last tabs");
-                    restored
-                } else {
-                    match crate::discovery::choose(cli.picker_screen(), &shared, &cli_layer).await?
-                    {
-                        Some(selected) => vec![selected],
-                        None => return Ok(()),
-                    }
                 }
+                restored
             }
         };
+        let idle = initial.is_empty();
         //= One viewer process for every connection, so macOS can group
         //= their windows as tabs.
-        let mut hub = Hub::open(&tab_title(&cli, &initial[0])).await?;
-        //= App-wide options (Settings ▸ General) now and after every change.
-        hub.follow_app_settings(shared.clone());
+        let title = initial
+            .first()
+            .map_or_else(|| "Gliff".to_string(), |s| tab_title(&cli, s));
+        let mut hub = Hub::open(&title, idle).await?;
         let mut visits = Vec::new();
         for (i, selected) in initial.into_iter().enumerate() {
             let viewer = if i == 0 {
@@ -187,52 +185,103 @@ pub fn client_main() -> Result<()> {
             };
             visits.push(spawn_visit(viewer, selected, &cli, &shared, &cli_layer));
         }
+        //= App-wide options (Settings ▸ General), once a tab is open: before
+        //= that, closing the launch connection window must not quit early.
+        let mut following = false;
+        if !idle {
+            hub.follow_app_settings(shared.clone());
+            following = true;
+        }
+        //= The connection window runs beside this loop, so Settings ▸ Connect
+        //= still works while it is open (it then closes the window).
+        //= `launch`: the window Gliff opened with no tab to show.
+        let (picked_tx, mut picked) =
+            mpsc::unbounded_channel::<(bool, Result<Option<crate::discovery::Selection>>)>();
+        let start_picker = |launch: bool| {
+            let (tx, cli, shared, cli_layer) = (
+                picked_tx.clone(),
+                cli.clone(),
+                shared.clone(),
+                cli_layer.clone(),
+            );
+            tokio::task::spawn_local(async move {
+                let chosen =
+                    crate::discovery::choose(cli.picker_screen(), &shared, &cli_layer).await;
+                let _ = tx.send((launch, chosen));
+            })
+        };
+        let mut picker = idle.then(|| start_picker(true));
         //= The app's own events: the tab bar's + or File ▸ New Tab asks for
         //= another machine; quitting ends every session.
-        while let Some(ev) = hub.app_event().await {
-            match ev["type"].as_str() {
-                Some("new_tab") => {
-                    let chosen =
-                        crate::discovery::choose(cli.picker_screen(), &shared, &cli_layer).await;
+        loop {
+            let chosen = tokio::select! {
+                ev = hub.app_event() => {
+                    let Some(ev) = ev else { break };
+                    match ev["type"].as_str() {
+                        Some("new_tab") => {
+                            if picker.as_ref().is_some_and(|p| !p.is_finished()) {
+                                tracing::debug!("the connection window is already open");
+                            } else {
+                                picker = Some(start_picker(false));
+                            }
+                            continue;
+                        }
+                        Some("open_settings") => {
+                            let shared = shared.clone();
+                            tokio::task::spawn_local(async move {
+                                if let Err(e) = crate::settings::window(shared).await {
+                                    tracing::warn!(error = %e, "settings window failed");
+                                }
+                            });
+                            continue;
+                        }
+                        //= Settings ▸ Connect (or a double-click on a machine): a new
+                        //= tab for it; its screen and options come from its settings.
+                        Some("connect_machine") => {
+                            let host = ev["host"].as_str().unwrap_or_default().trim().to_string();
+                            let selected = crate::discovery::Selection {
+                                host,
+                                port: 22,
+                                screen: crate::discovery::ScreenMode::Mirror,
+                            };
+                            if let Err(e) = selected.validate() {
+                                tracing::warn!(error = %e, "not connecting from Settings");
+                                continue;
+                            }
+                            //= An open connection window is answered by this choice.
+                            if let Some(p) = picker.take() {
+                                p.abort();
+                            }
+                            selected
+                        }
+                        Some("bye") => break,
+                        _ => continue,
+                    }
+                }
+                Some((launch, chosen)) = picked.recv() => {
+                    picker = None;
                     match chosen {
-                        Ok(Some(selected)) => {
-                            let viewer = hub.new_window(&tab_title(&cli, &selected)).await?;
-                            visits.push(spawn_visit(viewer, selected, &cli, &shared, &cli_layer));
-                        }
-                        Ok(None) => {}
+                        Ok(Some(selected)) => selected,
+                        //= Cancelled with nothing open at launch: quit, as before.
+                        Ok(None) if launch && visits.is_empty() => break,
+                        Ok(None) => continue,
+                        Err(e) if launch && visits.is_empty() => return Err(e),
                         Err(e) => {
-                            tracing::warn!(error = %format!("{e:#}"), "connection window failed")
+                            tracing::warn!(error = %format!("{e:#}"), "connection window failed");
+                            continue;
                         }
                     }
                 }
-                Some("open_settings") => {
-                    let shared = shared.clone();
-                    tokio::task::spawn_local(async move {
-                        if let Err(e) = crate::settings::window(shared).await {
-                            tracing::warn!(error = %e, "settings window failed");
-                        }
-                    });
-                }
-                //= Settings ▸ Connect (or a double-click on a machine): a new
-                //= tab for it; its screen and options come from its settings.
-                Some("connect_machine") => {
-                    let host = ev["host"].as_str().unwrap_or_default().trim().to_string();
-                    let selected = crate::discovery::Selection {
-                        host,
-                        port: 22,
-                        screen: crate::discovery::ScreenMode::Mirror,
-                    };
-                    match selected.validate() {
-                        Ok(()) => {
-                            let viewer = hub.new_window(&tab_title(&cli, &selected)).await?;
-                            visits.push(spawn_visit(viewer, selected, &cli, &shared, &cli_layer));
-                        }
-                        Err(e) => tracing::warn!(error = %e, "not connecting from Settings"),
-                    }
-                }
-                Some("bye") => break,
-                _ => {}
+            };
+            let viewer = hub.new_window(&tab_title(&cli, &chosen)).await?;
+            visits.push(spawn_visit(viewer, chosen, &cli, &shared, &cli_layer));
+            if !following {
+                hub.follow_app_settings(shared.clone());
+                following = true;
             }
+        }
+        if let Some(p) = picker.take() {
+            p.abort();
         }
         for visit in visits {
             let _ = visit.await;
@@ -590,9 +639,14 @@ use crate::panel::Routes;
 
 #[cfg(target_os = "macos")]
 impl Hub {
-    /// Start the helper; its first window (id 0) opens with `title`.
-    async fn open(title: &str) -> Result<Self> {
-        let mut child = native::spawn("app", &[title.to_string()])?;
+    /// Start the helper; its first window (id 0) opens with `title`, or,
+    /// `idle`, none: the connection window comes first, and tabs from id 1.
+    async fn open(title: &str, idle: bool) -> Result<Self> {
+        let mut args = vec![title.to_string()];
+        if idle {
+            args.push("idle".to_string());
+        }
+        let mut child = native::spawn("app", &args)?;
         let mut rd = child.stdout.take().context("viewer stdout")?;
         let mut wr = child.stdin.take().context("viewer stdin")?;
         let (out, mut out_rx) = mpsc::channel::<(u32, u8, Vec<u8>)>(8);

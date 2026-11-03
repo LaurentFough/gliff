@@ -1432,8 +1432,11 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func addTab(_ tab: Tab) { tabsLock.lock(); tabs[tab.id] = tab; tabsLock.unlock() }
 
     func applicationDidFinishLaunching(_ note: Notification) {
+        // "idle": no machine to show yet. The client opens the connection
+        // window in this app first, and tabs from id 1 (one menu bar always).
+        let idle = CommandLine.arguments.dropFirst(3).first == "idle"
         let first = Tab(id: 0)
-        addTab(first)
+        if !idle { addTab(first) }
         // The client reads this first, before it says Hello (it decides the
         // chroma it asks for and how it sends frames).
         event(["type": "video_caps", "hardware": first.gpu != nil])
@@ -1483,7 +1486,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
         windowMenu.addItem(NSMenuItem.separator())
         NSApplication.shared.mainMenu = menu
         NSApplication.shared.windowsMenu = windowMenu
-        makeWindow(first, title: CommandLine.arguments.dropFirst(2).first ?? "Gliff")
+        if idle { disableMachineMenu() } else { makeWindow(first, title: CommandLine.arguments.dropFirst(2).first ?? "Gliff") }
         NSApplication.shared.activate(ignoringOtherApps: true)
         clipboard.localWindow = { [weak self] in self?.keyTab?.id }
         focusOpenSettings = { [weak self] in self?.focusSettings() ?? false }

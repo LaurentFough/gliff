@@ -98,8 +98,14 @@ read its errors on stderr and press Ctrl+C). All Machines shows them for
 `--mute-host-speakers`, the last new in this fork).
 
 **Connect** (or double-clicking a machine in the list) opens that machine in
-a new tab, with its saved settings. It is shown while the viewer is open;
-the connection window at launch has its own Connect.
+a new tab, with its saved settings. With the connection window open (at
+launch, or File ▸ New Tab), Connect in Settings answers it: the connection
+window closes and the machine opens.
+
+Gliff is one app from the start: with no tabs to reopen, the viewer starts
+without a window and the connection window opens in it, so the menu bar
+(Gliff, File, Edit, Machine, Window) and Settings are the same whichever way
+Gliff starts. Cancelling that first connection window quits, as before.
 
 **All Machines** sets the defaults; selecting a machine sets only that
 machine, and **Reset** hands an option back to the defaults. Each row says
