@@ -33,6 +33,9 @@ const MUTED: &str = "muted";
 const OPEN_TABS: &str = "open_tabs";
 /// Top-level, Mac only: present and true only when on.
 const QUIT_ON_LAST_WINDOW: &str = "quit_on_last_window";
+/// Top-level, both clients: the connection window also lists offline mesh
+/// VPN machines Gliff has connected to. Present and true only when on.
+const MESH_SHOW_OFFLINE: &str = "mesh_show_offline";
 
 /// The parsed config file and where it lives.
 #[derive(Debug, Clone)]
@@ -283,6 +286,25 @@ impl Store {
         }
     }
 
+    /// The connection window also lists offline mesh machines Gliff has
+    /// connected to (`mesh_show_offline = true`); off by default.
+    pub fn mesh_show_offline(&self) -> bool {
+        self.doc
+            .get(MESH_SHOW_OFFLINE)
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    }
+
+    /// Switch it on or off; off removes the key.
+    pub fn set_mesh_show_offline(&mut self, on: bool) {
+        if on {
+            self.doc
+                .insert(MESH_SHOW_OFFLINE.into(), Value::Boolean(true));
+        } else {
+            self.doc.remove(MESH_SHOW_OFFLINE);
+        }
+    }
+
     /// The Mac's tabs to reopen, in order: (SSH address, port). Malformed
     /// entries are skipped.
     pub fn open_tabs(&self) -> Vec<(String, u16)> {
@@ -476,6 +498,16 @@ mod tests {
         assert_eq!(s.defaults(), Settings::default());
         assert_eq!(s.machine("m@h"), Settings::default());
         assert!(Store::parse("not toml [").is_err());
+    }
+
+    #[test]
+    fn mesh_show_offline_is_off_unless_set() {
+        let mut s = store("");
+        assert!(!s.mesh_show_offline());
+        s.set_mesh_show_offline(true);
+        assert!(s.mesh_show_offline());
+        s.set_mesh_show_offline(false);
+        assert!(!s.doc.contains_key(MESH_SHOW_OFFLINE));
     }
 
     #[test]

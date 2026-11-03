@@ -31,6 +31,16 @@ struct Cli {
     /// List nearby Gliff computers as JSON without connecting or opening video.
     #[arg(long, conflicts_with_all = ["host", "connect", "check_frames"])]
     discover: bool,
+    /// Show what each mesh VPN client (Tailscale/Headscale, Rayfish) answers
+    /// and the machines it lists, as JSON, without connecting.
+    #[arg(long, conflicts_with_all = ["host", "connect", "check_frames", "discover"])]
+    mesh: bool,
+    /// With --mesh: also list offline machines.
+    #[arg(long, requires = "mesh")]
+    offline: bool,
+    /// With --mesh: JSON instead of the table.
+    #[arg(long, requires = "mesh")]
+    json: bool,
     /// SSH port (default: SSH configuration, or the selected computer's advertised port).
     #[arg(long, value_parser = clap::value_parser!(u16).range(1..))]
     port: Option<u16>,
@@ -89,6 +99,21 @@ pub fn client_main() -> Result<()> {
     tokio::task::LocalSet::new().block_on(&rt, async move {
         if let Some(path) = &cli.host_bridge {
             return crate::host_bridge::app(path).await;
+        }
+        if cli.mesh {
+            let reports = gliff_transport::mesh::reports(std::time::Duration::from_secs(4));
+            if cli.json {
+                println!(
+                    "{}",
+                    gliff_transport::mesh::render_json(&reports, cli.offline)
+                );
+            } else {
+                print!(
+                    "{}",
+                    gliff_transport::mesh::render_table(&reports, cli.offline)
+                );
+            }
+            return Ok(());
         }
         if cli.discover {
             println!(

@@ -96,6 +96,39 @@ pub fn hosts(event: &serde_json::Value) -> Result<Vec<Host>> {
 /// What the picker needs to show each machine's screen mode: the resolved
 /// mode per known machine (and for a new address), and which machines set
 /// one themselves, so their choice beats a pre-settings `UserDefaults` value.
+/// Mesh VPN peers (Tailscale/Headscale, Rayfish) for the connection
+/// window's list, as a `mesh_peers` command.
+pub fn mesh_json(peers: &[gliff_transport::mesh::MeshPeer]) -> serde_json::Value {
+    let list: Vec<serde_json::Value> = peers
+        .iter()
+        .map(|p| {
+            serde_json::json!({
+                "source": p.source,
+                "network": p.network,
+                "name": p.name,
+                "address": p.address,
+                "ip": p.ip,
+                "online": p.online,
+                "label": p.label(),
+                "os": p.os,
+            })
+        })
+        .collect();
+    serde_json::json!({"type": "mesh_peers", "peers": list})
+}
+
+/// How long a mesh status command may take before it is skipped.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+const MESH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(4);
+
+/// Ask every mesh VPN client for its peers, off the UI thread.
+#[cfg(target_os = "macos")]
+fn spawn_mesh() -> tokio::task::JoinHandle<Vec<gliff_transport::mesh::MeshPeer>> {
+    //= All of them: the window shows offline ones only when asked, and only
+    //= known machines (mesh_show_offline).
+    tokio::task::spawn_blocking(|| gliff_transport::mesh::discover_all(MESH_TIMEOUT))
+}
+
 pub fn picker_settings(
     shared: &crate::settings::Shared,
     cli: &gliff_settings::Settings,
@@ -127,6 +160,8 @@ pub fn picker_settings(
         "screens": screens,
         "pinned": pinned,
         "machines": machines,
+        //= The list's "Show offline machines" checkbox.
+        "mesh_show_offline": shared.mesh_show_offline(),
     })
 }
 
@@ -146,6 +181,8 @@ pub async fn choose(
         .unwrap_or_default();
     let mut panel = crate::panel::Panel::open("choose", &args).await?;
     let mut changes = Some(shared.subscribe());
+    //= Mesh peers arrive a moment after the window opens; Refresh asks again.
+    let mut mesh = Some(spawn_mesh());
     let result = async {
         send_picker_settings(&mut panel, shared, cli).await?;
         loop {
@@ -185,12 +222,29 @@ pub async fn choose(
                                 Err(e) => tracing::warn!(%host, error = %e, "not adding the machine"),
                             }
                         }
+                        //= The list's "Show offline machines" checkbox; the
+                        //= change notice below sends it back with the settings.
+                        Some("mesh_show_offline") => {
+                            shared.set_mesh_show_offline(event["on"].as_bool() == Some(true));
+                        }
+                        Some("refresh_mesh") => {
+                            if mesh.is_none() {
+                                mesh = Some(spawn_mesh());
+                            }
+                        }
                         Some("machine_remove") => {
                             if let Some(host) = event["host"].as_str() {
                                 shared.forget(&crate::settings::machine_key(host));
                             }
                         }
                         other => tracing::debug!(?other, "connection window event ignored"),
+                    }
+                }
+                peers = async { mesh.as_mut().unwrap().await }, if mesh.is_some() => {
+                    mesh = None;
+                    match peers {
+                        Ok(peers) => panel.send(&mesh_json(&peers)).await?,
+                        Err(e) => tracing::warn!(error = %e, "mesh discovery failed"),
                     }
                 }
                 //= The settings window changed something: refresh the menu.
@@ -249,6 +303,25 @@ pub async fn list() -> Result<Vec<Host>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mesh_peers_reach_the_window_as_a_list() {
+        let peers = vec![gliff_transport::mesh::MeshPeer {
+            source: "Rayfish",
+            network: Some("lab".into()),
+            name: "omarchy".into(),
+            address: "omarchy.lab.ray".into(),
+            ip: Some("fd00::1".into()),
+            online: true,
+            os: None,
+        }];
+        let v = mesh_json(&peers);
+        assert_eq!(v["type"], "mesh_peers");
+        assert_eq!(v["peers"][0]["address"], "omarchy.lab.ray");
+        assert_eq!(v["peers"][0]["source"], "Rayfish");
+        assert_eq!(v["peers"][0]["online"], true);
+        assert_eq!(v["peers"][0]["label"], "rayfish");
+    }
     use serde_json::json;
 
     #[test]

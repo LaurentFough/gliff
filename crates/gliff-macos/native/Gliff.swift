@@ -1631,9 +1631,12 @@ struct NearbyComputer {
     let user: String
     let platform: String
     var address: String { user.isEmpty ? host : "\(user)@\(host)" }
+    // The Computer column: "hostname (local)" for a Bonjour computer; a mesh
+    // peer's name already reads "hostname (ts.net)" or "hostname (rayfish)".
     var displayName: String {
+        if id.hasPrefix("mesh:") { return name }
         let hostname = host.hasSuffix(".local") ? String(host.dropLast(6)) : host
-        return name == "Gliff on \(hostname) (\(user))" ? hostname : name
+        return "\(hostname) (local)"
     }
     var value: [String: Any] { ["name": name, "host": host, "port": port, "user": user, "platform": platform] }
 }
@@ -1729,6 +1732,13 @@ final class ComputerPicker: NSObject, PanelWindow, NSApplicationDelegate, NSWind
     var window: NSWindow?
     var listHeight: NSLayoutConstraint?
     var rows: [NearbyComputer] = []
+    // Mesh VPN peers from the client (mesh_peers: Tailscale/Headscale,
+    // Rayfish), listed after the Bonjour computers.
+    var meshRows: [NearbyComputer] = []
+    // Every mesh peer from the client, online or not (meshRows is what shows):
+    // offline ones show only with the checkbox, and only known machines.
+    var meshPeers: [[String: Any]] = []
+    let showOffline = NSButton(checkboxWithTitle: "Show offline machines I've connected to", target: nil, action: nil)
     var updating = false
     var finished = false
     var selectedID: String?
@@ -1847,6 +1857,9 @@ final class ComputerPicker: NSObject, PanelWindow, NSApplicationDelegate, NSWind
         refresh.bezelStyle = .inline; refresh.controlSize = .small
         refresh.toolTip = "Refresh Nearby Computers"; refresh.setAccessibilityLabel("Refresh Nearby Computers")
         let statusRow = stack([progress, status, refresh], .horizontal, 8)
+        showOffline.target = self; showOffline.action = #selector(ComputerPicker.showOfflineChanged(_:))
+        showOffline.controlSize = .small; showOffline.font = NSFont.systemFont(ofSize: 11)
+        showOffline.toolTip = "Also list mesh VPN machines (Tailscale, Rayfish) that are offline now, if Gliff has connected to them before"
         address.placeholderString = "user@computer.local"
         address.bezelStyle = .roundedBezel; port.bezelStyle = .roundedBezel
         address.font = NSFont.systemFont(ofSize: 13); port.font = address.font
@@ -1870,12 +1883,12 @@ final class ComputerPicker: NSObject, PanelWindow, NSApplicationDelegate, NSWind
         settingsButton.bezelStyle = .rounded; settingsButton.controlSize = .large
         settingsButton.setAccessibilityLabel("Settings")
         let actions = stack([settingsButton, NSView(), cancel, connect], .horizontal, 8)
-        let content = stack([heading, list, statusRow, fields, screenRow, actions], .vertical, 12)
+        let content = stack([heading, list, statusRow, showOffline, fields, screenRow, actions], .vertical, 12)
         // A taller window gives the nearby-computers list the extra height:
         // every other row hugs its content; the list hugs least and its
         // height (listHeight) is only a minimum.
         content.distribution = .fill
-        for row in [heading, statusRow, fields, screenRow, actions] { row.setContentHuggingPriority(.defaultHigh, for: .vertical) }
+        for row in [heading, statusRow, showOffline, fields, screenRow, actions] { row.setContentHuggingPriority(.defaultHigh, for: .vertical) }
         list.setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: .vertical)
         view.addSubview(content)
         // The sidebar: known machines, as in the settings window. It takes the
@@ -1964,12 +1977,18 @@ final class ComputerPicker: NSObject, PanelWindow, NSApplicationDelegate, NSWind
     func handle(_ cmd: [String: Any]) {
         if cmd["type"] as? String == "close_panel" { dismiss(); return }
         if cmd["type"] as? String == "cancel" { self.cancel(nil) }
+        if cmd["type"] as? String == "mesh_peers" {
+            meshPeers = cmd["peers"] as? [[String: Any]] ?? []
+            rebuildMesh()
+        }
         if cmd["type"] as? String == "machine_settings" {
             self.configScreens = cmd["screens"] as? [String: String] ?? [:]
             self.pinned = Set(cmd["pinned"] as? [String] ?? [])
             self.defaultScreen = cmd["default_screen"] as? String ?? "mirror"
             self.machines = (cmd["machines"] as? [String] ?? []).reversed()
             self.filterMachines()
+            self.showOffline.state = cmd["mesh_show_offline"] as? Bool == true ? .on : .off
+            self.rebuildMesh()
             // Choices made in this window still win (sessionScreens).
             self.preferenceTarget = nil; self.restoreScreenPreference()
         }
@@ -1981,8 +2000,34 @@ final class ComputerPicker: NSObject, PanelWindow, NSApplicationDelegate, NSWind
             send(["type": "picker_state", "hosts": self.rows.map { $0.value }, "rows": self.table.numberOfRows, "host": self.address.stringValue, "port": self.port.stringValue, "screen": self.screenMode])
         }
     }
+    /// The mesh rows shown: online peers, and with "Show offline machines"
+    /// the offline ones whose address is a known machine (user@ or not).
+    func rebuildMesh() {
+        let known = Set(machines.map { m -> String in
+            (m.split(separator: "@", maxSplits: 1).last.map(String.init) ?? m).lowercased()
+        })
+        meshRows = meshPeers.compactMap { p in
+            guard let address = p["address"] as? String, ComputerPicker.validAddress(address) else { return nil }
+            let online = p["online"] as? Bool != false
+            guard online || (showOffline.state == .on && known.contains(address.lowercased())) else { return nil }
+            let source = p["source"] as? String ?? "Mesh"
+            let label = p["label"] as? String ?? source.lowercased()
+            let name = p["name"] as? String ?? address
+            let tag = online ? label : "\(label), offline"
+            return NearbyComputer(id: "mesh:\(source):\(address)", name: "\(name) (\(tag))",
+                                  host: address, port: 22, user: "", platform: source.lowercased())
+        }
+        update()
+    }
+    @objc func showOfflineChanged(_ sender: Any?) {
+        rebuildMesh()
+        send(["type": "mesh_show_offline", "on": showOffline.state == .on])
+    }
     func update() {
-        updating = true; rows = nearby.computers; table.reloadData()
+        //= Bonjour first, then mesh peers whose address is not already listed.
+        let local = nearby.computers
+        let seen = Set(local.map { $0.host })
+        updating = true; rows = local + meshRows.filter { !seen.contains($0.host) }; table.reloadData()
         if let index = rows.firstIndex(where: { $0.id == selectedID }) {
             table.selectRowIndexes(IndexSet(integer: index), byExtendingSelection: false)
         }
@@ -2132,7 +2177,7 @@ final class ComputerPicker: NSObject, PanelWindow, NSApplicationDelegate, NSWind
         if note.object as? NSTextField === address { autocompleteAddress() }
         restoreScreenPreference()
     }
-    @objc func refresh(_ sender: Any?) { nearby.start() }
+    @objc func refresh(_ sender: Any?) { nearby.start(); send(["type": "refresh_mesh"]) }
     func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
         if commandSelector == #selector(NSResponder.insertNewline(_:)) { connect(nil); return true }
         if commandSelector == #selector(NSResponder.cancelOperation(_:)) { cancel(nil); return true }

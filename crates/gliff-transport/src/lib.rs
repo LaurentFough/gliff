@@ -13,6 +13,7 @@
 
 pub mod clipboard;
 mod listener;
+pub mod mesh;
 mod ssh;
 
 use bytes::{Buf, Bytes, BytesMut};

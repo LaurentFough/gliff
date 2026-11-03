@@ -274,6 +274,33 @@ completes from the same list: the rest of the newest matching machine is
 filled in and selected, so typing on replaces it and Tab or Return keeps it.
 Deleting never brings a completion back.
 
+### Machines on a mesh VPN
+
+Bonjour stays on one LAN. Machines on a mesh VPN this Mac is part of are
+listed too, after the nearby computers: **Tailscale** (and Headscale, which
+uses the same client; Linux and macOS peers, by MagicDNS name) and
+**Rayfish** (each network's peers, as `HOST.NETWORK.ray`). Gliff runs
+`tailscale status --json` and `ray status --json` (from the PATH, or
+Tailscale.app, Homebrew and `~/.local/bin`) when the window opens and on
+Refresh; a missing or stopped client is skipped. Only machines online now
+are listed: a tailnet keeps switched-off, expired and long-gone machines.
+**Show offline machines I've connected to** (under the list; on Linux, at
+the bottom of the network menu) adds the offline ones that are among your
+known machines, marked `offline`; it is saved as `mesh_show_offline` in
+`config.toml`, shared by both clients.
+The Computer column reads
+`hostname (local)` for a Bonjour computer, `hostname (ts.net)` for a
+Tailscale peer and `hostname (rayfish)` for a Rayfish one. Tailscale.app's
+CLI is asked with `TAILSCALE_BE_CLI=1`, as Tailscale documents for scripts
+(without it, the app opens its window instead of answering). When a machine
+is missing, `~/.local/bin/gliff --mesh` prints a table of the online
+machines (hostname, IP, source, address, state; sorted by hostname, then
+IP, then source) and what each client answered; `--offline` adds the
+offline machines, `--json` prints JSON instead. A peer has no user, so
+ssh uses your SSH configuration's (add `user@` in SSH Address, or a `User`
+line in `~/.ssh/config`). On Linux, the network button next to the address
+bar lists the same machines.
+
 ### When nothing is found
 
 The usual cause is the host: installing gliff does not start advertising.

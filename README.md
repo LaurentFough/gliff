@@ -69,6 +69,7 @@ This fork ([LaurentFough/gliff](https://github.com/LaurentFough/gliff)) builds o
 - **Build once, install on other Macs**: `make install` skips an unchanged build (a build ID in the app); `make install-package` installs a ZIP from another Mac and re-signs it locally; `make release-upload` / `make install-release` carry it through GitHub Releases. Apple Silicon. *(Tested.)*
 - **Build once, install on other Arch/Omarchy machines**: the same `make package` / `install-package` / `release-upload` / `install-release` with a pacman package (`PKG=`, `linux-COMMIT` releases); `make install` skips an unchanged build. *(Tested.)*
 - **Command line in Settings**: each machine's client command (`RUST_LOG=info gliff [flags] user@host`) and the exact ssh server command, with Copy, in both clients' Settings, for running or debugging a connection from a terminal; new `--mute-host-speakers` flag. *(Tested.)*
+- **Mesh VPN machines**: peers from Tailscale/Headscale and Rayfish, for hosts mDNS cannot reach: listed as `hostname (ts.net)` / `hostname (rayfish)` in the Mac connection window after the nearby `hostname (local)` computers, and in a menu by the Linux address bar; choosing one connects. Online machines only, with a "Show offline machines I've connected to" checkbox; `gliff --mesh` prints a table (`--offline`, `--json`). *(Tested.)*
 - **Releases built by CI**: `make release-ci` runs the fork's "Fork builds" workflow on GitHub Actions for the pushed branch (checks, Mac ZIPs for Apple Silicon and Intel, the Arch package) and publishes one `build-COMMIT` pre-release that `make install-release` finds on either system. *(New; testing pending.)*
 - **Checks**: `make video-check` checks GPU output against the CPU decoder and benchmarks both; the ssh login-shell test no longer depends on your shell setup; `scripts/check.sh` stops early on a Rust older than `rust-version` (1.87); `rust-toolchain.toml` pins Rust 1.99.0 for rustup; the Mac crate is clippy-clean on Linux too (as CI lints it).
 - **Fixes**: Mac install and signing (`plutil`, a custom cargo `target-dir`); the client ignores stray sound packets from a host; Arch installs run `pacman -U` through doas, sudo or su (`GLIFF_AUTH`, else `PACMAN_AUTH`); the Arch package tells you to run `gliff-enable-discovery`, which nearby-computer discovery needs.
@@ -547,6 +548,11 @@ gliff 0.4.1).
   it. `make video-check` checks the output and compares decode times (4K
   4:4:4: 6.9 ms GPU against 18.8 ms CPU). See
   [macOS support](docs/macos.md).
+- **Mesh VPN machines.** The connection window (and, on Linux, a menu by
+  the address bar) lists peers from Tailscale/Headscale and Rayfish, for
+  hosts mDNS cannot reach: `tailscale status --json` / `ray status --json`
+  through `gliff_transport::mesh`, with a timeout, skipped when the client
+  is missing. See [macOS support](docs/macos.md#machines-on-a-mesh-vpn).
 - **Command line in Settings.** Both settings windows show what the selected
   machine's settings come to on the command line, with Copy: the client
   (`RUST_LOG=info gliff [flags] user@host`) and the exact ssh command that
