@@ -90,6 +90,9 @@ struct Cli {
     /// and the machines it lists, then exit.
     #[arg(long)]
     mesh: bool,
+    /// With --mesh: also list offline machines.
+    #[arg(long, requires = "mesh")]
+    offline: bool,
 }
 
 /// Everything the UI shares with its callbacks.
@@ -257,7 +260,7 @@ pub(crate) fn main() -> glib::ExitCode {
                 .program
                 .map_or_else(|| "-".to_string(), |p| p.display().to_string());
             println!("{}: {} ({program})", r.source, r.outcome);
-            for p in r.peers {
+            for p in r.peers.into_iter().filter(|p| p.online || cli.offline) {
                 let state = if p.online { "online" } else { "offline" };
                 println!("  {} ({})  {}  {state}", p.name, p.label(), p.address);
             }
@@ -715,8 +718,10 @@ fn install_address_bar(ui: &Rc<App>, connect_btn: &gtk::Button) {
 }
 
 /// The mesh VPN menu: when it opens, ask every mesh client for its peers
-/// (off the UI thread, `gliff_transport::mesh`), then list them; choosing
-/// one connects to it like typing it into the address bar.
+/// (off the UI thread, `gliff_transport::mesh`), then list the online ones,
+/// and with "Show offline machines" also the offline ones Gliff has
+/// connected to (the config's machines; saved as `mesh_show_offline`).
+/// Choosing one connects to it like typing it into the address bar.
 fn install_mesh_menu(ui: &Rc<App>, button: &gtk::MenuButton) {
     let list = gtk::ListBox::builder()
         .selection_mode(gtk::SelectionMode::None)
@@ -737,55 +742,106 @@ fn install_mesh_menu(ui: &Rc<App>, button: &gtk::MenuButton) {
         .max_content_height(360)
         .child(&list)
         .build();
+    let offline = gtk::CheckButton::builder()
+        .label("Show offline machines I've connected to")
+        .margin_top(6)
+        .margin_bottom(6)
+        .margin_start(12)
+        .margin_end(12)
+        .active(Config::load(&ui.config_path).mesh_show_offline)
+        .build();
     let body = gtk::Box::new(gtk::Orientation::Vertical, 0);
     body.append(&status);
     body.append(&scroll);
+    body.append(&offline);
     let popover = gtk::Popover::builder().child(&body).build();
     button.set_popover(Some(&popover));
-    {
-        let (ui, list, status) = (Rc::downgrade(ui), list.clone(), status.clone());
-        popover.connect_show(move |popover| {
+    //= Every peer from the last ask; render() filters it.
+    let peers: Rc<RefCell<Option<Vec<gliff_transport::mesh::MeshPeer>>>> =
+        Rc::new(RefCell::new(None));
+    let render: Rc<dyn Fn()> = {
+        let (ui, list, status, popover, offline, peers) = (
+            Rc::downgrade(ui),
+            list.clone(),
+            status.clone(),
+            popover.clone(),
+            offline.clone(),
+            peers.clone(),
+        );
+        Rc::new(move || {
             while let Some(row) = list.first_child() {
                 list.remove(&row);
             }
-            status.set_label("Asking Tailscale and Rayfish…");
-            status.set_visible(true);
-            let (ui, list, status, popover) =
-                (ui.clone(), list.clone(), status.clone(), popover.clone());
-            glib::spawn_future_local(async move {
-                let peers =
-                    gio::spawn_blocking(|| gliff_transport::mesh::discover(Duration::from_secs(4)))
-                        .await
-                        .unwrap_or_default();
-                if peers.is_empty() {
-                    status.set_label(
-                        "No machines online. Is Tailscale or Rayfish running and logged in? gliff --mesh shows what each answers.",
-                    );
-                    return;
+            let Some(ui_rc) = ui.upgrade() else { return };
+            let Some(all) = peers.borrow().clone() else {
+                status.set_label("Asking Tailscale and Rayfish…");
+                status.set_visible(true);
+                return;
+            };
+            let known = Config::load(&ui_rc.config_path).machines;
+            let shown: Vec<_> = all
+                .into_iter()
+                .filter(|p| {
+                    p.online
+                        || (offline.is_active()
+                            && gliff_transport::mesh::is_known(&p.address, &known))
+                })
+                .collect();
+            if shown.is_empty() {
+                status.set_label(
+                    "No machines online. Is Tailscale or Rayfish running and logged in? gliff --mesh shows what each answers.",
+                );
+                status.set_visible(true);
+                return;
+            }
+            status.set_visible(false);
+            for peer in shown {
+                let state = if peer.online { "" } else { " · offline" };
+                let row = adw::ActionRow::builder()
+                    .title(format!("{} ({})", peer.name, peer.label()))
+                    .subtitle(format!("{}{state}", peer.address))
+                    .use_markup(false)
+                    .activatable(true)
+                    .build();
+                let (ui, popover, address) = (ui.clone(), popover.clone(), peer.address.clone());
+                row.connect_activated(move |_| {
+                    popover.popdown();
+                    if let Some(ui) = ui.upgrade() {
+                        //= user@ comes from ssh's config, as for a typed name.
+                        ui.entry.set_text(&address);
+                        connect_from_address_bar(&ui);
+                    }
+                });
+                list.append(&row);
+            }
+        })
+    };
+    {
+        let (ui, render) = (Rc::downgrade(ui), render.clone());
+        offline.connect_toggled(move |check| {
+            if let Some(ui) = ui.upgrade() {
+                let mut config = Config::load(&ui.config_path);
+                config.mesh_show_offline = check.is_active();
+                if let Err(e) = config.save(&ui.config_path) {
+                    tracing::warn!(error = %e, "cannot save the mesh setting");
                 }
-                status.set_visible(false);
-                for peer in peers {
-                    let row = adw::ActionRow::builder()
-                        .title(format!("{} ({})", peer.name, peer.label()))
-                        .subtitle(&peer.address)
-                        .use_markup(false)
-                        .activatable(true)
-                        .build();
-                    let (ui, popover, address) =
-                        (ui.clone(), popover.clone(), peer.address.clone());
-                    row.connect_activated(move |_| {
-                        popover.popdown();
-                        if let Some(ui) = ui.upgrade() {
-                            //= user@ comes from ssh's config, as for a typed name.
-                            ui.entry.set_text(&address);
-                            connect_from_address_bar(&ui);
-                        }
-                    });
-                    list.append(&row);
-                }
-            });
+            }
+            render();
         });
     }
+    popover.connect_show(move |_| {
+        *peers.borrow_mut() = None;
+        render();
+        let (peers, render) = (peers.clone(), render.clone());
+        glib::spawn_future_local(async move {
+            let all =
+                gio::spawn_blocking(|| gliff_transport::mesh::discover_all(Duration::from_secs(4)))
+                    .await
+                    .unwrap_or_default();
+            *peers.borrow_mut() = Some(all);
+            render();
+        });
+    });
 }
 
 /// Show the address bar in place of the +, or fold it back. With no tabs

@@ -171,6 +171,21 @@ impl Shared {
         self.store.borrow().muted()
     }
 
+    /// The connection window lists offline mesh machines Gliff has
+    /// connected to (off by default).
+    pub fn mesh_show_offline(&self) -> bool {
+        self.store.borrow().mesh_show_offline()
+    }
+
+    /// Save it; announced like any other change (the window refreshes).
+    pub fn set_mesh_show_offline(&self, on: bool) {
+        if self.mesh_show_offline() == on {
+            return;
+        }
+        self.store.borrow_mut().set_mesh_show_offline(on);
+        self.save_and_announce();
+    }
+
     /// The Mac app quits when its last window closes (off by default).
     pub fn quit_on_last_window(&self) -> bool {
         self.store.borrow().quit_on_last_window()

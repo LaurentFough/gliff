@@ -23,7 +23,7 @@
 //! <https://github.com/rayfish/rayfish> (`ray status --json`,
 //! `ray-proto/src/ipc.rs` NetworkStatus / PeerStatus).
 //!
-//! Version: 1.2.0
+//! Version: 1.3.0
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -315,10 +315,18 @@ pub fn reports(timeout: Duration) -> Vec<Report> {
 }
 
 /// Every source at once, online peers only (a tailnet keeps machines that
-/// are switched off, expired or long gone; `reports` still lists them), by
-/// mesh and name, one entry per address. Blocking; runs the sources in
-/// parallel.
+/// are switched off, expired or long gone), by mesh and name, one entry per
+/// address. Blocking; runs the sources in parallel.
 pub fn discover(timeout: Duration) -> Vec<MeshPeer> {
+    let mut peers = discover_all(timeout);
+    peers.retain(|p| p.online);
+    peers
+}
+
+/// As [`discover`], offline peers included (online first): the connection
+/// windows show offline ones only when asked, and only machines Gliff has
+/// connected to.
+pub fn discover_all(timeout: Duration) -> Vec<MeshPeer> {
     let handles: Vec<_> = SOURCES
         .iter()
         .map(|s| std::thread::spawn(move || query(s, timeout)))
@@ -327,9 +335,17 @@ pub fn discover(timeout: Duration) -> Vec<MeshPeer> {
         .into_iter()
         .flat_map(|h| h.join().unwrap_or_default())
         .collect();
-    peers.retain(|p| p.online);
     sort_and_dedup(&mut peers);
     peers
+}
+
+/// Whether `address` is one of the known machines (the config's
+/// `machines`, written `user@host` or `host`).
+pub fn is_known(address: &str, machines: &[String]) -> bool {
+    machines.iter().any(|m| {
+        let host = m.rsplit_once('@').map_or(m.as_str(), |(_, h)| h);
+        host.eq_ignore_ascii_case(address)
+    })
 }
 
 fn sort_and_dedup(peers: &mut Vec<MeshPeer>) {
@@ -441,6 +457,17 @@ mod tests {
         assert_eq!(r.peers[0].address, "omarchy.tail1.ts.net");
         assert_eq!(r.peers[0].label(), "ts.net");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn known_machines_match_with_or_without_a_user() {
+        let machines = vec![
+            "xoot@omarchy.tail1.ts.net".to_string(),
+            "mini.lab.ray".to_string(),
+        ];
+        assert!(is_known("omarchy.tail1.ts.net", &machines));
+        assert!(is_known("MINI.lab.ray", &machines));
+        assert!(!is_known("other.tail1.ts.net", &machines));
     }
 
     #[test]

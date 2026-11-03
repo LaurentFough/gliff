@@ -120,11 +120,15 @@ pub fn mesh_json(peers: &[gliff_transport::mesh::MeshPeer]) -> serde_json::Value
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 const MESH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(4);
 
-/// `gliff --mesh`: what each mesh VPN client answered, and the peers.
-pub fn mesh_report(timeout: std::time::Duration) -> serde_json::Value {
+/// `gliff --mesh`: what each mesh VPN client answered, and its online
+/// peers (all of them with `offline`).
+pub fn mesh_report(timeout: std::time::Duration, offline: bool) -> serde_json::Value {
     let list: Vec<serde_json::Value> = gliff_transport::mesh::reports(timeout)
         .into_iter()
-        .map(|r| {
+        .map(|mut r| {
+            if !offline {
+                r.peers.retain(|p| p.online);
+            }
             serde_json::json!({
                 "source": r.source,
                 "program": r.program.map(|p| p.display().to_string()),
@@ -139,7 +143,9 @@ pub fn mesh_report(timeout: std::time::Duration) -> serde_json::Value {
 /// Ask every mesh VPN client for its peers, off the UI thread.
 #[cfg(target_os = "macos")]
 fn spawn_mesh() -> tokio::task::JoinHandle<Vec<gliff_transport::mesh::MeshPeer>> {
-    tokio::task::spawn_blocking(|| gliff_transport::mesh::discover(MESH_TIMEOUT))
+    //= All of them: the window shows offline ones only when asked, and only
+    //= known machines (mesh_show_offline).
+    tokio::task::spawn_blocking(|| gliff_transport::mesh::discover_all(MESH_TIMEOUT))
 }
 
 pub fn picker_settings(
@@ -173,6 +179,8 @@ pub fn picker_settings(
         "screens": screens,
         "pinned": pinned,
         "machines": machines,
+        //= The list's "Show offline machines" checkbox.
+        "mesh_show_offline": shared.mesh_show_offline(),
     })
 }
 
@@ -232,6 +240,11 @@ pub async fn choose(
                                 Ok(()) => shared.remember(&crate::settings::machine_key(host)),
                                 Err(e) => tracing::warn!(%host, error = %e, "not adding the machine"),
                             }
+                        }
+                        //= The list's "Show offline machines" checkbox; the
+                        //= change notice below sends it back with the settings.
+                        Some("mesh_show_offline") => {
+                            shared.set_mesh_show_offline(event["on"].as_bool() == Some(true));
                         }
                         Some("refresh_mesh") => {
                             if mesh.is_none() {

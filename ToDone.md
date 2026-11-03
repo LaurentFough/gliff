@@ -228,6 +228,9 @@ Support today:
 
 Newest first. Format: `### YYYY-MM-DD — summary (commit)`, then a line or two.
 
+### 2026-11-03 — Mesh peers: `--mesh --offline`; "Show offline machines I've connected to"
+`gliff --mesh` lists online machines only; `--offline` adds the rest. Both connection lists gain a "Show offline machines I've connected to" checkbox: on, offline mesh peers that are known machines (`machines`, with or without `user@`; `mesh::is_known`) are listed, marked offline; off removes them. Saved as the top-level `mesh_show_offline` (Store and the Linux Config), so both clients share it. The Mac window now receives every peer (`discover_all`) and filters.
+
 ### 2026-11-03 — Mesh peers: online machines only
 Tailscale keeps switched-off, expired and removed machines in its status, and one that no longer exists still showed. The lists (Mac window, Linux menu) now show only online peers; a Tailscale peer with an expired key counts as offline; `gliff --mesh` still lists every peer with its state.
 

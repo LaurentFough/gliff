@@ -29,6 +29,10 @@ pub struct Config {
     /// The header's sound button is off: no tab plays its machine's sound.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub muted: bool,
+    /// The mesh menu also lists offline machines Gliff has connected to
+    /// (the same key as the Mac's checkbox).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub mesh_show_offline: bool,
 }
 
 impl Config {
