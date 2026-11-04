@@ -86,7 +86,8 @@ tiers independently, so every pairing can be tested on one machine.
   clippy --all-targets -- -D warnings`, `cargo test --workspace`); run it
   before every push, and `scripts/check.sh --fix` to apply the rustfmt and
   clippy fixes first. Clippy lints gated on the MSRV (`rust-version` in
-  `Cargo.toml`) switch on across the whole workspace when it is raised.
+  `Cargo.toml`) switch on across the whole workspace when it is raised. It
+  also runs `scripts/linux-root-check.sh` (see Packaging), on any OS.
 - **Unit tests** cover the pure logic: AVC444 split/recombine losslessness,
   single-stream subsample/upsample, BGRA↔YUV444 colour round-trip, the H.264
   header parser against an x264 stream, framing with payloads and partial
@@ -133,7 +134,22 @@ tiers independently, so every pairing can be tested on one machine.
 
 `pkgbuild/` holds the launcher entry, the icon, and a `PKGBUILD` that builds
 the checkout with `bin/build`; `bin/install` builds and installs that
-package. The package in the [Omarchy Package
+package.
+
+**Root steps on Arch go through `gliff_root` only** (`bin/lib/linux-install.sh`):
+it picks `GLIFF_AUTH`, else makepkg.conf's `PACMAN_AUTH` (the user's, then
+`/etc`), else sudo, doas, or `su -c`. A script never calls sudo, doas or su
+itself, never runs `pacman -S/-U/-R` without `gliff_root`, and never asks
+makepkg to install (`-s`, `-i`, `-r` or the long forms): makepkg picks its
+own root tool, and with doas and no `PACMAN_AUTH` it stops at "doas:
+Authentication required" (it happened twice). `bin/package-linux` installs
+missing build dependencies with `gliff_root pacman -S --needed --asdeps`,
+then runs `makepkg -f`. `scripts/linux-root-check.sh` (in `check.sh` and the
+fork's Arch CI job) enforces the rules over `bin/` and the Makefile, checks
+the tool order, and runs `bin/package-linux` with stand-ins to see that the
+root step uses the chosen tool.
+
+The package in the [Omarchy Package
 Repository](https://github.com/omacom/omarchy-pkgs) has its own recipe,
 `pkgbuilds/gliff`, which builds a release tag and installs the launcher
 entry and the icon from `pkgbuild/`.
