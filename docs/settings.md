@@ -43,7 +43,7 @@ Linux:
 - **Settings window** (`settings_ui.rs`): header gear or Ctrl+,. Machines
   first, then Defaults. Groups: Display, Clipboard, Video, Sound (mute the
   machine's speakers, `mute_host_speakers`), Reconnect (`auto_reconnect`),
-  Connection, and Command line (the client and ssh server command lines the
+  Connection (the server command, and the SSH user, `ssh_user`), and Command line (the client and ssh server command lines the
   options come to, selectable with Copy; `gliff_settings::command` and
   `gliff_transport::ssh_command_line`). Every change is saved at once; a row shows
   "Default"/"Built-in" while it follows the layer below and a reset button
@@ -56,10 +56,13 @@ macOS (`crates/gliff-macos/src/settings.rs`, UI in `native/Gliff.swift`):
 - **Settings window** (`SettingsWindow`): Settings… (⌘,) in the picker or the
   viewer, or the picker's Settings… button. All Machines (the defaults) and
   each machine, with a search box, the same "Default"/"Built-in" origin and
-  a Reset button per row. It offers the screen, the clipboard, Reconnect
-  (`auto_reconnect`), Host speakers (`mute_host_speakers`), the server
-  command, and the Command line (client and ssh server lines, with Copy); the decode pipeline is Linux-only (the Mac viewer decodes on the
-  CPU) and is kept in the file but not shown.
+  a Reset button per row, + and − under the list (add a machine by its
+  SSH address; forget one, as the picker's −), and Connect (opens the
+  machine, or shows its tab when it is open already). It offers the
+  screen, the clipboard, the decode pipeline (`decode`), Reconnect
+  (`auto_reconnect`), Host speakers (`mute_host_speakers`), the SSH user
+  (`ssh_user`), the server command, and the Command line (client and ssh
+  server lines, with Copy).
 - **Machine menu** in the viewer: Mirror Screen / Private Screen, Share
   Clipboard, Reconnect, Reconnect Automatically — the Mac's equivalent of
   the tab menu.
@@ -70,6 +73,15 @@ macOS (`crates/gliff-macos/src/settings.rs`, UI in `native/Gliff.swift`):
   chosen there is saved as that machine's override on Connect; a choice
   saved by older versions in `UserDefaults` (`screen.<host>:<port>`) moves
   to the config the next time you connect to that machine.
+
+`ssh_user` (default unset) is the login for an address written without
+`user@` (a mesh machine, a bare host name): the client connects as
+`ssh_user@host` (`Resolved::ssh_address`), and an address that names a user
+keeps it. Unset, ssh decides (`~/.ssh/config`, else the local user name).
+A name ssh could read as an option (a leading `-`, spaces, `@`) is refused
+by the windows and ignored in the file (`valid_ssh_user`). Mesh rows also
+take the user of a known `user@host` machine (`mesh::known_user`). A change
+reconnects the machine.
 
 `auto_reconnect` (default true) is shared: off, neither client reopens the
 machine at launch, and a dropped session waits for the user (on Linux the

@@ -4,8 +4,8 @@
 //!
 //! The Mac offers the screen (mirror or a private Linux screen), sharing
 //! the clipboard, the decode pipeline (automatic, the GPU: VideoToolbox +
-//! Metal, or the CPU: OpenH264), the server command, Reconnect and Host
-//! speakers.
+//! Metal, or the CPU: OpenH264), the server command, the SSH user (for an
+//! address without `user@`), Reconnect and Host speakers.
 //!
 //! The Swift windows (`native/Gliff.swift`) never touch the file. They get
 //! JSON state from here and send edits back:
@@ -27,10 +27,11 @@ use serde_json::{json, Map, Value};
 use tokio::sync::watch;
 
 /// The options this client offers, in window order.
-pub const OFFERED: [Field; 6] = [
+pub const OFFERED: [Field; 7] = [
     Field::Screen,
     Field::Clipboard,
     Field::Decode,
+    Field::SshUser,
     Field::ServerBin,
     Field::AutoReconnect,
     Field::MuteHostSpeakers,
@@ -79,6 +80,19 @@ impl Shared {
         if added {
             self.save_and_announce();
         }
+    }
+
+    /// Add a machine by its SSH address without connecting (the + in the
+    /// connection window and in Settings). Refuses what ssh could misread.
+    pub fn add_machine(&self, host: &str) -> Result<()> {
+        let candidate = crate::discovery::Selection {
+            host: host.trim().into(),
+            port: 22,
+            screen: crate::discovery::ScreenMode::Mirror,
+        };
+        candidate.validate()?;
+        self.remember(&machine_key(host));
+        Ok(())
     }
 
     /// Forget a machine (the picker's −): its place in the list, its
@@ -234,6 +248,8 @@ pub fn cli_layer(
             .then(|| server_bin.trim().to_string()),
         auto_reconnect: None,
         mute_host_speakers: mute_host_speakers.then_some(true),
+        //= `user@host` on the command line names it; there is no flag.
+        ssh_user: None,
     }
 }
 
@@ -255,7 +271,7 @@ pub fn server_args(opts: &Resolved, output: Option<&str>) -> Vec<String> {
 /// show and copy: the client (`gliff …`, with its logs) and the ssh command
 /// that starts its server (to debug the connection by hand).
 pub fn command_lines(name: &str, opts: &Resolved) -> Value {
-    let mut target = gliff_transport::SshTarget::new(name.to_string());
+    let mut target = gliff_transport::SshTarget::new(opts.ssh_address(name));
     target.server_bin = opts.server_bin.clone();
     target.server_args = server_args(opts, None);
     json!({
@@ -325,6 +341,9 @@ fn layer_json(s: &Settings) -> Value {
     if let Some(mute) = s.mute_host_speakers {
         m.insert("mute_host_speakers".into(), mute.into());
     }
+    if let Some(user) = &s.ssh_user {
+        m.insert("ssh_user".into(), user.clone().into());
+    }
     Value::Object(m)
 }
 
@@ -349,6 +368,8 @@ pub fn state_json(store: &Store) -> Value {
             "server_bin": builtin.server_bin,
             "auto_reconnect": builtin.auto_reconnect,
             "mute_host_speakers": builtin.mute_host_speakers,
+            //= None: ssh decides (~/.ssh/config, else this Mac's user name).
+            "ssh_user": builtin.ssh_user,
         },
         "defaults": layer_json(&store.defaults()),
         //= All Machines: what a new machine would run, for a placeholder address.
@@ -422,6 +443,16 @@ fn set_field(s: &mut Settings, field: Field, value: Option<&Value>) -> Result<()
                     .as_bool()
                     .context("mute_host_speakers must be true or false")?,
             );
+        }
+        Field::SshUser => {
+            let v = value.as_str().context("SSH user must be a string")?.trim();
+            //= Blank clears it, like the server command.
+            ensure!(
+                v.is_empty() || gliff_settings::valid_ssh_user(v),
+                "an SSH user is 1 to 64 letters, digits, _ . or - (not starting with . or -)"
+            );
+            s.ssh_user = Some(v.to_string());
+            s.tidy();
         }
         Field::Decode => {
             let v = value.as_str().context("decode must be a string")?;
@@ -507,6 +538,7 @@ pub fn change(old: &Resolved, new: &Resolved, screen_locked: bool) -> Change {
         || old.server_bin != new.server_bin
         || old.decode != new.decode
         || old.mute_host_speakers != new.mute_host_speakers
+        || old.ssh_user != new.ssh_user
     {
         Change::Reconnect
     } else if old.clipboard != new.clipboard {
@@ -553,6 +585,20 @@ async fn run_window(shared: &Shared) -> Result<()> {
                                 tracing::warn!(error = %e, "settings edit refused");
                                 let msg = json!({"type": "settings_error", "message": format!("{e:#}")});
                                 panel.send(&msg).await?;
+                            }
+                        }
+                        //= + and − under the machine list.
+                        Some("machine_add") => {
+                            let host = ev["host"].as_str().unwrap_or_default();
+                            if let Err(e) = shared.add_machine(host) {
+                                tracing::warn!(%host, error = %e, "not adding the machine");
+                                let msg = json!({"type": "settings_error", "message": format!("{e:#}")});
+                                panel.send(&msg).await?;
+                            }
+                        }
+                        Some("machine_remove") => {
+                            if let Some(host) = ev["host"].as_str() {
+                                shared.forget(&machine_key(host));
                             }
                         }
                         Some("settings_close") => break,
@@ -737,6 +783,17 @@ mod tests {
     }
 
     #[test]
+    fn settings_can_add_a_machine_but_not_a_bad_address() {
+        let sh = Shared::new(Store::in_memory());
+        sh.add_machine(" el@studio.ts.net ").unwrap();
+        assert_eq!(sh.state()["machines"][0]["name"], "el@studio.ts.net");
+        for bad in ["", "-oProxyCommand=x", "a b"] {
+            assert!(sh.add_machine(bad).is_err(), "{bad}");
+        }
+        assert_eq!(sh.state()["machines"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
     fn forgetting_a_machine_drops_its_settings() {
         let sh = Shared::new(Store::in_memory());
         apply_machine_setting(&sh, "m@h", &json!({"field": "clipboard", "value": false})).unwrap();
@@ -785,6 +842,36 @@ mod tests {
                 .resolve("m@h", &Settings::default())
                 .mute_host_speakers
         );
+    }
+
+    #[test]
+    fn the_ssh_user_completes_a_bare_address_and_reconnects() {
+        let shared = shared();
+        assert!(shared.state()["builtin"]["ssh_user"].is_null());
+        let edit = json!({"scope": "machine", "machine": "studio.ts.net", "field": "ssh_user", "value": "el"});
+        apply_edit(&shared, &edit).unwrap();
+        let r = shared.resolve("studio.ts.net", &Settings::default());
+        assert_eq!(r.ssh_address("studio.ts.net"), "el@studio.ts.net");
+        let state = shared.state();
+        let m = &state["machines"][0];
+        assert_eq!(m["settings"]["ssh_user"], "el");
+        assert!(m["commands"]["client"]
+            .as_str()
+            .unwrap()
+            .ends_with(" el@studio.ts.net"));
+        assert!(m["commands"]["server"]
+            .as_str()
+            .unwrap()
+            .contains(" -- el@studio.ts.net "));
+        let before = shared.resolve("other", &Settings::default());
+        assert_eq!(change(&before, &r, false), Change::Reconnect);
+        for bad in ["-oProxyCommand=x", "a b", "me@x"] {
+            let edit = json!({"scope": "defaults", "field": "ssh_user", "value": bad});
+            assert!(apply_edit(&shared, &edit).is_err(), "{bad}");
+        }
+        let blank = json!({"scope": "machine", "machine": "studio.ts.net", "field": "ssh_user", "value": " "});
+        apply_edit(&shared, &blank).unwrap();
+        assert!(shared.machine("studio.ts.net").ssh_user.is_none());
     }
 
     #[test]

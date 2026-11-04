@@ -1,5 +1,5 @@
 <!doctype html>
-<!-- machine-menu.html v1.1.0 — a close macOS approximation of Gliff's
+<!-- machine-menu.html v1.2.0 — a close macOS approximation of Gliff's
      Machine menu (crates/gliff-macos/native/Gliff.swift, App menu setup),
      rendered to PNG by render.py at @2x. Items and order match the code. -->
 <html><head><meta charset="utf-8">
@@ -34,7 +34,7 @@
   .win .screen { position: absolute; top: 28px; left: 0; right: 0; bottom: 0;
     background: linear-gradient(180deg, #2b2f6b 0%, #c98a3e 55%, #3f4c86 100%); }
   .menu {
-    position: absolute; left: 117px; top: 27px; width: 214px; padding: 5px;
+    position: absolute; left: 117px; top: 27px; width: 250px; padding: 5px;
     background: rgba(242,242,244,0.86); backdrop-filter: blur(40px) saturate(1.6);
     border-radius: 9px;
     box-shadow: 0 0 0 0.5px rgba(0,0,0,0.22), 0 10px 32px rgba(0,0,0,0.32), inset 0 0 0 0.5px rgba(255,255,255,0.6);
@@ -67,6 +67,8 @@
     <div class="sep"></div>
     <div class="item" id="rc1">Reconnect</div>
     <div class="item" id="rc2"><span class="check">✓</span>Reconnect Automatically</div>
+    <div class="sep"></div>
+    <div class="item" id="info">Show Connection Info<span style="margin-left:auto;padding-right:8px;color:#6e6e73">⌥⌘I</span></div>
   </div>
 
   <script>
@@ -81,5 +83,6 @@
     }
     box(['sound'], 1);
     box(['rc1', 'rc2'], 1);
+    box(['info'], 1);
   </script>
 </body></html>

@@ -71,6 +71,22 @@ pub struct Settings {
     /// Default off: the speakers keep playing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mute_host_speakers: Option<bool>,
+    /// The SSH login for an address without `user@` (a mesh peer, a bare
+    /// host name): the client connects as `ssh_user@host`. Unset, ssh
+    /// decides (`~/.ssh/config`, else the local user name). An address that
+    /// names a user keeps it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssh_user: Option<String>,
+}
+
+/// Whether `user` is a login name Gliff passes to ssh: 1 to 64 of
+/// `A-Z a-z 0-9 _ . -`, not starting with `.` or `-` (no option or `@`
+/// can sneak into the address).
+pub fn valid_ssh_user(user: &str) -> bool {
+    let mut chars = user.chars();
+    matches!(chars.next(), Some(c) if c.is_ascii_alphanumeric() || c == '_')
+        && user.len() <= 64
+        && chars.all(|c| c.is_ascii_alphanumeric() || "_.-".contains(c))
 }
 
 /// An option, to ask where its value comes from or to clear it.
@@ -82,16 +98,18 @@ pub enum Field {
     ServerBin,
     AutoReconnect,
     MuteHostSpeakers,
+    SshUser,
 }
 
 impl Field {
-    pub const ALL: [Field; 6] = [
+    pub const ALL: [Field; 7] = [
         Field::Screen,
         Field::Clipboard,
         Field::Decode,
         Field::ServerBin,
         Field::AutoReconnect,
         Field::MuteHostSpeakers,
+        Field::SshUser,
     ];
 }
 
@@ -104,6 +122,7 @@ impl Settings {
             Field::ServerBin => self.server_bin.is_some(),
             Field::AutoReconnect => self.auto_reconnect.is_some(),
             Field::MuteHostSpeakers => self.mute_host_speakers.is_some(),
+            Field::SshUser => self.ssh_user.is_some(),
         }
     }
 
@@ -115,6 +134,7 @@ impl Settings {
             Field::ServerBin => self.server_bin = None,
             Field::AutoReconnect => self.auto_reconnect = None,
             Field::MuteHostSpeakers => self.mute_host_speakers = None,
+            Field::SshUser => self.ssh_user = None,
         }
     }
 
@@ -124,8 +144,15 @@ impl Settings {
     }
 
     /// Normalise what a hand edit or a text box can leave: a blank server
-    /// command is no command.
+    /// command is no command; a blank SSH user is none (surrounding spaces
+    /// trimmed).
     pub fn tidy(&mut self) {
+        if let Some(user) = &mut self.ssh_user {
+            *user = user.trim().to_string();
+            if user.is_empty() {
+                self.ssh_user = None;
+            }
+        }
         if self
             .server_bin
             .as_deref()
@@ -144,6 +171,7 @@ impl Settings {
             server_bin: self.server_bin.clone().or_else(|| below.server_bin.clone()),
             auto_reconnect: self.auto_reconnect.or(below.auto_reconnect),
             mute_host_speakers: self.mute_host_speakers.or(below.mute_host_speakers),
+            ssh_user: self.ssh_user.clone().or_else(|| below.ssh_user.clone()),
         }
     }
 
@@ -160,6 +188,13 @@ impl Settings {
                 .unwrap_or_else(|| DEFAULT_SERVER_BIN.to_string()),
             auto_reconnect: self.auto_reconnect.unwrap_or(true),
             mute_host_speakers: self.mute_host_speakers.unwrap_or(false),
+            //= A hand-edited name ssh could misread is ignored, not passed on.
+            ssh_user: self
+                .ssh_user
+                .as_deref()
+                .map(str::trim)
+                .filter(|u| valid_ssh_user(u))
+                .map(str::to_string),
         }
     }
 }
@@ -173,9 +208,20 @@ pub struct Resolved {
     pub server_bin: String,
     pub auto_reconnect: bool,
     pub mute_host_speakers: bool,
+    /// The login for an address without `user@`; none leaves it to ssh.
+    pub ssh_user: Option<String>,
 }
 
 impl Resolved {
+    /// The address ssh connects to: `host` as given when it names a user
+    /// (or no SSH user is set), else `ssh_user@host`.
+    pub fn ssh_address(&self, host: &str) -> String {
+        match &self.ssh_user {
+            Some(user) if !host.contains('@') && !host.is_empty() => format!("{user}@{host}"),
+            _ => host.to_string(),
+        }
+    }
+
     /// Server arguments these options add (the screen is handled by each
     /// client, as `--output` can override it).
     pub fn server_flags(&self) -> Vec<String> {
@@ -190,6 +236,69 @@ impl Resolved {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_ssh_user_fills_in_only_a_bare_address() {
+        let mut s = Settings {
+            ssh_user: Some(" el ".into()),
+            ..Settings::default()
+        };
+        s.tidy();
+        assert_eq!(s.ssh_user.as_deref(), Some("el"));
+        let r = s.resolve();
+        assert_eq!(
+            r.ssh_address("studio.tail1234.ts.net"),
+            "el@studio.tail1234.ts.net"
+        );
+        assert_eq!(
+            r.ssh_address("me@box"),
+            "me@box",
+            "an address that names a user keeps it"
+        );
+        assert_eq!(Settings::default().resolve().ssh_address("box"), "box");
+        let below = Settings {
+            ssh_user: Some("defaults".into()),
+            ..Settings::default()
+        };
+        assert_eq!(s.over(&below).ssh_user.as_deref(), Some("el"));
+        assert_eq!(
+            Settings::default()
+                .over(&below)
+                .resolve()
+                .ssh_user
+                .as_deref(),
+            Some("defaults")
+        );
+        let mut blank = Settings {
+            ssh_user: Some("  ".into()),
+            ..Settings::default()
+        };
+        blank.tidy();
+        assert!(blank.ssh_user.is_none());
+    }
+
+    #[test]
+    fn ssh_users_that_could_become_options_are_refused() {
+        for good in ["el", "_svc", "a.b-c", "x1"] {
+            assert!(valid_ssh_user(good), "{good}");
+        }
+        for bad in [
+            "",
+            "-oProxyCommand=x",
+            ".hidden",
+            "a b",
+            "me@x",
+            "a;b",
+            &"a".repeat(65),
+        ] {
+            assert!(!valid_ssh_user(bad), "{bad}");
+            let s = Settings {
+                ssh_user: Some(bad.to_string()),
+                ..Settings::default()
+            };
+            assert!(s.resolve().ssh_user.is_none(), "{bad}");
+        }
+    }
 
     #[test]
     fn nothing_set_resolves_to_the_built_in_values() {

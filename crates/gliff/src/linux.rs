@@ -302,7 +302,8 @@ fn endpoints_from_cli(cli: &Cli, config: &Config) -> Vec<Endpoint> {
 
 fn ssh_endpoint(cli: &Cli, config: &Config, host: &str) -> Endpoint {
     let opts = resolved_for(cli, config, host);
-    let mut t = SshTarget::new(host.to_string());
+    //= The SSH user setting completes an address without `user@`.
+    let mut t = SshTarget::new(opts.ssh_address(host));
     t.server_bin = opts.server_bin.clone();
     t.server_args = server_args(cli, &opts);
     Endpoint::Ssh(t)
@@ -808,11 +809,16 @@ fn install_mesh_menu(ui: &Rc<App>, button: &gtk::MenuButton) {
                     .use_markup(false)
                     .activatable(true)
                     .build();
-                let (ui, popover, address) = (ui.clone(), popover.clone(), peer.address.clone());
+                //= The user of a known `user@` machine, else the SSH user
+                //= setting or ssh's config applies, as for a typed name.
+                let address = match gliff_transport::mesh::known_user(&peer.address, &known) {
+                    Some(user) => format!("{user}@{}", peer.address),
+                    None => peer.address.clone(),
+                };
+                let (ui, popover) = (ui.clone(), popover.clone());
                 row.connect_activated(move |_| {
                     popover.popdown();
                     if let Some(ui) = ui.upgrade() {
-                        //= user@ comes from ssh's config, as for a typed name.
                         ui.entry.set_text(&address);
                         connect_from_address_bar(&ui);
                     }
@@ -1372,7 +1378,7 @@ fn open_settings_for(ui: &Rc<App>, machine: Option<String>) {
         commands: {
             let output = ui.cli.output.clone();
             Rc::new(move |machine: &str, opts: &Resolved| {
-                let mut target = SshTarget::new(machine.to_string());
+                let mut target = SshTarget::new(opts.ssh_address(machine));
                 target.server_bin = opts.server_bin.clone();
                 target.server_args = server_args_for(output.as_deref(), opts);
                 settings_ui::Commands {

@@ -84,6 +84,7 @@ opening another.
 | Decode | Automatic (the GPU: VideoToolbox + Metal when this Mac has it, else the CPU), GPU, or CPU (OpenH264) (`decode`; the client's `--video`) | reconnects the machine |
 | Reconnect | Reopen the machine at launch if it was open at quit, and retry a dropped session (`auto_reconnect`, default on) | at the next launch or failure |
 | Host speakers | Mute the Linux host's own speakers while the Mac plays its sound (`mute_host_speakers`, default off; the server's `--mute-local-audio`, PipeWire hosts) | reconnects the machine |
+| SSH user | The login for an address without `user@`, such as a mesh machine (`ssh_user`); blank leaves it to ssh (`~/.ssh/config`, else your user name) | reconnects the machine |
 | Server command | The command started over SSH, e.g. `gliff-server --low-bandwidth` | reconnects the machine |
 | General ▸ Quit Gliff when its last window closes | For the app, not a machine (`quit_on_last_window`, default off). Off: closing the last tab leaves Gliff running with no windows; File ▸ New Tab (⌘T) or clicking the Dock icon opens the connection window. On: closing the last tab quits, and that machine reopens at the next launch | at once |
 
@@ -98,7 +99,12 @@ read its errors on stderr and press Ctrl+C). All Machines shows them for
 `--mute-host-speakers`, the last new in this fork).
 
 **Connect** (or double-clicking a machine in the list) opens that machine in
-a new tab, with its saved settings. With the connection window open (at
+a new tab, with its saved settings; when it is open already, Gliff shows its
+tab instead of opening a second one. **+** under the list adds a machine by
+its SSH address (to set it up before connecting); **−** forgets the selected
+one, with its settings, after asking. A mesh machine listed without a user
+in the connection window takes the user of a machine you added or connected
+to as `user@host`; otherwise the SSH user setting applies. With the connection window open (at
 launch, or File ▸ New Tab), Connect in Settings answers it: the connection
 window closes and the machine opens.
 

@@ -176,14 +176,16 @@ pub fn client_main() -> Result<()> {
             .first()
             .map_or_else(|| "Gliff".to_string(), |s| tab_title(&cli, s));
         let mut hub = Hub::open(&title, idle).await?;
-        let mut visits = Vec::new();
+        //= Every tab: its machine, its window id and its session task (done
+        //= once the tab closes), so Settings ▸ Connect can switch to it.
+        let mut visits: Vec<OpenTab> = Vec::new();
         for (i, selected) in initial.into_iter().enumerate() {
-            let viewer = if i == 0 {
-                hub.window(0)
+            let (id, viewer) = if i == 0 {
+                (0, hub.window(0))
             } else {
                 hub.new_window(&tab_title(&cli, &selected)).await?
             };
-            visits.push(spawn_visit(viewer, selected, &cli, &shared, &cli_layer));
+            visits.push(OpenTab::spawn(id, viewer, selected, &cli, &shared, &cli_layer));
         }
         //= App-wide options (Settings ▸ General), once a tab is open: before
         //= that, closing the launch connection window must not quit early.
@@ -252,6 +254,13 @@ pub fn client_main() -> Result<()> {
                             if let Some(p) = picker.take() {
                                 p.abort();
                             }
+                            //= Already open in a tab: show that tab, not a second one.
+                            let machine = crate::settings::machine_key(&selected.host);
+                            if let Some(tab) = visits.iter().find(|t| t.machine == machine && !t.task.is_finished()) {
+                                tracing::info!(%machine, window = tab.id, "already open; showing its tab");
+                                hub.focus(tab.id).await;
+                                continue;
+                            }
                             selected
                         }
                         Some("bye") => break,
@@ -276,8 +285,10 @@ pub fn client_main() -> Result<()> {
                     }
                 }
             };
-            let viewer = hub.new_window(&tab_title(&cli, &chosen)).await?;
-            visits.push(spawn_visit(viewer, chosen, &cli, &shared, &cli_layer));
+            let (id, viewer) = hub.new_window(&tab_title(&cli, &chosen)).await?;
+            visits.push(OpenTab::spawn(id, viewer, chosen, &cli, &shared, &cli_layer));
+            //= Closed tabs need no entry.
+            visits.retain(|t| !t.task.is_finished());
             if !following {
                 hub.follow_app_settings(shared.clone());
                 following = true;
@@ -287,7 +298,7 @@ pub fn client_main() -> Result<()> {
             p.abort();
         }
         for visit in visits {
-            let _ = visit.await;
+            let _ = visit.task.await;
         }
         Ok(())
     })
@@ -331,6 +342,33 @@ fn tab_title(cli: &Cli, selected: &crate::discovery::Selection) -> String {
     match &cli.connect {
         Some(addr) if selected.host.is_empty() => format!("Gliff — {addr}"),
         _ => format!("Gliff — {}", selected.host),
+    }
+}
+
+/// One tab: the machine it shows (its settings key), its window id and its
+/// session task.
+#[cfg(target_os = "macos")]
+struct OpenTab {
+    machine: String,
+    id: u32,
+    task: tokio::task::JoinHandle<()>,
+}
+
+#[cfg(target_os = "macos")]
+impl OpenTab {
+    fn spawn(
+        id: u32,
+        viewer: Viewer,
+        selected: crate::discovery::Selection,
+        cli: &Rc<Cli>,
+        shared: &crate::settings::SharedRef,
+        cli_layer: &gliff_settings::Settings,
+    ) -> Self {
+        Self {
+            machine: crate::settings::machine_key(&selected.host),
+            id,
+            task: spawn_visit(viewer, selected, cli, shared, cli_layer),
+        }
     }
 }
 
@@ -420,6 +458,8 @@ async fn visit(
             }
         } else {
             let mut target = cli.ssh_target(&selected);
+            //= SSH user: `user@` for an address without one (a mesh peer).
+            target.host = opts.ssh_address(&target.host);
             target.server_bin = opts.server_bin.clone();
             if cli.check_frames.is_none() {
                 target.askpass = Some(native::helper_path()?);
@@ -750,14 +790,21 @@ impl Hub {
     }
 
     /// Open another window; macOS adds it as a tab of the front window.
-    async fn new_window(&mut self, title: &str) -> Result<Viewer> {
+    async fn new_window(&mut self, title: &str) -> Result<(u32, Viewer)> {
         let id = self.next.get();
         self.next.set(id + 1);
         let viewer = self.window(id);
         viewer
             .command(json!({ "type": "open_window", "title": title }))
             .await?;
-        Ok(viewer)
+        Ok((id, viewer))
+    }
+
+    /// Bring window `id` (a tab) to the front and select it.
+    async fn focus(&self, id: u32) {
+        if let Ok(bytes) = serde_json::to_vec(&json!({"type": "focus"})) {
+            let _ = self.out.send((id, native::EVENT, bytes)).await;
+        }
     }
 
     /// Keep the viewer's app-wide options (`app_settings`, e.g. quitting

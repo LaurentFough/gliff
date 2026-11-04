@@ -216,10 +216,8 @@ pub async fn choose(
                         //= The sidebar's + and −; the change notice below refreshes it.
                         Some("machine_add") => {
                             let host = event["host"].as_str().unwrap_or_default();
-                            let candidate = Selection { host: host.trim().into(), port: 22, screen: ScreenMode::Mirror };
-                            match candidate.validate() {
-                                Ok(()) => shared.remember(&crate::settings::machine_key(host)),
-                                Err(e) => tracing::warn!(%host, error = %e, "not adding the machine"),
+                            if let Err(e) = shared.add_machine(host) {
+                                tracing::warn!(%host, error = %e, "not adding the machine");
                             }
                         }
                         //= The list's "Show offline machines" checkbox; the

@@ -1,0 +1,25 @@
+<!doctype html>
+<!-- address-autocomplete.html v1.0.0 — the connection window's SSH Address
+     completing from a known machine, as ComputerPicker.autocompleteAddress
+     does: typed "user@stu", the rest of the newest match filled in and
+     selected (type on to replace it, Tab or Return to keep it).
+     Render: render.py address-autocomplete.html ../macos-address-autocomplete.png 640 150 -->
+<html><head><meta charset="utf-8"><link rel="stylesheet" href="window.css">
+<style>
+  .content { position: absolute; left: 20px; right: 20px; top: 20px; display: flex; flex-direction: column; gap: 14px; }
+  .line { display: flex; align-items: center; gap: 10px; }
+  .typed { white-space: pre; }
+  .rest { background: #b3d7ff; white-space: pre; }
+  .caret { display: inline-block; width: 1px; height: 15px; background: #000; margin-left: -1px; }
+</style></head>
+<body><div class="win">
+  <div class="content">
+    <div class="line"><span style="width:84px">SSH Address:</span>
+      <span class="field" style="flex:1" data-hl="address"><span class="typed">user@stu</span><span class="rest">dio.tail1234.ts.net</span></span>
+      <span>Port:</span><span class="field" style="width:64px">22</span></div>
+    <div class="line secondary" style="font-size:12px;padding-left:94px">Completed from your machines; type on to replace it, Tab or Return to keep it.</div>
+    <div class="line"><span class="btn">Settings…</span><span style="flex:1"></span><span class="btn">Cancel</span><span class="btn default">Connect</span></div>
+  </div>
+</div>
+<script src="outline.js"></script>
+</body></html>

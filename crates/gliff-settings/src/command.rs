@@ -7,7 +7,7 @@
 //! sit above the flags when it has them, so the line never changes what a
 //! configured machine does.
 //!
-//! Version: 1.0.0
+//! Version: 1.1.0
 
 use crate::{Resolved, Screen, DEFAULT_SERVER_BIN};
 
@@ -46,14 +46,15 @@ pub fn client_flags(r: &Resolved) -> Vec<String> {
 }
 
 /// `RUST_LOG=info PROGRAM [--port N] FLAGS… HOST`, quoted for a shell.
-/// `RUST_LOG` makes the client log the connection to the terminal.
+/// `RUST_LOG` makes the client log the connection to the terminal. HOST
+/// carries the SSH user when the machine sets one (`ssh_user@host`).
 pub fn client_line(program: &str, host: &str, port: Option<u16>, r: &Resolved) -> String {
     let mut words = vec!["RUST_LOG=info".to_string(), shell_word(program)];
     if let Some(port) = port.filter(|p| *p != 22) {
         words.extend(["--port".to_string(), port.to_string()]);
     }
     words.extend(client_flags(r).iter().map(|w| shell_word(w)));
-    words.push(shell_word(host));
+    words.push(shell_word(&r.ssh_address(host)));
     words.join(" ")
 }
 
@@ -81,6 +82,7 @@ mod tests {
             server_bin: Some("env X=1 gliff-server".into()),
             auto_reconnect: Some(false),
             mute_host_speakers: Some(true),
+            ssh_user: Some("el".into()),
         }
         .resolve();
         assert_eq!(
@@ -88,6 +90,8 @@ mod tests {
             "RUST_LOG=info gliff --port 2222 --headless --no-clipboard --video cpu \
              --server-bin 'env X=1 gliff-server' --mute-host-speakers me@box"
         );
+        //= A bare address gets the SSH user.
+        assert!(client_line("gliff", "box", None, &r).ends_with(" el@box"));
     }
 
     #[test]

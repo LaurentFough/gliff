@@ -28,6 +28,7 @@ impl Field {
             Field::ServerBin => "server_bin",
             Field::AutoReconnect => "auto_reconnect",
             Field::MuteHostSpeakers => "mute_host_speakers",
+            Field::SshUser => "ssh_user",
         }
     }
 
@@ -55,6 +56,7 @@ mod tests {
             server_bin: Some("x".into()),
             auto_reconnect: Some(false),
             mute_host_speakers: Some(true),
+            ssh_user: Some("el".into()),
         };
         let text = toml::to_string(&s).unwrap();
         for field in Field::ALL {

@@ -1646,6 +1646,14 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if cmd["type"] as? String == "video_scale", let milli = cmd["scale_milli"] as? Int, milli > 0 { view.scale = Double(milli) / 1000 }
         if cmd["type"] as? String == "machine_state" { tab.state = cmd; if tab.id == keyTab?.id { showMachineState(cmd) } }
         if cmd["type"] as? String == "report_size" { resizeEvent(tab) }
+        // Settings ▸ Connect for a machine already open: show its tab.
+        if cmd["type"] as? String == "focus", let w = tab.window {
+            if w.isMiniaturized { w.deminiaturize(nil) }
+            w.tabGroup?.selectedWindow = w
+            w.makeKeyAndOrderFront(nil)
+            NSApplication.shared.activate(ignoringOtherApps: true)
+            return
+        }
         if cmd["type"] as? String == "connection_info" {
             // Sampled only while shown: proc_pid_rusage is cheap, but not free.
             guard showInfo else { return }
@@ -2192,6 +2200,13 @@ final class ComputerPicker: NSObject, PanelWindow, NSApplicationDelegate, NSWind
         let known = Set(machines.map { m -> String in
             (m.split(separator: "@", maxSplits: 1).last.map(String.init) ?? m).lowercased()
         })
+        // A peer reports no SSH user: take the newest known "user@host" for
+        // it (machines is newest first), else the SSH user setting applies.
+        var knownUsers: [String: String] = [:]
+        for m in machines {
+            let parts = m.split(separator: "@", maxSplits: 1).map(String.init)
+            if parts.count == 2, !parts[0].isEmpty, knownUsers[parts[1].lowercased()] == nil { knownUsers[parts[1].lowercased()] = parts[0] }
+        }
         meshRows = meshPeers.compactMap { p in
             guard let address = p["address"] as? String, ComputerPicker.validAddress(address) else { return nil }
             let online = p["online"] as? Bool != false
@@ -2201,7 +2216,7 @@ final class ComputerPicker: NSObject, PanelWindow, NSApplicationDelegate, NSWind
             let name = p["name"] as? String ?? address
             let tag = online ? label : "\(label), offline"
             return NearbyComputer(id: "mesh:\(source):\(address)", name: "\(name) (\(tag))",
-                                  host: address, port: 22, user: "", platform: source.lowercased())
+                                  host: address, port: 22, user: knownUsers[address.lowercased()] ?? "", platform: source.lowercased())
         }
         update()
     }
@@ -2471,6 +2486,15 @@ final class SettingsWindow: NSObject, PanelWindow, NSApplicationDelegate, NSWind
     // only; the settings helper at launch leaves that to the connection window).
     let connectButton = NSButton(title: "Connect", target: nil, action: nil)
     let serverBin = NSTextField(string: "")
+    // SSH user: ssh_user, the login for an address without user@ (a mesh
+    // machine); blank leaves it to ssh (~/.ssh/config, else this Mac's user).
+    let sshUser = NSTextField(string: "")
+    let sshUserOrigin = NSTextField(labelWithString: "")
+    let sshUserReset = NSButton(title: "Reset", target: nil, action: nil)
+    // + / − under the machine list (as in the connection window).
+    let removeButton = NSButton()
+    // A machine just added with +: selected once the client's state lists it.
+    var pendingSelection: String?
     let screenOrigin = NSTextField(labelWithString: "")
     let clipboardOrigin = NSTextField(labelWithString: "")
     let serverOrigin = NSTextField(labelWithString: "")
@@ -2553,11 +2577,11 @@ final class SettingsWindow: NSObject, PanelWindow, NSApplicationDelegate, NSWind
     }
     /// The window and its controls; showing it is the caller's.
     func build() {
-        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 780, height: 820), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
+        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 780, height: 880), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
         w.title = "Gliff Settings"; w.delegate = self
         // A window of its own, never a tab of the viewer.
         w.tabbingMode = .disallowed; w.isReleasedWhenClosed = false
-        w.contentMinSize = NSSize(width: 700, height: 760)
+        w.contentMinSize = NSSize(width: 700, height: 820)
         let view = w.contentView!
 
         search.placeholderString = "Search machines"; search.delegate = self
@@ -2573,7 +2597,14 @@ final class SettingsWindow: NSObject, PanelWindow, NSApplicationDelegate, NSWind
         connectButton.setAccessibilityLabel("Connect to the selected machine")
         let scroll = NSScrollView(); scroll.documentView = table; scroll.hasVerticalScroller = true
         scroll.translatesAutoresizingMaskIntoConstraints = false
-        let sidebar = NSStackView(views: [search, scroll])
+        let addButton = NSButton(image: NSImage(systemSymbolName: "plus", accessibilityDescription: "Add Machine") ?? NSImage(), target: self, action: #selector(SettingsWindow.addMachine(_:)))
+        addButton.bezelStyle = .inline; addButton.toolTip = "Add a machine by its SSH address"
+        removeButton.image = NSImage(systemSymbolName: "minus", accessibilityDescription: "Remove Machine")
+        removeButton.imagePosition = .imageOnly; removeButton.title = ""
+        removeButton.target = self; removeButton.action = #selector(SettingsWindow.removeMachine(_:))
+        removeButton.bezelStyle = .inline; removeButton.toolTip = "Forget the selected machine and its settings"
+        let plusMinus = NSStackView(views: [addButton, removeButton]); plusMinus.orientation = .horizontal; plusMinus.spacing = 4
+        let sidebar = NSStackView(views: [search, scroll, plusMinus])
         sidebar.orientation = .vertical; sidebar.spacing = 8; sidebar.alignment = .leading
         sidebar.translatesAutoresizingMaskIntoConstraints = false
 
@@ -2597,6 +2628,11 @@ final class SettingsWindow: NSObject, PanelWindow, NSApplicationDelegate, NSWind
         serverBin.cell?.sendsActionOnEndEditing = true
         serverBin.setAccessibilityLabel("Server command")
         serverBin.widthAnchor.constraint(greaterThanOrEqualToConstant: 240).isActive = true
+        sshUser.target = self; sshUser.action = #selector(sshUserChanged)
+        sshUser.cell?.sendsActionOnEndEditing = true
+        sshUser.setAccessibilityLabel("SSH user")
+        sshUser.widthAnchor.constraint(greaterThanOrEqualToConstant: 240).isActive = true
+        sshUserReset.identifier = NSUserInterfaceItemIdentifier("ssh_user")
         screenReset.identifier = NSUserInterfaceItemIdentifier("screen")
         clipboardReset.identifier = NSUserInterfaceItemIdentifier("clipboard")
         serverReset.identifier = NSUserInterfaceItemIdentifier("server_bin")
@@ -2605,8 +2641,9 @@ final class SettingsWindow: NSObject, PanelWindow, NSApplicationDelegate, NSWind
         let decoding = row("Decode", decode, decodeOrigin, decodeReset, "Automatic uses this Mac's GPU when it can, else the CPU. The CPU uses more power; try it if the picture shows artefacts.")
         let again = row("Reconnect", reconnectBox, reconnectOrigin, reconnectReset, "Reopen the machine at launch if it was open at quit, and retry a dropped session. Off, it waits for Reconnect.")
         let speakers = row("Host speakers", speakersBox, speakersOrigin, speakersReset, "While Gliff plays the machine's sound, its own speakers stay silent; restored when sound stops or the session ends. Linux hosts with PipeWire.")
+        let login = row("SSH user", sshUser, sshUserOrigin, sshUserReset, "The login for an address without user@, such as a mesh machine. Blank leaves it to ssh (~/.ssh/config, else your user name).")
         let server = row("Server command", serverBin, serverOrigin, serverReset, "Starts the server over SSH, e.g. gliff-server --low-bandwidth. Blank uses the inherited command.")
-        let rule = label("A screen, decode, host speakers or server command change reconnects the machine; the clipboard and Reconnect change at once. Changes are saved as you make them.", secondary: true)
+        let rule = label("A screen, decode, host speakers, SSH user or server command change reconnects the machine; the clipboard and Reconnect change at once. Changes are saved as you make them.", secondary: true)
         rule.preferredMaxLayoutWidth = 480; rule.lineBreakMode = .byWordWrapping; rule.maximumNumberOfLines = 3
         pathLabel.font = NSFont.systemFont(ofSize: 11); pathLabel.textColor = .tertiaryLabelColor
         pathLabel.preferredMaxLayoutWidth = 480
@@ -2648,7 +2685,7 @@ final class SettingsWindow: NSObject, PanelWindow, NSApplicationDelegate, NSWind
         let headerRow = NSStackView(views: [heading, NSView(), connectButton])
         headerRow.orientation = .horizontal; headerRow.alignment = .centerY; headerRow.spacing = 8
         heading.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        let form = NSStackView(views: [headerRow, scopeNote, display, clip, decoding, again, speakers, server, rule, commandStack, rule2, generalStack, errorLabel, NSView(), pathLabel])
+        let form = NSStackView(views: [headerRow, scopeNote, display, clip, decoding, again, speakers, login, server, rule, commandStack, rule2, generalStack, errorLabel, NSView(), pathLabel])
         form.orientation = .vertical; form.alignment = .leading; form.spacing = 14
         form.translatesAutoresizingMaskIntoConstraints = false
         rule2.widthAnchor.constraint(equalTo: form.widthAnchor).isActive = true
@@ -2692,6 +2729,12 @@ final class SettingsWindow: NSObject, PanelWindow, NSApplicationDelegate, NSWind
         let query = search.stringValue.trimmingCharacters(in: .whitespaces).lowercased()
         let names = (state["machines"] as? [[String: Any]] ?? []).compactMap { $0["name"] as? String }
         scopes = [""] + names.filter { query.isEmpty || $0.lowercased().contains(query) }
+        // A machine added with +: show it (clearing a search that hides it).
+        if let pending = pendingSelection, names.contains(pending) {
+            pendingSelection = nil
+            if !scopes.contains(pending) { search.stringValue = ""; scopes = [""] + names }
+            selected = pending
+        }
         if !scopes.contains(selected) { selected = "" }
         updating = true
         table.reloadData()
@@ -2728,6 +2771,11 @@ final class SettingsWindow: NSObject, PanelWindow, NSApplicationDelegate, NSWind
             : (state["machines"] as? [[String: Any]] ?? []).first(where: { $0["name"] as? String == selected })?["commands"] as? [String: Any]
         clientLine.stringValue = commands?["client"] as? String ?? ""
         serverLine.stringValue = commands?["server"] as? String ?? ""
+        removeButton.isEnabled = !selected.isEmpty
+        let u = effective("ssh_user")
+        sshUser.placeholderString = inherited("ssh_user").0 as? String ?? "from the address or ~/.ssh/config"
+        if window?.firstResponder !== sshUser.currentEditor() { sshUser.stringValue = u.here ? (u.value as? String ?? "") : "" }
+        sshUserOrigin.stringValue = (u.value == nil || u.value is NSNull) ? "ssh decides" : u.origin; sshUserReset.isHidden = !u.here
         let b = effective("server_bin")
         serverBin.placeholderString = inherited("server_bin").0 as? String ?? "gliff-server"
         // Do not replace text the user is typing.
@@ -2773,6 +2821,49 @@ final class SettingsWindow: NSObject, PanelWindow, NSApplicationDelegate, NSWind
         errorLabel.stringValue = ""
         send(["type": "settings_edit", "scope": "app", "field": "quit_on_last_window", "value": quitBox.state == .on])
     }
+    @objc func sshUserChanged(_ sender: Any?) {
+        guard !updating else { return }
+        let text = sshUser.stringValue.trimmingCharacters(in: .whitespaces)
+        let current = effective("ssh_user")
+        if text.isEmpty && !current.here { return }
+        if current.here, current.value as? String == text { return }
+        edit("ssh_user", text.isEmpty ? NSNull() : text)
+    }
+    /// + : ask for an SSH address and add it as a machine (selected once listed).
+    @objc func addMachine(_ sender: Any?) {
+        guard let window = window else { return }
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 280, height: 24))
+        field.placeholderString = "user@computer.local"
+        let alert = NSAlert()
+        alert.messageText = "Add a Machine"
+        alert.informativeText = "Its SSH address. Settings made for it apply when you connect to that address."
+        alert.accessoryView = field
+        alert.addButton(withTitle: "Add"); alert.addButton(withTitle: "Cancel")
+        alert.window.initialFirstResponder = field
+        alert.beginSheetModal(for: window) { [weak self] response in
+            guard let self = self, response == .alertFirstButtonReturn else { return }
+            let host = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard ComputerPicker.validAddress(host) else {
+                self.errorLabel.stringValue = "\(host.isEmpty ? "An empty address" : host) is not an SSH address such as user@computer.local."
+                return
+            }
+            self.pendingSelection = host
+            self.send(["type": "machine_add", "host": host])
+        }
+    }
+    /// − : forget the selected machine, after asking (its settings go too).
+    @objc func removeMachine(_ sender: Any?) {
+        guard !selected.isEmpty, let window = window else { return }
+        let host = selected
+        let alert = NSAlert()
+        alert.messageText = "Remove \(host)?"
+        alert.informativeText = "It leaves your machines, with its saved settings, and will not reopen at launch."
+        alert.addButton(withTitle: "Remove"); alert.addButton(withTitle: "Cancel")
+        alert.beginSheetModal(for: window) { [weak self] response in
+            guard response == .alertFirstButtonReturn else { return }
+            self?.send(["type": "machine_remove", "host": host])
+        }
+    }
     @objc func serverChanged(_ sender: Any?) {
         guard !updating else { return }
         let text = serverBin.stringValue.trimmingCharacters(in: .whitespaces)
@@ -2807,6 +2898,7 @@ final class SettingsWindow: NSObject, PanelWindow, NSApplicationDelegate, NSWind
         guard !updating, scopes.indices.contains(table.selectedRow) else { return }
         // Commit a half-typed server command to the scope it was typed for.
         if window?.firstResponder === serverBin.currentEditor() { serverChanged(nil); window?.makeFirstResponder(nil) }
+        if window?.firstResponder === sshUser.currentEditor() { sshUserChanged(nil); window?.makeFirstResponder(nil) }
         selected = scopes[table.selectedRow]; errorLabel.stringValue = ""
         refreshForm()
     }

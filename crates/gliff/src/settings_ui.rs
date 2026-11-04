@@ -506,6 +506,15 @@ impl View {
             |r| r.server_bin.clone(),
             |s, v| s.server_bin = Some(v),
         );
+        self.entry(
+            &connection,
+            Field::SshUser,
+            "SSH user",
+            "The login for an address without user@, such as a mesh machine. Empty leaves it to ssh (~/.ssh/config, else your user name)",
+            |r| r.ssh_user.clone().unwrap_or_default(),
+            //= A name ssh could misread is not saved.
+            |s, v| s.ssh_user = crate::settings::valid_ssh_user(&v).then_some(v),
+        );
         page.add(&connection);
 
         //= What these settings come to on the command line, to run or debug

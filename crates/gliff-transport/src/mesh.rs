@@ -456,6 +456,16 @@ pub fn is_known(address: &str, machines: &[String]) -> bool {
     })
 }
 
+/// The user of the newest known machine `user@address` (the config lists
+/// machines oldest first), so a mesh peer, which reports no SSH user, opens
+/// as the machine Gliff already connected to.
+pub fn known_user<'a>(address: &str, machines: &'a [String]) -> Option<&'a str> {
+    machines.iter().rev().find_map(|m| {
+        let (user, host) = m.split_once('@')?;
+        (host.eq_ignore_ascii_case(address) && !user.is_empty()).then_some(user)
+    })
+}
+
 fn sort_and_dedup(peers: &mut Vec<MeshPeer>) {
     peers.sort_by(|a, b| {
         b.online
@@ -471,6 +481,22 @@ fn sort_and_dedup(peers: &mut Vec<MeshPeer>) {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_peer_takes_the_user_of_the_newest_known_machine() {
+        let machines = vec![
+            "old@studio.tail1234.ts.net".to_string(),
+            "box".to_string(),
+            "el@Studio.tail1234.ts.net".to_string(),
+        ];
+        assert_eq!(known_user("studio.tail1234.ts.net", &machines), Some("el"));
+        assert_eq!(
+            known_user("box", &machines),
+            None,
+            "a bare known machine has no user"
+        );
+        assert_eq!(known_user("other", &machines), None);
+    }
 
     #[test]
     fn tailscale_lists_linux_and_mac_peers_by_magicdns_name() {
