@@ -1954,6 +1954,9 @@ final class ComputerPicker: NSObject, PanelWindow, NSApplicationDelegate, NSWind
     // deleting a completion does not bring it back.
     var machines: [String] = []
     var shownMachines: [String] = []
+    // A machine just added with +: selected (and filled in as the SSH
+    // Address) once the client's machine_settings lists it.
+    var pendingMachine: String?
     let machineSearch = NSSearchField()
     let machineTable = NSTableView()
     let removeMachine = NSButton()
@@ -2110,7 +2113,7 @@ final class ComputerPicker: NSObject, PanelWindow, NSApplicationDelegate, NSWind
         sidebar.translatesAutoresizingMaskIntoConstraints = false
         // + adds what is in SSH Address; − forgets the selected machine.
         let addMachine = NSButton(image: NSImage(systemSymbolName: "plus", accessibilityDescription: "Add Machine")!, target: self, action: #selector(addMachine(_:)))
-        addMachine.bezelStyle = .inline; addMachine.toolTip = "Add the SSH address to your machines"
+        addMachine.bezelStyle = .inline; addMachine.toolTip = "Add a machine by its SSH address"
         removeMachine.title = ""; removeMachine.imagePosition = .imageOnly
         removeMachine.image = NSImage(systemSymbolName: "minus", accessibilityDescription: "Remove Machine")
         removeMachine.target = self; removeMachine.action = #selector(removeMachine(_:))
@@ -2252,6 +2255,16 @@ final class ComputerPicker: NSObject, PanelWindow, NSApplicationDelegate, NSWind
         let query = machineSearch.stringValue.trimmingCharacters(in: .whitespaces).lowercased()
         shownMachines = query.isEmpty ? machines : machines.filter { $0.lowercased().contains(query) }
         machineTable.reloadData()
+        if let pending = pendingMachine, machines.contains(pending) {
+            pendingMachine = nil
+            if !shownMachines.contains(pending) { machineSearch.stringValue = ""; shownMachines = machines; machineTable.reloadData() }
+            if let row = shownMachines.firstIndex(of: pending) {
+                // Selecting fills in the SSH Address (tableViewSelectionDidChange).
+                machineTable.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+                machineTable.scrollRowToVisible(row)
+            }
+            status.stringValue = "Added \(pending)."; fitWindow()
+        }
     }
     /// Inline completion while typing forward at the end of the SSH Address:
     /// the newest known machine that starts with what was typed fills in, with
@@ -2389,13 +2402,31 @@ final class ComputerPicker: NSObject, PanelWindow, NSApplicationDelegate, NSWind
         !host.isEmpty && !host.hasPrefix("-") && host.utf8.count <= 320 &&
             host.range(of: "^[A-Za-z0-9_.:@\\[\\]%-]+$", options: .regularExpression) != nil
     }
-    /// + : remember the typed address as a machine without connecting.
+    /// + : the same sheet as Settings' +: ask for an SSH address (filled in
+    /// from the SSH Address field when it holds one) and add it as a machine
+    /// without connecting; once listed it is selected and filled in below.
     @objc func addMachine(_ sender: Any?) {
-        let host = address.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard ComputerPicker.validAddress(host) else {
-            status.stringValue = "Type an SSH address such as user@computer.local, then + to add it."; fitWindow(); return
+        guard let window = window else { return }
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 280, height: 24))
+        field.placeholderString = "user@computer.local"
+        let typed = address.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        if ComputerPicker.validAddress(typed) { field.stringValue = typed }
+        let alert = NSAlert()
+        alert.messageText = "Add a Machine"
+        alert.informativeText = "Its SSH address. It joins your machines without connecting; Settings can set it up first."
+        alert.accessoryView = field
+        alert.addButton(withTitle: "Add"); alert.addButton(withTitle: "Cancel")
+        alert.window.initialFirstResponder = field
+        alert.beginSheetModal(for: window) { [weak self] response in
+            guard let self = self, response == .alertFirstButtonReturn else { return }
+            let host = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard ComputerPicker.validAddress(host) else {
+                self.status.stringValue = "\(host.isEmpty ? "An empty address" : host) is not an SSH address such as user@computer.local."
+                self.fitWindow(); return
+            }
+            self.pendingMachine = host
+            self.send(["type": "machine_add", "host": host])
         }
-        send(["type": "machine_add", "host": host])
     }
     /// − : forget the selected machine, after asking (its settings go too).
     @objc func removeMachine(_ sender: Any?) {

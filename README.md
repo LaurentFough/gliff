@@ -565,7 +565,8 @@ gliff 0.4.1).
 - **Known machines in the connection window.** A sidebar lists every
   machine in `config.toml`'s `machines`, newest first, with a search field;
   choosing one fills the address and its screen, double-click connects, **+**
-  adds the typed address and **−** forgets a machine (its settings and its
+  opens the same Add a Machine sheet as Settings (filled in from the SSH
+  Address field) and **−** forgets a machine (its settings and its
   tab to reopen too, as the Linux client's Forget). The SSH Address field
   completes from the same list as you type. At launch and for File ▸ New Tab.
   See [macOS support](docs/macos.md#known-machines-and-autocomplete).

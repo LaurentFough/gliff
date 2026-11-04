@@ -111,7 +111,7 @@ The working branch is the fork's default branch (2026-10-31). The ten feature br
 - A sidebar in the connection window (at launch and for File ▸ New Tab) lists the config's `machines`, newest first, with a search field; choosing one fills the address and its screen; double-click connects.
 - The SSH Address field completes inline from the same list while typing forward; deleting keeps the typed part.
 - The client sends `machines` with `machine_settings` (test extended); the picker check covers the list, search, choosing and completion.
-- **+** adds the typed address to `machines`; **−** forgets the selected machine (asks first): `Store::forget` removes it from `machines`, `[overrides]` and `[[open_tabs]]`, as the Linux client's Forget.
+- **+** opens an Add a Machine sheet (as Settings' +, filled in from the SSH Address field since 2026-11-04) and adds it to `machines`; **−** forgets the selected machine (asks first): `Store::forget` removes it from `machines`, `[overrides]` and `[[open_tabs]]`, as the Linux client's Forget.
 
 ### Per-machine auto-reconnect (merged 2026-10-30; tested on the Mac)
 
@@ -229,6 +229,9 @@ Support today:
 ## Log
 
 Newest first. Format: `### YYYY-MM-DD — summary (commit)`, then a line or two.
+
+### 2026-11-04 — Connection window +: the Settings sheet
+Reported: the connection window's + silently used the SSH Address field, so it looked broken. It now opens the same Add a Machine sheet as Settings (filled in from the field when it holds an address), then selects the new machine, fills it in below and says "Added …". Testing pending.
 
 ### 2026-11-04 — SSH user, Settings + / −, Connect to an open tab, build ID, screenshots (feature/ssh-user-settings-tabs)
 Shared `ssh_user` (gliff-settings 1.1: `valid_ssh_user`, `Resolved::ssh_address`; command lines show `user@host`); rows in both Settings windows; mesh rows take the user of a known `user@host` (`mesh::known_user`, Swift `knownUsers`). Mac Settings: + / − (`Shared::add_machine`, `machine_add` / `machine_remove`); Connect shows an open tab (`OpenTab`, `Hub::focus`). Build ID lag fixed (build.rs 1.3.0, build-id.sh 1.1.0). Mockups: address autocomplete, Reconnect, File/Window tab commands; Machine menu (Show Connection Info) and Settings (SSH user, + / −) updated. Sound, Decode and Connection Info marked tested. Branched from `feature/mac-host-sound-info` (not merged yet).

@@ -66,7 +66,8 @@ macOS (`crates/gliff-macos/src/settings.rs`, UI in `native/Gliff.swift`):
 - **Machine menu** in the viewer: Mirror Screen / Private Screen, Share
   Clipboard, Reconnect, Reconnect Automatically — the Mac's equivalent of
   the tab menu.
-- **Picker** sidebar: the known machines, with + (add the typed address)
+- **Picker** sidebar: the known machines, with + (the same Add a Machine
+  sheet as Settings, filled in from the SSH Address field)
   and − (forget, as the Linux client's Forget: `machines`, the override and
   `[[open_tabs]]`).
 - **Picker**: its screen menu follows the machine's saved screen. A screen
