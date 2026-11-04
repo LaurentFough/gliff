@@ -415,7 +415,10 @@ final class HardwareEncoder {
     }
 }
 
-final class Capture: NSObject, SCStreamOutput, SCStreamDelegate {
+// @unchecked Sendable: Capture already runs on several queues (capture,
+// audio, main) and starts from an async task; its state is set on the main
+// thread and only read elsewhere (audioOn, a Bool).
+final class Capture: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sendable {
     var stream: SCStream?
     let input = Input()
     var scale: UInt32 = 1000

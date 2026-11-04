@@ -230,6 +230,9 @@ Support today:
 
 Newest first. Format: `### YYYY-MM-DD — summary (commit)`, then a line or two.
 
+### 2026-11-04 — Fix: Swift checks failed in CI (Capture not Sendable)
+The Fork builds run on 2e6590d failed in the Mac checks: `scripts/macos-keyboard-layout-check.py` builds Gliff.swift with `-warnings-as-errors`, and the Mac host sound change captured `self` (Capture) in a `@Sendable` main-queue closure. Capture is now `@unchecked Sendable` (it already runs on several queues). The Arch job passed.
+
 ### 2026-11-04 — Merged feature/mac-host-sound-info and feature/ssh-user-settings-tabs
 Tested: Mac host sound (Mac → Mac), Decode, Connection Info, one menu bar at launch, Connect in Settings with the connection window open, cancel at launch following Quit on last window, SSH user, Settings + / −, Connect to an open tab, the + sheet, build ID. Fast-forwarded into `acrogenesis/macos-client-host`.
 
