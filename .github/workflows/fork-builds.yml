@@ -1,6 +1,6 @@
 #= ==========================================================================
 #= fork-builds.yml — build-once packages for LaurentFough/gliff, on demand
-#= Version: 1.0.0
+#= Version: 1.1.0
 #=
 #= Runs only when started (Actions ▸ Fork builds ▸ Run workflow, or
 #= `make release-ci`, which uses `gh workflow run`). For the chosen branch it:
@@ -83,13 +83,14 @@ jobs:
           # shellcheck disable=SC1091
           . pkgbuild/PKGBUILD
           pacman -S --noconfirm --needed "${depends[@]}" "${makedepends[@]}"
-      - name: "Checks, as upstream CI (fmt, clippy, tests)"
+      - name: "Checks, as upstream CI (fmt, clippy, tests), and the Linux root steps"
         if: inputs.checks
         run: |
           sudo -u builder env HOME=/home/builder sh -c '
             cargo fmt --all --check &&
             cargo clippy --workspace --all-targets --locked -- -D warnings &&
-            cargo test --workspace --locked'
+            cargo test --workspace --locked &&
+            sh scripts/linux-root-check.sh'
       - name: Package
         run: sudo -u builder env HOME=/home/builder bin/package-linux
       - uses: actions/upload-artifact@v4

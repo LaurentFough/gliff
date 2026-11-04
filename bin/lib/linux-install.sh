@@ -3,7 +3,7 @@
 #= bin/release-linux and bin/install-linux-release: the build ID, what is
 #= installed, and what a package file contains.
 #= Source it after setting ROOT; it defines functions and sets nothing else.
-#= Version: 1.1.0
+#= Version: 1.2.0
 
 . "$ROOT/bin/lib/build-id.sh"
 
@@ -49,7 +49,9 @@ gliff_require_arch() {
 gliff_auth_tool() {
     [ "$(id -u)" = 0 ] && return 0
     if [ -n "${GLIFF_AUTH:-}" ]; then printf '%s\n' "$GLIFF_AUTH"; return 0; fi
-    for _conf in "${XDG_CONFIG_HOME:-$HOME/.config}/pacman/makepkg.conf" "$HOME/.makepkg.conf" /etc/makepkg.conf; do
+    #= GLIFF_ETC_MAKEPKG_CONF: the system file (scripts/linux-root-check.sh
+    #= points it elsewhere to test the order).
+    for _conf in "${XDG_CONFIG_HOME:-$HOME/.config}/pacman/makepkg.conf" "$HOME/.makepkg.conf" "${GLIFF_ETC_MAKEPKG_CONF:-/etc/makepkg.conf}"; do
         [ -r "$_conf" ] || continue
         #= PACMAN_AUTH=(doas) or PACMAN_AUTH=(sudo -k): the first word.
         _auth=$(sed -n 's/^[[:space:]]*PACMAN_AUTH=(\([^)]*\)).*/\1/p' "$_conf" | tail -n 1 | tr -d "'\"" | awk '{print $1}')
@@ -62,7 +64,9 @@ gliff_auth_tool() {
 }
 
 #= gliff_root COMMAND…: run it as root with gliff_auth_tool, asking for a
-#= password on the terminal when the tool needs one.
+#= password on the terminal when the tool needs one. The only way a script
+#= here becomes root: never sudo/doas/su directly, never makepkg -s/-i/-r
+#= (makepkg would pick its own tool). scripts/linux-root-check.sh enforces it.
 gliff_root() {
     _tool=$(gliff_auth_tool)
     case "$_tool" in
