@@ -157,7 +157,7 @@ Support today:
 |---|---|
 | Linux → Linux | Yes (#80; tested on the working branch 2026-10-31) |
 | Linux → Mac | Yes (tested 2026-10-29), including `--mute-local-audio` |
-| Mac → any | Yes: Mac → Mac tested 2026-11-04 (ScreenCaptureKit audio → Opus); Mac → Linux to confirm. Host speakers does not mute a Mac host yet |
+| Mac → any | Yes: Mac → Mac and Mac → Linux tested 2026-11-04 (ScreenCaptureKit audio → Opus). Host speakers on a Mac host: built on `feature/mac-host-speakers`, testing pending |
 
 - [x] Linux host → Linux client with sound, on the merged working branch (tested 2026-10-31).
 
@@ -175,7 +175,7 @@ Support today:
 - [x] Host speakers setting (tested and merged 2026-11-01): shared `mute_host_speakers` (default off) adds `--mute-local-audio`; Linux Settings ▸ Sound, Mac Settings ▸ Host speakers; a change reconnects.
 - [x] Sound from a Mac host (tested 2026-11-03, Mac → Mac; Mac → Linux to confirm): built on `feature/mac-host-sound-info` (ScreenCaptureKit `capturesAudio` while a client plays sound, kind 7 PCM packets, `host_audio.rs` Opus); switching and remote play work; more testing: Mac → Linux, a long session.
 - [x] SSH user setting, Settings + / −, mesh rows with a known user, the connection window's + sheet (tested 2026-11-04).
-- [ ] Host speakers on a Mac host (mute the Mac's output while a client listens; ScreenCaptureKit may record after the mute: to check). `--mute-local-audio` is accepted and ignored for now.
+- [ ] Host speakers on a Mac host: built 2026-11-04 on `feature/mac-host-speakers` (Swift `HostSpeakers`: mutes the default output device while a client listens with `mute_local`, restores on sound off, session end or the next session after a kill via `~/Library/Caches/Gliff/host-speakers-muted`; leaves an already-muted Mac alone). Testing pending: does ScreenCaptureKit still record with the output muted (the client must keep hearing it)?
 - [x] A warning when "Private screen" is chosen with a Mac host (tested 2026-11-03): the Mac server refuses `--headless` ("macOS supports mirroring physical displays; --headless requires a Hyprland host") and the client shows it.
 - [x] Tabs on the Mac: merged 2026-10-29 (one viewer process for every connection); several connections in tabs tested 2026-10-30; the rest under Deferred testing.
 - [x] Reconnect for dead sessions on the Mac: merged 2026-10-29; testing tabled, see Deferred testing.
@@ -229,6 +229,9 @@ Support today:
 ## Log
 
 Newest first. Format: `### YYYY-MM-DD — summary (commit)`, then a line or two.
+
+### 2026-11-04 — Host speakers on a Mac host (feature/mac-host-speakers)
+Reported (Linux client, Mac host): sound plays on both ends; the client's speaker button mutes only the client, as designed. Mac → Linux sound is now tested. Built the missing Mac host mute: the `audio` command carries `mute_local` (`--mute-local-audio`); the capture helper mutes the default output (CoreAudio `kAudioDevicePropertyMute`) while sound is on and restores it on off, EOF and exit; a marker restores after a kill. Testing pending.
 
 ### 2026-11-04 — Guard: scripts/linux-root-check.sh (0fe66b1)
 The makepkg/doas fix is tested (user). New check, in `scripts/check.sh` and the Arch job of `fork-builds.yml` (1.1.0): rules over `bin/` and the Makefile (no makepkg -s/-i/-r, no sudo/doas/su, pacman -S/-U/-R only after gliff_root; the rules are self-tested on samples), `gliff_auth_tool` order with stub tools and makepkg.conf files (`GLIFF_ETC_MAKEPKG_CONF`, linux-install.sh 1.2.0), and `bin/package-linux` with stand-ins (a missing dependency goes through GLIFF_AUTH; makepkg only builds). Putting `makepkg -fs` back fails two checks. docs/development.md states the rule.

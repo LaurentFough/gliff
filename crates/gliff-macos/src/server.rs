@@ -41,8 +41,8 @@ pub(crate) struct Cli {
     bitrate: Option<u32>,
     #[arg(long, value_parser = ["cpu", "gpu"])]
     video: Option<String>,
-    /// Accepted for the client's Host speakers setting; a Mac host keeps
-    /// its speakers on (not supported here yet).
+    /// Host speakers: mute this Mac's default output while a client plays
+    /// its sound (the capture helper's HostSpeakers), restored after.
     #[arg(long)]
     mute_local_audio: bool,
     /// List the physical displays available to mirror.
@@ -329,9 +329,6 @@ where
     let mut writer = crate::writer::Writer::spawn(writer);
     //= Sound while the client wants it (ClientMsg::Audio).
     let mut audio: Option<crate::host_audio::HostAudio> = None;
-    if cfg.mute_local_audio {
-        tracing::warn!("--mute-local-audio: a Mac host keeps its speakers on (not supported yet)");
-    }
     let result: Result<()> = async {
         loop {
             tokio::select! {
@@ -357,7 +354,8 @@ where
                                     }
                                 } else if !enabled { audio = None; }
                                 tracing::info!(enabled, "host sound");
-                                command_tx.try_send(json!({"type": "audio", "enabled": enabled}))?;
+                                //= mute_local: the helper mutes this Mac's speakers while on.
+                                command_tx.try_send(json!({"type": "audio", "enabled": enabled, "mute_local": cfg.mute_local_audio}))?;
                             }
                             other => if let Some(cmd) = input_command(other) { command_tx.try_send(cmd)?; },
                         }

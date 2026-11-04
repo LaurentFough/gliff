@@ -7,6 +7,7 @@ import VideoToolbox
 import Carbon
 import Metal
 import QuartzCore
+import CoreAudio
 
 // stdout belongs exclusively to the bridge. Diagnostics go to stderr.
 let outputLock = NSLock()
@@ -418,6 +419,77 @@ final class HardwareEncoder {
 // @unchecked Sendable: Capture already runs on several queues (capture,
 // audio, main) and starts from an async task; its state is set on the main
 // thread and only read elsewhere (audioOn, a Bool).
+// MARK: - Host speakers (Mac host)
+//
+// --mute-local-audio on a Mac host: while a client plays this Mac's sound,
+// the default output device is muted, and unmuted when sound stops or the
+// session ends. ScreenCaptureKit records what apps play before the output
+// device, so the client still hears it (to confirm on each macOS release).
+// A Mac that was muted already is left alone. A marker file survives a
+// crash or kill; the next capture helper unmutes that device.
+enum HostSpeakers {
+    static var marker: URL? {
+        FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first?
+            .appendingPathComponent("Gliff", isDirectory: true).appendingPathComponent("host-speakers-muted")
+    }
+    // The device muted here; main thread.
+    static var muted: AudioDeviceID?
+    static func defaultOutput() -> AudioDeviceID? {
+        var id = AudioDeviceID(0), size = UInt32(MemoryLayout<AudioDeviceID>.size)
+        var address = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+                                                 mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+        guard AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size, &id) == noErr, id != 0 else { return nil }
+        return id
+    }
+    static func muteAddress() -> AudioObjectPropertyAddress {
+        AudioObjectPropertyAddress(mSelector: kAudioDevicePropertyMute, mScope: kAudioDevicePropertyScopeOutput, mElement: kAudioObjectPropertyElementMain)
+    }
+    static func isMuted(_ device: AudioDeviceID) -> Bool? {
+        var address = muteAddress(), value = UInt32(0), size = UInt32(MemoryLayout<UInt32>.size)
+        guard AudioObjectHasProperty(device, &address),
+              AudioObjectGetPropertyData(device, &address, 0, nil, &size, &value) == noErr else { return nil }
+        return value != 0
+    }
+    static func set(_ device: AudioDeviceID, muted on: Bool) -> Bool {
+        var address = muteAddress(), settable = DarwinBoolean(false)
+        guard AudioObjectHasProperty(device, &address),
+              AudioObjectIsPropertySettable(device, &address, &settable) == noErr, settable.boolValue else { return false }
+        var value = UInt32(on ? 1 : 0)
+        return AudioObjectSetPropertyData(device, &address, 0, nil, UInt32(MemoryLayout<UInt32>.size), &value) == noErr
+    }
+    /// Mute the default output for a listening client.
+    static func engage() {
+        guard muted == nil, let device = defaultOutput() else { return }
+        if isMuted(device) == true { diagnostic("Gliff host speakers: already muted; left as they are"); return }
+        guard set(device, muted: true) else {
+            diagnostic("Gliff host speakers: the output device cannot be muted; its speakers stay on"); return
+        }
+        muted = device
+        if let marker = marker {
+            try? FileManager.default.createDirectory(at: marker.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try? String(device).write(to: marker, atomically: true, encoding: .utf8)
+        }
+        diagnostic("Gliff host speakers: muted while the client listens")
+    }
+    /// Unmute what engage() muted (sound off, session end).
+    static func release() {
+        guard let device = muted else { return }
+        muted = nil
+        _ = set(device, muted: false)
+        if let marker = marker { try? FileManager.default.removeItem(at: marker) }
+        diagnostic("Gliff host speakers: restored")
+    }
+    /// A helper that crashed or was killed left its device muted: unmute it.
+    static func recover() {
+        guard let marker = marker, let text = try? String(contentsOf: marker, encoding: .utf8) else { return }
+        if let device = AudioDeviceID(text.trimmingCharacters(in: .whitespacesAndNewlines)) {
+            _ = set(device, muted: false)
+            diagnostic("Gliff host speakers: restored after an earlier session ended early")
+        }
+        try? FileManager.default.removeItem(at: marker)
+    }
+}
+
 final class Capture: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sendable {
     var stream: SCStream?
     let input = Input()
@@ -431,8 +503,12 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Send
     var audioFormatWarned = false
     // Main thread: the stream is running, so its configuration can change.
     var capturing = false
-    func setAudio(_ on: Bool) {
+    // --mute-local-audio: mute this Mac's speakers while sound is on.
+    var muteLocal = false
+    func setAudio(_ on: Bool, muteLocal mute: Bool = false) {
         audioOn = on
+        if on { muteLocal = mute }
+        if on && muteLocal { HostSpeakers.engage() } else if !on { HostSpeakers.release() }
         // Before capture starts, start() applies it once running.
         guard capturing, let stream = stream, let config = config, config.capturesAudio != on else { return }
         config.capturesAudio = on
@@ -489,7 +565,7 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Send
             self.stream = stream
             event(["type": "ready", "width": width, "height": height, "scale_milli": scale, "output": "display-\(display.displayID)"])
             try await stream.startCapture()
-            DispatchQueue.main.async { self.capturing = true; if self.audioOn { self.setAudio(true) }; clipboard.start() }
+            DispatchQueue.main.async { self.capturing = true; if self.audioOn { self.setAudio(true, muteLocal: self.muteLocal) }; clipboard.start() }
         } catch { fail("Screen capture failed: \(error.localizedDescription)") }
     }
     func stream(_ stream: SCStream, didStopWithError error: Error) { fail("Screen capture stopped: \(error.localizedDescription)") }
@@ -2674,7 +2750,7 @@ final class SettingsWindow: NSObject, PanelWindow, NSApplicationDelegate, NSWind
         let clip = row("Clipboard", clipboardBox, clipboardOrigin, clipboardReset, "Copy on one machine and paste on the other. Turn off for machines you do not trust.")
         let decoding = row("Decode", decode, decodeOrigin, decodeReset, "Automatic uses this Mac's GPU when it can, else the CPU. The CPU uses more power; try it if the picture shows artefacts.")
         let again = row("Reconnect", reconnectBox, reconnectOrigin, reconnectReset, "Reopen the machine at launch if it was open at quit, and retry a dropped session. Off, it waits for Reconnect.")
-        let speakers = row("Host speakers", speakersBox, speakersOrigin, speakersReset, "While Gliff plays the machine's sound, its own speakers stay silent; restored when sound stops or the session ends. Linux hosts with PipeWire.")
+        let speakers = row("Host speakers", speakersBox, speakersOrigin, speakersReset, "While Gliff plays the machine's sound, its own speakers stay silent; restored when sound stops or the session ends. Linux hosts with PipeWire, and Mac hosts.")
         let login = row("SSH user", sshUser, sshUserOrigin, sshUserReset, "The login for an address without user@, such as a mesh machine. Blank leaves it to ssh (~/.ssh/config, else your user name).")
         let server = row("Server command", serverBin, serverOrigin, serverReset, "Starts the server over SSH, e.g. gliff-server --low-bandwidth. Blank uses the inherited command.")
         let rule = label("A screen, decode, host speakers, SSH user or server command change reconnects the machine; the clipboard and Reconnect change at once. Changes are saved as you make them.", secondary: true)
@@ -3010,18 +3086,20 @@ if mode == "encode" {
     app.setActivationPolicy(.accessory)
     let args = Array(CommandLine.arguments.dropFirst(2))
     let capture = Capture()
-    readCommands(onClose: { capture.input.handle(["type": "release"]) }) { _, data in
+    // A previous helper that was killed may have left the speakers muted.
+    HostSpeakers.recover()
+    readCommands(onClose: { capture.input.handle(["type": "release"]); HostSpeakers.release() }) { _, data in
         let cmd = json(data)
         if clipboard.receive(cmd) { return }
         DispatchQueue.main.async {
             if cmd["type"] as? String == "resize" { capture.resize(cmd["width"] as? Int ?? 1920, cmd["height"] as? Int ?? 1200) }
-            else if cmd["type"] as? String == "audio" { capture.setAudio(cmd["enabled"] as? Bool == true) }
+            else if cmd["type"] as? String == "audio" { capture.setAudio(cmd["enabled"] as? Bool == true, muteLocal: cmd["mute_local"] as? Bool == true) }
             else { capture.input.handle(cmd); clipboard.command(cmd) }
         }
     }
     Task { await capture.start(args.first ?? "auto", Int(args.count > 1 ? args[1] : "1920") ?? 1920, Int(args.count > 2 ? args[2] : "1200") ?? 1200, Int(args.count > 3 ? args[3] : "30") ?? 30) }
     app.run()
-    capture.input.handle(["type": "release"])
+    capture.input.handle(["type": "release"]); HostSpeakers.release()
 } else if mode == "outputs" {
     var displays = [CGDirectDisplayID](repeating: 0, count: 32), count: UInt32 = 0
     CGGetActiveDisplayList(32, &displays, &count)

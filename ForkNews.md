@@ -37,7 +37,7 @@ A quick look at what this fork adds. The README carries the same list; [ToDone.m
 - **Quit on last window, and About**: Settings ▸ General ▸ Quit Gliff when its last window closes (`quit_on_last_window`, default off: Gliff stays open, and ⌘T or the Dock icon opens the connection window). Gliff ▸ About Gliff shows the version and build (commit, arch). *(Tested.)*
 - **Reconnect on the Mac**: a dropped or failed session shows a **Reconnect** button; sessions that had connected retry automatically (5 × 1.5 s, as on Linux), without repeating SSH prompts. *(Tested.)*
 - **GPU video on the Mac viewer**: VideoToolbox hardware H.264 decode, Metal 4:4:4 recombine, `CAMetalLayer` presentation; asks for 4:4:4 first, falls back to OpenH264 (`--video cpu` forces it). 4K 4:4:4: about 6.9 ms per frame on the GPU vs 18.8 ms on the CPU.
-- **Sound from a Mac host**: a Mac host sends what it plays (ScreenCaptureKit system audio, coded as Opus on #80's wire) while a client plays it; Linux and Mac clients hear it. Host speakers does not mute a Mac host yet. *(Tested 2026-11-03: Mac → Mac.)*
+- **Sound from a Mac host**: a Mac host sends what it plays (ScreenCaptureKit system audio, coded as Opus on #80's wire) while a client plays it; Linux and Mac clients hear it. *(Tested 2026-11-04: Mac → Mac and Mac → Linux.)* With Host speakers, the Mac host mutes its own output while the client listens. *(New; testing pending.)*
 - **SSH user**: a per-machine (or default) `ssh_user` in both clients' Settings, used for an address without `user@` (mesh machines report none); mesh rows also take the user of a known `user@host` machine. *(Tested 2026-11-04.)*
 - **Machines in Mac Settings**: **+** / **−** under the Settings list add a machine by its SSH address or forget one; **Connect** shows a machine's tab when it is already open. *(Tested 2026-11-04.)*
 - **Decode in Mac Settings**: Settings ▸ Decode per machine: Automatic, GPU (VideoToolbox + Metal) or CPU (OpenH264), the client's `--video`. *(Tested 2026-11-03.)*
@@ -112,7 +112,7 @@ The new features are outlined in red. The connection and Settings windows are re
 | SSH user, Settings + / −, Connect to an open tab | Tested (2026-11-04) |
 | Decode in Mac Settings | Tested (2026-11-03) |
 | Connection Info overlay (Mac) | Tested (2026-11-03) |
-| Sound from a Mac host | Tested Mac → Mac (2026-11-03); Mac → Linux to confirm |
+| Sound from a Mac host | Tested Mac → Mac and Mac → Linux (2026-11-04); Host speakers on a Mac host: testing pending |
 
 Feedback and issues welcome on the fork.
 

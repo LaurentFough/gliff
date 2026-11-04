@@ -83,7 +83,7 @@ opening another.
 | Clipboard | Share the clipboard in both directions | at once |
 | Decode | Automatic (the GPU: VideoToolbox + Metal when this Mac has it, else the CPU), GPU, or CPU (OpenH264) (`decode`; the client's `--video`) | reconnects the machine |
 | Reconnect | Reopen the machine at launch if it was open at quit, and retry a dropped session (`auto_reconnect`, default on) | at the next launch or failure |
-| Host speakers | Mute the Linux host's own speakers while the Mac plays its sound (`mute_host_speakers`, default off; the server's `--mute-local-audio`, PipeWire hosts) | reconnects the machine |
+| Host speakers | Mute the host's own speakers while the Mac plays its sound (`mute_host_speakers`, default off; the server's `--mute-local-audio`: Linux hosts with PipeWire, and Mac hosts) | reconnects the machine |
 | SSH user | The login for an address without `user@`, such as a mesh machine (`ssh_user`); blank leaves it to ssh (`~/.ssh/config`, else your user name) | reconnects the machine |
 | Server command | The command started over SSH, e.g. `gliff-server --low-bandwidth` | reconnects the machine |
 | General ▸ Quit Gliff when its last window closes | For the app, not a machine (`quit_on_last_window`, default off). Off: closing the last tab leaves Gliff running with no windows; File ▸ New Tab (⌘T) or clicking the Dock icon opens the connection window. On: closing the last tab quits, and that machine reopens at the next launch | at once |
@@ -161,9 +161,14 @@ records the system's audio (48 kHz stereo; Gliff's own sound is left out) in
 the same host app that captures the screen, so the Screen & System Audio
 Recording permission covers it, and the server codes it as Opus, on the same
 wire as a Linux host. Recording runs only while a client plays the sound
-(Play Sound on, and the tab visible). Host speakers does not apply to a Mac
-host yet: it keeps playing on its own speakers (`--mute-local-audio` is
-accepted and ignored there, with a warning in the server log).
+(Play Sound on, and the tab visible). With **Host speakers** on for the
+machine (`--mute-local-audio`), the Mac host mutes its default output device
+while the client listens and unmutes it when sound stops or the session
+ends; ScreenCaptureKit records what apps play before the output device, so
+the client keeps hearing it. A Mac that was already muted is left alone, and
+an output with no mute control keeps playing (noted in the host's log). If
+the host app is killed while muted, the next session unmutes that device (a
+marker in `~/Library/Caches/Gliff/`).
 
 The command line sits below a machine's saved settings, as on Linux:
 `--headless`, `--no-clipboard` and `--server-bin` apply unless the machine
@@ -456,7 +461,7 @@ logical display coordinates. macOS hosts mirror physical screens and reject
 - Shared text clipboard uses lazy paste requests, chunking and a 1 MiB cap.
   Image and copied-file clipboard transfers are not yet supported on macOS.
 - Mac viewers play sound from Linux and Mac hosts; Mac hosts send it with
-  ScreenCaptureKit audio (not muting their own speakers yet).
+  ScreenCaptureKit audio, and mute their own output with Host speakers.
 
 ## Verify
 
