@@ -57,13 +57,13 @@ This fork ([LaurentFough/gliff](https://github.com/LaurentFough/gliff)) builds o
 - **Tabs on the Mac**: every connection is a native macOS tab in one viewer. The tab bar's **+** or File ▸ New Tab adds a machine; tabs stay connected, only the visible one plays sound, and open tabs reopen at launch. *(Tested.)*
 - **Known machines in the connection window**: a sidebar lists every machine you have connected to (searchable, **+** to add one, **−** to forget one), and the SSH Address field autocompletes from them, at launch and for File ▸ New Tab. *(Tested.)*
 - **Per-machine auto-reconnect**: Machine ▸ Reconnect Automatically, or Reconnect in Settings on both clients (`auto_reconnect`; Settings ▸ Reconnect on Linux). Off, the machine is not reopened at launch and a dropped session waits for Reconnect. *(Tested.)*
-- **One app on the Mac**: Settings and the connection window (at launch and File ▸ New Tab) open inside the viewer (one Dock icon and ⌘-Tab entry, one menu bar from the start; Settings' Connect also answers an open connection window: launch fix testing pending). New Tab is a sheet over a tab that is not connected, else its own window; ⌘, brings an open Settings forward, and Settings can **Connect** a machine (or double-click it) in a new tab. The connection window's list grows with the window. *(Tested.)*
+- **One app on the Mac**: Settings and the connection window (at launch and File ▸ New Tab) open inside the viewer (one Dock icon and ⌘-Tab entry, one menu bar from the start; Settings' Connect also answers an open connection window). *(Tested 2026-11-04.)* New Tab is a sheet over a tab that is not connected, else its own window; ⌘, brings an open Settings forward, and Settings can **Connect** a machine (or double-click it) in a new tab. The connection window's list grows with the window. *(Tested.)*
 - **Quit on last window, and About**: Settings ▸ General ▸ Quit Gliff when its last window closes (`quit_on_last_window`, default off: Gliff stays open, and ⌘T or the Dock icon opens the connection window). Gliff ▸ About Gliff shows the version and build (commit, arch). *(Tested.)*
 - **Reconnect on the Mac**: a dropped or failed session shows a **Reconnect** button; sessions that had connected retry automatically (5 × 1.5 s, as on Linux), without repeating SSH prompts. *(Tested.)*
 - **GPU video on the Mac viewer**: VideoToolbox hardware H.264 decode, Metal 4:4:4 recombine, `CAMetalLayer` presentation; asks for 4:4:4 first, falls back to OpenH264 (`--video cpu` forces it). 4K 4:4:4: about 6.9 ms per frame on the GPU vs 18.8 ms on the CPU.
 - **Sound from a Mac host**: a Mac host sends what it plays (ScreenCaptureKit system audio, coded as Opus on #80's wire) while a client plays it; Linux and Mac clients hear it. Host speakers does not mute a Mac host yet. *(Tested 2026-11-03: Mac → Mac.)*
-- **SSH user**: a per-machine (or default) `ssh_user` in both clients' Settings, used for an address without `user@` (mesh machines report none); mesh rows also take the user of a known `user@host` machine. *(New; testing pending.)*
-- **Machines in Mac Settings**: **+** / **−** under the Settings list add a machine by its SSH address or forget one; **Connect** shows a machine's tab when it is already open. *(New; testing pending.)*
+- **SSH user**: a per-machine (or default) `ssh_user` in both clients' Settings, used for an address without `user@` (mesh machines report none); mesh rows also take the user of a known `user@host` machine. *(Tested 2026-11-04.)*
+- **Machines in Mac Settings**: **+** / **−** under the Settings list add a machine by its SSH address or forget one; **Connect** shows a machine's tab when it is already open. *(Tested 2026-11-04.)*
 - **Decode in Mac Settings**: Settings ▸ Decode per machine: Automatic, GPU (VideoToolbox + Metal) or CPU (OpenH264), the client's `--video`. *(Tested 2026-11-03.)*
 - **Connection Info on the Mac**: the ⓘ title-bar button or Machine ▸ Show Connection Info (⌥⌘I) shows a translucent panel over each tab: stream size and colour, GPU/CPU tiers, fps, Mbit/s, decode time, round trip, sound buffer, and the client's and viewer's CPU use. *(Tested 2026-11-03.)*
 - **Sound on the Mac viewer**: plays Linux hosts' sound through #80's `gliff-audio` (CoreAudio). **Machine ▸ Play Sound** shares the Linux client's mute switch; `--no-audio` starts muted.
@@ -133,7 +133,7 @@ The new features are outlined in red. The connection and Settings windows are re
 | Mesh VPN machines (Tailscale/Headscale, Rayfish), `gliff --mesh` | Tested (2026-11-03) |
 | Releases built by CI (`make release-ci`) | First run passed (all three packages published); `make install-release` not tested yet |
 | Intel Mac packages | Built by CI; not tested on an Intel Mac |
-| SSH user, Settings + / −, Connect to an open tab | Built; testing pending |
+| SSH user, Settings + / −, Connect to an open tab | Tested (2026-11-04) |
 | Decode in Mac Settings | Tested (2026-11-03) |
 | Connection Info overlay (Mac) | Tested (2026-11-03) |
 | Sound from a Mac host | Tested Mac → Mac (2026-11-03); Mac → Linux to confirm |

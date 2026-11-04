@@ -41,7 +41,7 @@ The log is newest first, and each entry names the commit.
 
 | Branch | Contents | Status |
 |---|---|---|
-| `acrogenesis/macos-client-host` | #47 base, signing and install fixes, Makefile, #98, Mac settings, GPU video, #80 sound, Mac sound, host mute, Mac reconnect, Mac tabs, known machines, auto-reconnect, one app (panels), quit on last window, About, screenshots, plan docs, ToDone.md | working branch |
+| `acrogenesis/macos-client-host` | #47 base, signing and install fixes, Makefile, #98, Mac settings, GPU video, #80 sound, Mac sound, host mute, Mac reconnect, Mac tabs, known machines, auto-reconnect, one app (panels), quit on last window, About, screenshots, plan docs, ToDone.md, build-once installs, Linux packages, CI releases, Command line, mesh machines, Mac host sound, Decode, Connection Info, SSH user, Settings + / − | working branch |
 | `main` | upstream, untouched | — |
 
 The working branch is the fork's default branch (2026-10-31). The ten feature branches merged into it were deleted from the fork on 2026-10-31. Also kept: `archive/gliff-mac-objc2` (the old objc2 prototype).
@@ -157,7 +157,7 @@ Support today:
 |---|---|
 | Linux → Linux | Yes (#80; tested on the working branch 2026-10-31) |
 | Linux → Mac | Yes (tested 2026-10-29), including `--mute-local-audio` |
-| Mac → any | Built on `feature/mac-host-sound-info` (ScreenCaptureKit audio → Opus); testing pending. Host speakers does not mute a Mac host yet |
+| Mac → any | Yes: Mac → Mac tested 2026-11-04 (ScreenCaptureKit audio → Opus); Mac → Linux to confirm. Host speakers does not mute a Mac host yet |
 
 - [x] Linux host → Linux client with sound, on the merged working branch (tested 2026-10-31).
 
@@ -174,7 +174,7 @@ Support today:
 - [x] A decode (GPU/CPU) option in the Mac settings window (tested 2026-11-03; better performance on a MacBook Air 15" M3).
 - [x] Host speakers setting (tested and merged 2026-11-01): shared `mute_host_speakers` (default off) adds `--mute-local-audio`; Linux Settings ▸ Sound, Mac Settings ▸ Host speakers; a change reconnects.
 - [x] Sound from a Mac host (tested 2026-11-03, Mac → Mac; Mac → Linux to confirm): built on `feature/mac-host-sound-info` (ScreenCaptureKit `capturesAudio` while a client plays sound, kind 7 PCM packets, `host_audio.rs` Opus); switching and remote play work; more testing: Mac → Linux, a long session.
-- [ ] SSH user setting, Settings + / −, mesh rows with a known user: built 2026-11-04 on `feature/ssh-user-settings-tabs`; testing pending (Mac and Linux).
+- [x] SSH user setting, Settings + / −, mesh rows with a known user, the connection window's + sheet (tested 2026-11-04).
 - [ ] Host speakers on a Mac host (mute the Mac's output while a client listens; ScreenCaptureKit may record after the mute: to check). `--mute-local-audio` is accepted and ignored for now.
 - [x] A warning when "Private screen" is chosen with a Mac host (tested 2026-11-03): the Mac server refuses `--headless` ("macOS supports mirroring physical displays; --headless requires a Hyprland host") and the client shows it.
 - [x] Tabs on the Mac: merged 2026-10-29 (one viewer process for every connection); several connections in tabs tested 2026-10-30; the rest under Deferred testing.
@@ -207,9 +207,9 @@ Support today:
 ### Ideas (not decided)
 
 - [x] Mesh VPN machines (tested and merged 2026-11-03): Tailscale/Headscale and Rayfish peers in the Mac connection window (after the Bonjour computers; Refresh asks again) and in a menu by the Linux address bar. Later: NetBird (`netbird status --json`, ½ day), ZeroTier (Central API token or ZeroNSD, 1–1½ days).
-- [ ] Settings ▸ Connect: switch to the machine's open tab instead of opening a second one: built 2026-11-04 on `feature/ssh-user-settings-tabs` (`OpenTab` list, `Hub::focus`, Swift `focus` selects the tab); testing pending.
-- [ ] Connect in Settings at launch: built 2026-11-03 on `feature/mac-host-sound-info` (the launch connection window and its Settings now run in the viewer; Connect answers an open connection window: it closes and the machine opens); testing pending.
-- [ ] Open the launch connection window inside the viewer too: built 2026-11-03 on `feature/mac-host-sound-info` (`Hub::open(…, idle)`, Swift `app … idle` starts with no tab and the Machine menu off); fixes the two menu bars at launch ("Gliff Edit" from the stand-alone helper when no tabs were reopened, the full one when tabs were); testing pending.
+- [x] Settings ▸ Connect: switch to the machine's open tab (tested 2026-11-04) instead of opening a second one: built 2026-11-04 on `feature/ssh-user-settings-tabs` (`OpenTab` list, `Hub::focus`, Swift `focus` selects the tab).
+- [x] Connect in Settings at launch (tested 2026-11-04): built 2026-11-03 on `feature/mac-host-sound-info` (the launch connection window and its Settings now run in the viewer; Connect answers an open connection window: it closes and the machine opens).
+- [x] Open the launch connection window inside the viewer too (tested 2026-11-04): built 2026-11-03 on `feature/mac-host-sound-info` (`Hub::open(…, idle)`, Swift `app … idle` starts with no tab and the Machine menu off); fixes the two menu bars at launch ("Gliff Edit" from the stand-alone helper when no tabs were reopened, the full one when tabs were).
 - [x] Screenshots still missing: the address autocomplete, the Reconnect button on a dropped session, the File and Window menus' tab commands (mockups 2026-11-04; Machine menu and Settings images updated too).
 - [ ] Screenshots: a second (lighter or dashed) outline for older fork features (the Settings window itself, Mirror/Private Screen, Share Clipboard).
 - [x] Build ID: `-dirty` can lag until the next commit or Swift change: build.rs 1.3.0 re-runs on code changes (crates, Cargo.toml/lock, bin, pkgbuild) and skips swiftc when Gliff.swift is unchanged (fingerprint); "-dirty" counts those paths only, as `bin/lib/build-id.sh` 1.1.0 (2026-11-04).
@@ -230,14 +230,17 @@ Support today:
 
 Newest first. Format: `### YYYY-MM-DD — summary (commit)`, then a line or two.
 
+### 2026-11-04 — Merged feature/mac-host-sound-info and feature/ssh-user-settings-tabs
+Tested: Mac host sound (Mac → Mac), Decode, Connection Info, one menu bar at launch, Connect in Settings with the connection window open, cancel at launch following Quit on last window, SSH user, Settings + / −, Connect to an open tab, the + sheet, build ID. Fast-forwarded into `acrogenesis/macos-client-host`.
+
 ### 2026-11-04 — Connection window +: the Settings sheet
-Reported: the connection window's + silently used the SSH Address field, so it looked broken. It now opens the same Add a Machine sheet as Settings (filled in from the field when it holds an address), then selects the new machine, fills it in below and says "Added …". Testing pending.
+Reported: the connection window's + silently used the SSH Address field, so it looked broken. It now opens the same Add a Machine sheet as Settings (filled in from the field when it holds an address), then selects the new machine, fills it in below and says "Added …". Tested 2026-11-04.
 
 ### 2026-11-04 — SSH user, Settings + / −, Connect to an open tab, build ID, screenshots (feature/ssh-user-settings-tabs)
 Shared `ssh_user` (gliff-settings 1.1: `valid_ssh_user`, `Resolved::ssh_address`; command lines show `user@host`); rows in both Settings windows; mesh rows take the user of a known `user@host` (`mesh::known_user`, Swift `knownUsers`). Mac Settings: + / − (`Shared::add_machine`, `machine_add` / `machine_remove`); Connect shows an open tab (`OpenTab`, `Hub::focus`). Build ID lag fixed (build.rs 1.3.0, build-id.sh 1.1.0). Mockups: address autocomplete, Reconnect, File/Window tab commands; Machine menu (Show Connection Info) and Settings (SSH user, + / −) updated. Sound, Decode and Connection Info marked tested. Branched from `feature/mac-host-sound-info` (not merged yet).
 
 ### 2026-11-04 — Mac: cancelling the launch connection window follows Quit on last window
-Before, it always quit (no viewer existed yet). Now the viewer is running: on, Gliff quits; off (default), it stays open with no window (⌘T or the Dock icon). Testing pending.
+Before, it always quit (no viewer existed yet). Now the viewer is running: on, Gliff quits; off (default), it stays open with no window (⌘T or the Dock icon). Tested 2026-11-04.
 
 ### 2026-11-03 — Mac: one menu bar at launch, Connect in Settings works with the connection window open
 Reported: two menu bars at launch, Connect missing in Settings, Connect doing nothing. Cause: with no tabs to reopen, the launch connection window and its Settings ran as stand-alone helpers (own "Gliff Edit" menu, no Connect); with tabs reopened they ran in the viewer. And the app loop waited on an open connection window, so Settings ▸ Connect queued until it closed. Fix: the viewer starts idle and the connection window always opens in it; the connection window runs as a task beside the app loop, and Connect closes it and opens the machine. macOS Rust now also type-checked here (cross clippy for aarch64-apple-darwin with stub compilers).
