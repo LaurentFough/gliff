@@ -262,8 +262,11 @@ pub fn client_main() -> Result<()> {
                     picker = None;
                     match chosen {
                         Ok(Some(selected)) => selected,
-                        //= Cancelled with nothing open at launch: quit, as before.
-                        Ok(None) if launch && visits.is_empty() => break,
+                        //= Cancelled with nothing open at launch: Settings ▸ General ▸
+                        //= Quit Gliff when its last window closes decides, as for
+                        //= the last tab. Off (the default), Gliff stays open with no
+                        //= window; File ▸ New Tab (⌘T) or the Dock icon opens it again.
+                        Ok(None) if launch && visits.is_empty() && shared.quit_on_last_window() => break,
                         Ok(None) => continue,
                         Err(e) if launch && visits.is_empty() => return Err(e),
                         Err(e) => {

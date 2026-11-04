@@ -5,7 +5,7 @@ slug: gliff-macos-todone
 author: LaurentFough
 type: report
 date-created: 2026-10-29
-date-modified: 2026-11-03
+date-modified: 2026-11-04
 date-published:
 source: https://github.com/LaurentFough/gliff
 domain: remote-desktop
@@ -228,6 +228,9 @@ Support today:
 ## Log
 
 Newest first. Format: `### YYYY-MM-DD — summary (commit)`, then a line or two.
+
+### 2026-11-04 — Mac: cancelling the launch connection window follows Quit on last window
+Before, it always quit (no viewer existed yet). Now the viewer is running: on, Gliff quits; off (default), it stays open with no window (⌘T or the Dock icon). Testing pending.
 
 ### 2026-11-03 — Mac: one menu bar at launch, Connect in Settings works with the connection window open
 Reported: two menu bars at launch, Connect missing in Settings, Connect doing nothing. Cause: with no tabs to reopen, the launch connection window and its Settings ran as stand-alone helpers (own "Gliff Edit" menu, no Connect); with tabs reopened they ran in the viewer. And the app loop waited on an open connection window, so Settings ▸ Connect queued until it closed. Fix: the viewer starts idle and the connection window always opens in it; the connection window runs as a task beside the app loop, and Connect closes it and opens the machine. macOS Rust now also type-checked here (cross clippy for aarch64-apple-darwin with stub compilers).

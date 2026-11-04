@@ -105,7 +105,10 @@ window closes and the machine opens.
 Gliff is one app from the start: with no tabs to reopen, the viewer starts
 without a window and the connection window opens in it, so the menu bar
 (Gliff, File, Edit, Machine, Window) and Settings are the same whichever way
-Gliff starts. Cancelling that first connection window quits, as before.
+Gliff starts. Cancelling that first connection window follows Settings ▸
+General ▸ Quit Gliff when its last window closes: on, Gliff quits; off (the
+default), it stays open with no window, and File ▸ New Tab (⌘T) or the Dock
+icon opens the connection window again.
 
 **All Machines** sets the defaults; selecting a machine sets only that
 machine, and **Reset** hands an option back to the defaults. Each row says
