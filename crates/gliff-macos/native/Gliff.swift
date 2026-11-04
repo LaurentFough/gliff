@@ -422,18 +422,42 @@ final class HardwareEncoder {
 // MARK: - Host speakers (Mac host)
 //
 // --mute-local-audio on a Mac host: while a client plays this Mac's sound,
-// the default output device is muted, and unmuted when sound stops or the
+// its default output is silenced, and restored when sound stops or the
 // session ends. ScreenCaptureKit records what apps play before the output
-// device, so the client still hears it (to confirm on each macOS release).
-// A Mac that was muted already is left alone. A marker file survives a
-// crash or kill; the next capture helper unmutes that device.
+// device, so the client still hears it. Tried in order: the device's mute
+// (all channels, then each of the first two), else its volume set to 0 (all
+// channels, then each) and put back afterwards. An output with neither (an
+// HDMI or DisplayPort monitor's speakers, most AirPlay devices) keeps
+// playing. A Mac that was muted already is left alone. A marker file
+// survives a crash or kill; the next capture helper restores from it.
+// Every step is logged to ~/Library/Logs/Gliff/host-speakers.log.
 enum HostSpeakers {
+    // How the output was silenced: the property, the elements and their
+    // values before, to put back. Kept in the marker as JSON.
+    struct Change: Codable {
+        let device: UInt32
+        let mute: Bool          // true: kAudioDevicePropertyMute, false: VolumeScalar
+        let elements: [UInt32]
+        let before: [Float]
+    }
+    static var current: Change?  // main thread
     static var marker: URL? {
         FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first?
-            .appendingPathComponent("Gliff", isDirectory: true).appendingPathComponent("host-speakers-muted")
+            .appendingPathComponent("Gliff", isDirectory: true).appendingPathComponent("host-speakers-muted.json")
     }
-    // The device muted here; main thread.
-    static var muted: AudioDeviceID?
+    static func log(_ text: String) {
+        diagnostic("Gliff host speakers: \(text)")
+        guard let dir = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask).first?
+                .appendingPathComponent("Logs/Gliff", isDirectory: true) else { return }
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let file = dir.appendingPathComponent("host-speakers.log")
+        let line = "\(ISO8601DateFormatter().string(from: Date())) \(text)\n"
+        if let handle = try? FileHandle(forWritingTo: file) {
+            _ = try? handle.seekToEnd(); try? handle.write(contentsOf: Data(line.utf8)); try? handle.close()
+        } else {
+            try? Data(line.utf8).write(to: file)
+        }
+    }
     static func defaultOutput() -> AudioDeviceID? {
         var id = AudioDeviceID(0), size = UInt32(MemoryLayout<AudioDeviceID>.size)
         var address = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyDefaultOutputDevice,
@@ -441,50 +465,82 @@ enum HostSpeakers {
         guard AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size, &id) == noErr, id != 0 else { return nil }
         return id
     }
-    static func muteAddress() -> AudioObjectPropertyAddress {
-        AudioObjectPropertyAddress(mSelector: kAudioDevicePropertyMute, mScope: kAudioDevicePropertyScopeOutput, mElement: kAudioObjectPropertyElementMain)
+    static func name(_ device: AudioDeviceID) -> String {
+        var address = AudioObjectPropertyAddress(mSelector: kAudioObjectPropertyName, mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+        var value: Unmanaged<CFString>?, size = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
+        guard AudioObjectGetPropertyData(device, &address, 0, nil, &size, &value) == noErr, let text = value?.takeRetainedValue() else { return "device \(device)" }
+        return text as String
     }
-    static func isMuted(_ device: AudioDeviceID) -> Bool? {
-        var address = muteAddress(), value = UInt32(0), size = UInt32(MemoryLayout<UInt32>.size)
-        guard AudioObjectHasProperty(device, &address),
-              AudioObjectGetPropertyData(device, &address, 0, nil, &size, &value) == noErr else { return nil }
-        return value != 0
+    static func address(_ mute: Bool, _ element: UInt32) -> AudioObjectPropertyAddress {
+        AudioObjectPropertyAddress(mSelector: mute ? kAudioDevicePropertyMute : kAudioDevicePropertyVolumeScalar,
+                                   mScope: kAudioDevicePropertyScopeOutput, mElement: element)
     }
-    static func set(_ device: AudioDeviceID, muted on: Bool) -> Bool {
-        var address = muteAddress(), settable = DarwinBoolean(false)
-        guard AudioObjectHasProperty(device, &address),
-              AudioObjectIsPropertySettable(device, &address, &settable) == noErr, settable.boolValue else { return false }
-        var value = UInt32(on ? 1 : 0)
-        return AudioObjectSetPropertyData(device, &address, 0, nil, UInt32(MemoryLayout<UInt32>.size), &value) == noErr
+    static func settable(_ device: AudioDeviceID, _ mute: Bool, _ element: UInt32) -> Bool {
+        var a = address(mute, element), ok = DarwinBoolean(false)
+        return AudioObjectHasProperty(device, &a) && AudioObjectIsPropertySettable(device, &a, &ok) == noErr && ok.boolValue
     }
-    /// Mute the default output for a listening client.
+    static func read(_ device: AudioDeviceID, _ mute: Bool, _ element: UInt32) -> Float? {
+        var a = address(mute, element)
+        if mute {
+            var v = UInt32(0), size = UInt32(MemoryLayout<UInt32>.size)
+            return AudioObjectGetPropertyData(device, &a, 0, nil, &size, &v) == noErr ? Float(v) : nil
+        }
+        var v = Float32(0), size = UInt32(MemoryLayout<Float32>.size)
+        return AudioObjectGetPropertyData(device, &a, 0, nil, &size, &v) == noErr ? v : nil
+    }
+    @discardableResult
+    static func write(_ device: AudioDeviceID, _ mute: Bool, _ element: UInt32, _ value: Float) -> Bool {
+        var a = address(mute, element)
+        if mute {
+            var v = UInt32(value != 0 ? 1 : 0)
+            return AudioObjectSetPropertyData(device, &a, 0, nil, UInt32(MemoryLayout<UInt32>.size), &v) == noErr
+        }
+        var v = Float32(value)
+        return AudioObjectSetPropertyData(device, &a, 0, nil, UInt32(MemoryLayout<Float32>.size), &v) == noErr
+    }
+    /// Silence the default output for a listening client.
     static func engage() {
-        guard muted == nil, let device = defaultOutput() else { return }
-        if isMuted(device) == true { diagnostic("Gliff host speakers: already muted; left as they are"); return }
-        guard set(device, muted: true) else {
-            diagnostic("Gliff host speakers: the output device cannot be muted; its speakers stay on"); return
+        guard current == nil else { return }
+        guard let device = defaultOutput() else { log("no default output device; nothing to mute"); return }
+        let label = name(device)
+        // Mute first (all channels, then each), then the volume.
+        for mute in [true, false] {
+            for elements in [[kAudioObjectPropertyElementMain], [UInt32(1), UInt32(2)]] {
+                guard elements.allSatisfy({ settable(device, mute, $0) }) else { continue }
+                let before = elements.map { read(device, mute, $0) ?? (mute ? 0 : 1) }
+                if mute && before.allSatisfy({ $0 != 0 }) { log("\(label) is muted already; left as it is"); return }
+                if !mute && before.allSatisfy({ $0 == 0 }) { log("\(label) is at volume 0 already; left as it is"); return }
+                let done = elements.allSatisfy { write(device, mute, $0, mute ? 1 : 0) }
+                let change = Change(device: device, mute: mute, elements: elements, before: before)
+                guard done else { restore(change); log("\(label): could not change its \(mute ? "mute" : "volume")"); continue }
+                current = change
+                if let marker = marker, let data = try? JSONEncoder().encode(change) {
+                    try? FileManager.default.createDirectory(at: marker.deletingLastPathComponent(), withIntermediateDirectories: true)
+                    try? data.write(to: marker, options: .atomic)
+                }
+                log("\(label): \(mute ? "muted" : "volume set to 0") (elements \(elements)) while the client listens")
+                return
+            }
         }
-        muted = device
-        if let marker = marker {
-            try? FileManager.default.createDirectory(at: marker.deletingLastPathComponent(), withIntermediateDirectories: true)
-            try? String(device).write(to: marker, atomically: true, encoding: .utf8)
-        }
-        diagnostic("Gliff host speakers: muted while the client listens")
+        log("\(label) has no software mute or volume (an HDMI/DisplayPort or AirPlay output?); its speakers stay on")
     }
-    /// Unmute what engage() muted (sound off, session end).
+    static func restore(_ change: Change) {
+        for (element, value) in zip(change.elements, change.before) { write(change.device, change.mute, element, value) }
+    }
+    /// Put back what engage() changed (sound off, session end).
     static func release() {
-        guard let device = muted else { return }
-        muted = nil
-        _ = set(device, muted: false)
+        guard let change = current else { return }
+        current = nil
+        restore(change)
         if let marker = marker { try? FileManager.default.removeItem(at: marker) }
-        diagnostic("Gliff host speakers: restored")
+        log("\(name(change.device)): restored")
     }
-    /// A helper that crashed or was killed left its device muted: unmute it.
+    /// A helper that crashed or was killed left its output silenced: restore it.
     static func recover() {
-        guard let marker = marker, let text = try? String(contentsOf: marker, encoding: .utf8) else { return }
-        if let device = AudioDeviceID(text.trimmingCharacters(in: .whitespacesAndNewlines)) {
-            _ = set(device, muted: false)
-            diagnostic("Gliff host speakers: restored after an earlier session ended early")
+        guard let marker = marker, let data = try? Data(contentsOf: marker) else { return }
+        if let change = try? JSONDecoder().decode(Change.self, from: data) {
+            restore(change)
+            log("\(name(change.device)): restored after an earlier session ended early")
         }
         try? FileManager.default.removeItem(at: marker)
     }
@@ -508,6 +564,7 @@ final class Capture: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Send
     func setAudio(_ on: Bool, muteLocal mute: Bool = false) {
         audioOn = on
         if on { muteLocal = mute }
+        if on { HostSpeakers.log("sound on for a client (Host speakers \(mute ? "on" : "off"))") }
         if on && muteLocal { HostSpeakers.engage() } else if !on { HostSpeakers.release() }
         // Before capture starts, start() applies it once running.
         guard capturing, let stream = stream, let config = config, config.capturesAudio != on else { return }

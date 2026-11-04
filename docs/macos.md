@@ -165,10 +165,13 @@ wire as a Linux host. Recording runs only while a client plays the sound
 machine (`--mute-local-audio`), the Mac host mutes its default output device
 while the client listens and unmutes it when sound stops or the session
 ends; ScreenCaptureKit records what apps play before the output device, so
-the client keeps hearing it. A Mac that was already muted is left alone, and
-an output with no mute control keeps playing (noted in the host's log). If
-the host app is killed while muted, the next session unmutes that device (a
-marker in `~/Library/Caches/Gliff/`).
+the client keeps hearing it. It uses the device's mute (all channels, then
+each), else sets its volume to 0 and puts it back. An output with neither,
+such as an HDMI or DisplayPort monitor's speakers or most AirPlay devices,
+keeps playing. A Mac that was already muted is left alone. If the host app
+is killed while muted, the next session restores the device (a marker in
+`~/Library/Caches/Gliff/`). Each step is logged to
+`~/Library/Logs/Gliff/host-speakers.log` on the host.
 
 The command line sits below a machine's saved settings, as on Linux:
 `--headless`, `--no-clipboard` and `--server-bin` apply unless the machine
