@@ -230,6 +230,9 @@ Support today:
 
 Newest first. Format: `### YYYY-MM-DD — summary (commit)`, then a line or two.
 
+### 2026-11-04 — Linux build: build dependencies through gliff_root, not makepkg -s
+Reported: a doas error building on Linux, as on 2026-10-31. That fix moved only the install (pacman -U) to `gliff_root`; `bin/package-linux` still ran `makepkg -fs`, which installs missing build dependencies with its own root tool ("doas: Authentication required" without PACMAN_AUTH). package-linux 1.2.0 lists them (`makepkg --printsrcinfo`, `pacman -T`) and installs them with `gliff_root pacman -S --needed --asdeps`, then runs `makepkg -f`. Cause not confirmed from the user's log yet; testing pending.
+
 ### 2026-11-04 — CI release build-3c21faa38975
 Run 41779975452 on 3c21faa passed (Mac arm64 and Intel checks and packages, Arch); pre-release `build-3c21faa38975` with the three packages and checksums.
 
