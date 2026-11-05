@@ -33,8 +33,8 @@ pub struct SshStream {
     pub stdout: ChildStdout,
 }
 
-/// Spawn ssh. Compression is off (video is already compressed) and the socket
-/// asks for low-latency queuing. stderr is inherited so server logs reach the
+/// Spawn ssh. Compression is off (video is already compressed), the socket
+/// asks for low-latency queuing, and unknown host keys are accepted. stderr is inherited so server logs reach the
 /// client's terminal.
 pub fn spawn_ssh(target: &SshTarget) -> std::io::Result<SshStream> {
     let mut cmd = ssh_command(target);
@@ -60,6 +60,11 @@ fn ssh_command(target: &SshTarget) -> Command {
         .arg("-o")
         .arg("IPQoS=lowdelay")
         .args(&target.ssh_args)
+        // No terminal to answer the host-key prompt: trust a host on first
+        // connect, as typing "yes" would. A changed key still fails. Placed
+        // after ssh_args so a user-supplied option wins (ssh takes the first).
+        .arg("-o")
+        .arg("StrictHostKeyChecking=accept-new")
         .arg("--")
         .arg(&target.host)
         .arg(&target.server_bin)
