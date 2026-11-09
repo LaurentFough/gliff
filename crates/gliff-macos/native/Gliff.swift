@@ -1521,6 +1521,39 @@ final class Tab {
     var autoReconnect: Bool { state["auto_reconnect"] as? Bool != false }
 }
 
+// MARK: - System shortcuts while a tab has the keyboard
+//
+// The in-app key monitor only sees what macOS leaves to the app, so ⌘Tab,
+// ⌘Space, ⌃←/→/↑ (Spaces, Mission Control), ⌘⇧3/4 and the other shortcuts in
+// System Settings ▸ Keyboard ▸ Shortcuts acted on this Mac instead of the
+// machine. While a tab has the keyboard (Gliff active, its picture under the
+// pointer, not released with Shift+Esc), Gliff turns macOS's global hotkeys
+// off for its own connection to the window server, as Screen Sharing and
+// other remote-desktop apps do, and on again as soon as that ends; the
+// window server also restores them if Gliff exits. The private
+// CGSSetGlobalHotKeyOperatingMode is looked up at run time: without it,
+// nothing changes. With Accessibility granted, a keyboard event tap
+// also catches any key that still gets past (App.installKeyTap).
+enum SystemShortcuts {
+    typealias MainConnection = @convention(c) () -> Int32
+    typealias SetMode = @convention(c) (Int32, Int32) -> Int32
+    static let api: (connection: MainConnection, setMode: SetMode)? = {
+        let any = UnsafeMutableRawPointer(bitPattern: -2)  // RTLD_DEFAULT
+        guard let c = dlsym(any, "CGSMainConnectionID"), let m = dlsym(any, "CGSSetGlobalHotKeyOperatingMode") else {
+            diagnostic("Gliff: system shortcuts cannot be held for the machine on this macOS")
+            return nil
+        }
+        return (unsafeBitCast(c, to: MainConnection.self), unsafeBitCast(m, to: SetMode.self))
+    }()
+    /// Whether macOS's hotkeys are off now (main thread).
+    private(set) static var held = false
+    static func hold(_ wanted: Bool) {
+        guard wanted != held, let api = api else { return }
+        // 1: kCGSGlobalHotKeyDisable, 0: kCGSGlobalHotKeyEnable.
+        if api.setMode(api.connection(), wanted ? 1 : 0) == 0 { held = wanted }
+    }
+}
+
 final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
     // Every open window, by id; read on the bridge reader thread too.
     private let tabsLock = NSLock()
@@ -1633,6 +1666,11 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
             guard let tab = self?.tab(for: NSApp.keyWindow), !tab.view.released, tab.view.hovering, tab.view.hasPicture else { return e }
             tab.view.key(e, e.type == .keyDown); return nil
         }
+        // System shortcuts go to the machine while a tab has the keyboard:
+        // checked often, so they come back as soon as the pointer leaves the
+        // picture, Shift+Esc releases it or Gliff loses focus.
+        Timer.scheduledTimer(timeInterval: 0.15, target: self, selector: #selector(App.updateShortcuts), userInfo: nil, repeats: true)
+        installKeyTap()
         readCommands { [weak self] kind, data in self?.command(kind, data) }
     }
 
@@ -1946,10 +1984,57 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
         return true
     }
     func applicationWillTerminate(_ note: Notification) {
+        SystemShortcuts.hold(false)
         DistributedNotificationCenter.default().removeObserver(self)
         tabsLock.lock(); let all = Array(tabs.values); tabsLock.unlock()
         for tab in all { tab.view?.release() }
         event(["type": "bye"])
+    }
+    /// The tab that has the keyboard now, if any: Gliff active, the tab key,
+    /// its picture under the pointer, not released with Shift+Esc.
+    func capturingView() -> RemoteView? {
+        guard NSApp.isActive, let tab = tab(for: NSApp.keyWindow), let view = tab.view,
+              !view.released, view.hovering, view.hasPicture else { return nil }
+        return view
+    }
+    var keyTap: CFMachPort?
+    var lastTapTry = Date.distantPast
+    @objc func updateShortcuts() {
+        let capturing = capturingView() != nil
+        SystemShortcuts.hold(capturing)
+        // Accessibility granted after launch: add the tap at the next capture.
+        if capturing, keyTap == nil, Date().timeIntervalSince(lastTapTry) > 5 { installKeyTap() }
+    }
+    /// A keyboard event tap (needs Accessibility): keys that macOS would
+    /// still act on go to the machine while a tab has the keyboard. Without
+    /// the permission, the hotkeys switch above and the in-app monitor remain.
+    func installKeyTap() {
+        lastTapTry = Date()
+        guard keyTap == nil, AXIsProcessTrusted() else { return }
+        let mask = CGEventMask(1 << CGEventType.keyDown.rawValue) | CGEventMask(1 << CGEventType.keyUp.rawValue)
+        let callback: CGEventTapCallBack = { _, type, event, info in
+            guard let info = info else { return Unmanaged.passUnretained(event) }
+            return Unmanaged<App>.fromOpaque(info).takeUnretainedValue().tapped(type, event)
+        }
+        guard let tap = CGEvent.tapCreate(tap: .cgSessionEventTap, place: .headInsertEventTap, options: .defaultTap,
+                                          eventsOfInterest: mask, callback: callback,
+                                          userInfo: Unmanaged.passUnretained(self).toOpaque()) else {
+            diagnostic("Gliff: could not add the keyboard tap"); return
+        }
+        keyTap = tap
+        CFRunLoopAddSource(CFRunLoopGetMain(), CFMachPortCreateRunLoopSource(nil, tap, 0), .commonModes)
+        CGEvent.tapEnable(tap: tap, enable: true)
+    }
+    func tapped(_ type: CGEventType, _ event: CGEvent) -> Unmanaged<CGEvent>? {
+        if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+            if let tap = keyTap { CGEvent.tapEnable(tap: tap, enable: true) }
+            return Unmanaged.passUnretained(event)
+        }
+        guard type == .keyDown || type == .keyUp, let view = capturingView(), let e = NSEvent(cgEvent: event) else {
+            return Unmanaged.passUnretained(event)
+        }
+        view.key(e, type == .keyDown)
+        return nil
     }
 }
 

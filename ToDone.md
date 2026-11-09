@@ -230,6 +230,9 @@ Support today:
 
 Newest first. Format: `### YYYY-MM-DD — summary (commit)`, then a line or two.
 
+### 2026-11-09 — Mac viewer: system shortcuts go to the machine (feature/mac-system-shortcuts)
+Reported (Mac client → Linux host): some shortcuts acted on the Mac. Cause: only an in-app key monitor, which never sees macOS's global hotkeys (⌘Tab, ⌘Space, Spaces/Mission Control, screenshots…). Now, while a tab has the keyboard (active, hovering, not released), `SystemShortcuts.hold` turns them off via the private `CGSSetGlobalHotKeyOperatingMode` (looked up with dlsym; checked every 0.15 s and restored on leave, Shift+Esc, focus loss, quit), and with Accessibility a session keyboard event tap (`App.installKeyTap`) forwards anything else. First test 2026-11-09: working as intended; user watching for further issues.
+
 ### 2026-11-04 — Host speakers on a Mac host: fallbacks and a log
 Reported: the Mac host still played. The Linux client does pass `--mute-local-audio`. Possible causes: the Mac not rebuilt, an output with no main-element mute, or no software control at all (HDMI/DisplayPort). HostSpeakers now tries mute on the main element, then channels 1–2, then volume 0 (main, then channels) and restores the saved values; the marker is JSON with what changed; every step goes to `~/Library/Logs/Gliff/host-speakers.log`. Testing pending.
 
