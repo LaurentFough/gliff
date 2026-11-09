@@ -16,7 +16,7 @@ pub mod model;
 pub mod store;
 
 pub use model::*;
-pub use store::Store;
+pub use store::{Store, INFO_POSITIONS};
 
 impl Field {
     /// The option's key in the config file and in the macOS UI protocol.

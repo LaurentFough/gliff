@@ -230,6 +230,9 @@ Support today:
 
 Newest first. Format: `### YYYY-MM-DD — summary (commit)`, then a line or two.
 
+### 2026-11-09 — Connection Info corner (feature/info-position)
+Settings ▸ General ▸ Connection Info: Top Left (default), Top Right, Bottom Left, Bottom Right. Top-level `info_position` in config.toml (gliff-settings `Store::info_position`, `INFO_POSITIONS`; absent for the default), sent in `app_settings`; the viewer's `InfoOverlay.corner` places every tab's panel at once. Settings window 910 pt tall. Testing pending.
+
 ### 2026-11-04 — Guard: scripts/linux-root-check.sh (0fe66b1)
 The makepkg/doas fix is tested (user). New check, in `scripts/check.sh` and the Arch job of `fork-builds.yml` (1.1.0): rules over `bin/` and the Makefile (no makepkg -s/-i/-r, no sudo/doas/su, pacman -S/-U/-R only after gliff_root; the rules are self-tested on samples), `gliff_auth_tool` order with stub tools and makepkg.conf files (`GLIFF_ETC_MAKEPKG_CONF`, linux-install.sh 1.2.0), and `bin/package-linux` with stand-ins (a missing dependency goes through GLIFF_AUTH; makepkg only builds). Putting `makepkg -fs` back fails two checks. docs/development.md states the rule.
 
