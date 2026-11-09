@@ -215,6 +215,23 @@ impl Shared {
         self.save_and_announce();
     }
 
+    /// Where the viewer shows Connection Info (Settings ▸ General).
+    pub fn info_position(&self) -> &'static str {
+        self.store.borrow().info_position()
+    }
+
+    /// Save it; announced like any other change. False for an unknown corner.
+    pub fn set_info_position(&self, corner: &str) -> bool {
+        if self.info_position() == corner {
+            return true;
+        }
+        let ok = self.store.borrow_mut().set_info_position(corner);
+        if ok {
+            self.save_and_announce();
+        }
+        ok
+    }
+
     /// Save the sound switch; announced like any other change.
     pub fn set_muted(&self, muted: bool) {
         if self.muted() == muted {
@@ -376,13 +393,17 @@ pub fn state_json(store: &Store) -> Value {
         "defaults_commands": command_lines("user@host", &store.resolve("", &Settings::default())),
         "machines": machines,
         //= Settings ▸ General: options for the app, not a machine.
-        "app": {"quit_on_last_window": store.quit_on_last_window()},
+        "app": {"quit_on_last_window": store.quit_on_last_window(), "info_position": store.info_position()},
     })
 }
 
 /// The viewer's app-wide options (sent at launch and after every change).
 pub fn app_settings(shared: &Shared) -> Value {
-    json!({"type": "app_settings", "quit_on_last_window": shared.quit_on_last_window()})
+    json!({
+        "type": "app_settings",
+        "quit_on_last_window": shared.quit_on_last_window(),
+        "info_position": shared.info_position(),
+    })
 }
 
 /// An edit to Settings ▸ General (`"scope": "app"`).
@@ -393,6 +414,17 @@ fn apply_app_edit(shared: &Shared, ev: &Value) -> Result<()> {
                 .as_bool()
                 .context("quit_on_last_window must be true or false")?;
             shared.set_quit_on_last_window(on);
+            Ok(())
+        }
+        Some("info_position") => {
+            let corner = ev["value"]
+                .as_str()
+                .context("info_position must be a string")?;
+            ensure!(
+                shared.set_info_position(corner),
+                "info_position is one of {}",
+                gliff_settings::INFO_POSITIONS.join(", ")
+            );
             Ok(())
         }
         _ => bail!("unknown app setting"),
@@ -815,6 +847,14 @@ mod tests {
         assert_eq!(shared.state()["app"]["quit_on_last_window"], true);
         let bad = json!({"scope": "app", "field": "quit_on_last_window", "value": "yes"});
         assert!(apply_edit(&shared, &bad).is_err());
+        //= Connection Info's corner: sent to the viewer, saved, checked.
+        assert_eq!(app_settings(&shared)["info_position"], "top-left");
+        let corner = json!({"scope": "app", "field": "info_position", "value": "bottom-right"});
+        apply_edit(&shared, &corner).unwrap();
+        assert_eq!(app_settings(&shared)["info_position"], "bottom-right");
+        assert_eq!(shared.state()["app"]["info_position"], "bottom-right");
+        let middle = json!({"scope": "app", "field": "info_position", "value": "middle"});
+        assert!(apply_edit(&shared, &middle).is_err());
         let unknown = json!({"scope": "app", "field": "dock_icon", "value": true});
         assert!(apply_edit(&shared, &unknown).is_err());
     }

@@ -1300,10 +1300,20 @@ final class InfoOverlay: NSVisualEffectView {
     required init?(coder: NSCoder) { nil }
     // Clicks and the pointer go through to the remote picture.
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
+    // Settings ▸ General ▸ Connection Info (info_position, from
+    // app_settings): "top-left" (default), "top-right", "bottom-left",
+    // "bottom-right". Main thread.
+    static var corner = "top-left"
     func place(in parent: NSView) {
-        let size = text.fittingSize
+        let size = text.fittingSize, margin: CGFloat = 12
         text.frame = NSRect(x: 10, y: 8, width: size.width, height: size.height)
-        frame = NSRect(x: 12, y: 12, width: size.width + 20, height: size.height + 16)
+        let w = size.width + 20, h = size.height + 16, b = parent.bounds
+        let right = InfoOverlay.corner.hasSuffix("right"), bottom = InfoOverlay.corner.hasPrefix("bottom")
+        let x = right ? b.maxX - w - margin : b.minX + margin
+        // RemoteView is flipped: y grows downwards.
+        let top = parent.isFlipped ? b.minY + margin : b.maxY - h - margin
+        let low = parent.isFlipped ? b.maxY - h - margin : b.minY + margin
+        frame = NSRect(x: max(b.minX, x), y: max(b.minY, bottom ? low : top), width: w, height: h)
     }
     /// One report from the client, with the CPU figures sampled here.
     func update(_ info: [String: Any], client: Double?, viewer: Double?) {
@@ -1727,7 +1737,16 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
             let cmd = json(data)
             // App-wide settings, whichever window was targeted last.
             if cmd["type"] as? String == "app_settings" {
-                DispatchQueue.main.async { self.quitOnLastWindow = cmd["quit_on_last_window"] as? Bool == true }
+                DispatchQueue.main.async {
+                    self.quitOnLastWindow = cmd["quit_on_last_window"] as? Bool == true
+                    // Connection Info's corner: every tab's panel moves now.
+                    let corner = cmd["info_position"] as? String ?? "top-left"
+                    if corner != InfoOverlay.corner {
+                        InfoOverlay.corner = corner
+                        self.tabsLock.lock(); let all = Array(self.tabs.values); self.tabsLock.unlock()
+                        for tab in all { if let view = tab.view { view.info.place(in: view) } }
+                    }
+                }
                 return
             }
             if cmd["type"] as? String == "open_window" {
@@ -2730,6 +2749,9 @@ final class SettingsWindow: NSObject, PanelWindow, NSApplicationDelegate, NSWind
     let speakersReset = NSButton(title: "Reset", target: nil, action: nil)
     // General: options for Gliff itself, not a machine (state["app"]).
     let quitBox = NSButton(checkboxWithTitle: "Quit Gliff when its last window closes", target: nil, action: nil)
+    // Connection Info's corner (info_position).
+    let infoCorner = NSPopUpButton()
+    static let infoCorners = ["top-left", "top-right", "bottom-left", "bottom-right"]
     // Command line: what the selected scope's settings come to (state's
     // "commands" / "defaults_commands"), to run or debug from a terminal.
     let clientLine = NSTextField(wrappingLabelWithString: "")
@@ -2829,11 +2851,11 @@ final class SettingsWindow: NSObject, PanelWindow, NSApplicationDelegate, NSWind
     }
     /// The window and its controls; showing it is the caller's.
     func build() {
-        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 780, height: 880), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
+        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 780, height: 910), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
         w.title = "Gliff Settings"; w.delegate = self
         // A window of its own, never a tab of the viewer.
         w.tabbingMode = .disallowed; w.isReleasedWhenClosed = false
-        w.contentMinSize = NSSize(width: 700, height: 820)
+        w.contentMinSize = NSSize(width: 700, height: 850)
         let view = w.contentView!
 
         search.placeholderString = "Search machines"; search.delegate = self
@@ -2907,8 +2929,13 @@ final class SettingsWindow: NSObject, PanelWindow, NSApplicationDelegate, NSWind
         general.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
         let quitHelp = label("For Gliff, not one machine. Off: Gliff stays open with no windows; File ▸ New Tab or the Dock icon opens the connection window.", secondary: true)
         quitHelp.lineBreakMode = .byWordWrapping; quitHelp.maximumNumberOfLines = 3; quitHelp.preferredMaxLayoutWidth = 480
+        infoCorner.addItems(withTitles: ["Top Left", "Top Right", "Bottom Left", "Bottom Right"])
+        infoCorner.target = self; infoCorner.action = #selector(infoCornerChanged)
+        infoCorner.setAccessibilityLabel("Connection Info position")
+        let cornerRow = NSStackView(views: [label("Connection Info:"), infoCorner]); cornerRow.orientation = .horizontal; cornerRow.spacing = 8
+        infoCorner.toolTip = "Where the ⓘ Connection Info panel shows over a tab's picture"
         let rule2 = NSBox(); rule2.boxType = .separator
-        let generalStack = NSStackView(views: [general, quitBox, quitHelp])
+        let generalStack = NSStackView(views: [general, quitBox, quitHelp, cornerRow])
         // Command line: selectable, monospaced, each with Copy.
         let commandTitle = label("Command line")
         commandTitle.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
@@ -3018,6 +3045,8 @@ final class SettingsWindow: NSObject, PanelWindow, NSApplicationDelegate, NSWind
         speakersBox.state = m.value as? Bool == true ? .on : .off
         speakersOrigin.stringValue = m.origin; speakersReset.isHidden = !m.here
         quitBox.state = (state["app"] as? [String: Any])?["quit_on_last_window"] as? Bool == true ? .on : .off
+        let corner = (state["app"] as? [String: Any])?["info_position"] as? String ?? "top-left"
+        infoCorner.selectItem(at: SettingsWindow.infoCorners.firstIndex(of: corner) ?? 0)
         let commands: [String: Any]? = selected.isEmpty
             ? state["defaults_commands"] as? [String: Any]
             : (state["machines"] as? [[String: Any]] ?? []).first(where: { $0["name"] as? String == selected })?["commands"] as? [String: Any]
@@ -3072,6 +3101,10 @@ final class SettingsWindow: NSObject, PanelWindow, NSApplicationDelegate, NSWind
         guard !updating else { return }
         errorLabel.stringValue = ""
         send(["type": "settings_edit", "scope": "app", "field": "quit_on_last_window", "value": quitBox.state == .on])
+    }
+    @objc func infoCornerChanged(_ sender: Any?) {
+        guard !updating, SettingsWindow.infoCorners.indices.contains(infoCorner.indexOfSelectedItem) else { return }
+        send(["type": "settings_edit", "scope": "app", "field": "info_position", "value": SettingsWindow.infoCorners[infoCorner.indexOfSelectedItem]])
     }
     @objc func sshUserChanged(_ sender: Any?) {
         guard !updating else { return }

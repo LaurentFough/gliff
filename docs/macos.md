@@ -86,6 +86,7 @@ opening another.
 | Host speakers | Mute the host's own speakers while the Mac plays its sound (`mute_host_speakers`, default off; the server's `--mute-local-audio`: Linux hosts with PipeWire, and Mac hosts) | reconnects the machine |
 | SSH user | The login for an address without `user@`, such as a mesh machine (`ssh_user`); blank leaves it to ssh (`~/.ssh/config`, else your user name) | reconnects the machine |
 | Server command | The command started over SSH, e.g. `gliff-server --low-bandwidth` | reconnects the machine |
+| General ▸ Connection Info | The corner the ⓘ panel shows in: Top Left (default), Top Right, Bottom Left, Bottom Right (`info_position`) | at once |
 | General ▸ Quit Gliff when its last window closes | For the app, not a machine (`quit_on_last_window`, default off). Off: closing the last tab leaves Gliff running with no windows; File ▸ New Tab (⌘T) or clicking the Dock icon opens the connection window. On: closing the last tab quits, and that machine reopens at the next launch | at once |
 
 **Command line** shows what the selected machine's settings come to, each
@@ -129,8 +130,9 @@ setting: off, its tab is not reopened at the next launch and a dropped
 session waits for Reconnect instead of retrying.
 
 **Connection Info.** The ⓘ button at the right of a tab's title bar, or
-Machine ▸ Show Connection Info (⌥⌘I), shows a translucent panel over the
-top-left of the picture, on every tab: the machine, the stream (size,
+Machine ▸ Show Connection Info (⌥⌘I), shows a translucent panel in a corner
+of the picture (Settings ▸ General ▸ Connection Info: top left by default,
+top right, bottom left or bottom right; it moves at once), on every tab: the machine, the stream (size,
 4:4:4 or 4:2:0, the encoder→decoder tiers such as `GPU→GPU`), frames per
 second against the server's cap, the bitrate, the average decode time, the
 round trip (a ping a second), the sound's buffered delay, and the CPU use of

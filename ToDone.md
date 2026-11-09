@@ -230,6 +230,12 @@ Support today:
 
 Newest first. Format: `### YYYY-MM-DD — summary (commit)`, then a line or two.
 
+### 2026-11-09 — Merged feature/mac-host-speakers, feature/mac-system-shortcuts, feature/info-position
+Into `acrogenesis/macos-client-host`, on request (system shortcuts tested; Host speakers on a Mac host and the Connection Info corner still being tested). Conflicts only in this log.
+
+### 2026-11-09 — Connection Info corner (feature/info-position)
+Settings ▸ General ▸ Connection Info: Top Left (default), Top Right, Bottom Left, Bottom Right. Top-level `info_position` in config.toml (gliff-settings `Store::info_position`, `INFO_POSITIONS`; absent for the default), sent in `app_settings`; the viewer's `InfoOverlay.corner` places every tab's panel at once. Settings window 910 pt tall. Testing pending.
+
 ### 2026-11-09 — Mac viewer: system shortcuts go to the machine (feature/mac-system-shortcuts)
 Reported (Mac client → Linux host): some shortcuts acted on the Mac. Cause: only an in-app key monitor, which never sees macOS's global hotkeys (⌘Tab, ⌘Space, Spaces/Mission Control, screenshots…). Now, while a tab has the keyboard (active, hovering, not released), `SystemShortcuts.hold` turns them off via the private `CGSSetGlobalHotKeyOperatingMode` (looked up with dlsym; checked every 0.15 s and restored on leave, Shift+Esc, focus loss, quit), and with Accessibility a session keyboard event tap (`App.installKeyTap`) forwards anything else. First test 2026-11-09: working as intended; user watching for further issues.
 

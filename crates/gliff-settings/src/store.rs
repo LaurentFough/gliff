@@ -36,6 +36,12 @@ const QUIT_ON_LAST_WINDOW: &str = "quit_on_last_window";
 /// Top-level, both clients: the connection window also lists offline mesh
 /// VPN machines Gliff has connected to. Present and true only when on.
 const MESH_SHOW_OFFLINE: &str = "mesh_show_offline";
+/// Top-level, the Mac viewer: the corner Connection Info shows in
+/// (`top-left`, the default and then absent; `top-right`, `bottom-left`,
+/// `bottom-right`).
+const INFO_POSITION: &str = "info_position";
+/// The corners [`Store::info_position`] accepts; the first is the default.
+pub const INFO_POSITIONS: [&str; 4] = ["top-left", "top-right", "bottom-left", "bottom-right"];
 
 /// The parsed config file and where it lives.
 #[derive(Debug, Clone)]
@@ -305,6 +311,31 @@ impl Store {
         }
     }
 
+    /// Where the Mac viewer shows Connection Info; an unknown value reads
+    /// as the default (top-left).
+    pub fn info_position(&self) -> &'static str {
+        let set = self.doc.get(INFO_POSITION).and_then(Value::as_str);
+        INFO_POSITIONS
+            .iter()
+            .find(|p| Some(**p) == set)
+            .copied()
+            .unwrap_or(INFO_POSITIONS[0])
+    }
+
+    /// Set the corner; the default removes the key. False for an unknown one.
+    pub fn set_info_position(&mut self, corner: &str) -> bool {
+        if !INFO_POSITIONS.contains(&corner) {
+            return false;
+        }
+        if corner == INFO_POSITIONS[0] {
+            self.doc.remove(INFO_POSITION);
+        } else {
+            self.doc
+                .insert(INFO_POSITION.into(), Value::String(corner.into()));
+        }
+        true
+    }
+
     /// The Mac's tabs to reopen, in order: (SSH address, port). Malformed
     /// entries are skipped.
     pub fn open_tabs(&self) -> Vec<(String, u16)> {
@@ -508,6 +539,25 @@ mod tests {
         assert!(s.mesh_show_offline());
         s.set_mesh_show_offline(false);
         assert!(!s.doc.contains_key(MESH_SHOW_OFFLINE));
+    }
+
+    #[test]
+    fn info_position_reads_a_corner_and_defaults_to_top_left() {
+        let mut s = store("info_position = \"sideways\"\n");
+        assert_eq!(
+            s.info_position(),
+            "top-left",
+            "unknown reads as the default"
+        );
+        assert!(s.set_info_position("bottom-right"));
+        assert_eq!(s.info_position(), "bottom-right");
+        assert!(!s.set_info_position("middle"));
+        assert_eq!(s.info_position(), "bottom-right");
+        assert!(s.set_info_position("top-left"));
+        assert!(
+            !s.doc.contains_key(INFO_POSITION),
+            "the default is not written"
+        );
     }
 
     #[test]
