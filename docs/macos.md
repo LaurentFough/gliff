@@ -453,6 +453,15 @@ logical display coordinates. macOS hosts mirror physical screens and reject
 - Keyboard input is captured over the picture. Shift+Esc releases it;
   clicking the picture captures it again. Held keys and buttons are released
   when the window loses focus or disconnects.
+- macOS's own shortcuts go to the machine too while the picture has the
+  keyboard: ⌘Tab, ⌘Space, ⌃←/→/↑ (Spaces, Mission Control), ⌘⇧3/4 and the
+  rest of System Settings ▸ Keyboard ▸ Shortcuts. Gliff switches the system
+  hotkeys off for that time (as Screen Sharing does), and on again within
+  a fraction of a second when the pointer leaves the picture, Shift+Esc
+  releases it, or Gliff loses focus; macOS restores them if Gliff exits.
+  With Accessibility granted to Gliff, a keyboard tap also catches any key
+  that still gets past. To switch apps while connected, move the pointer
+  off the picture or press Shift+Esc first.
 - Shared text clipboard uses lazy paste requests, chunking and a 1 MiB cap.
   Image and copied-file clipboard transfers are not yet supported on macOS.
 - Mac viewers play sound from Linux and Mac hosts; Mac hosts send it with

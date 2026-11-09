@@ -230,6 +230,9 @@ Support today:
 
 Newest first. Format: `### YYYY-MM-DD — summary (commit)`, then a line or two.
 
+### 2026-11-09 — Mac viewer: system shortcuts go to the machine (feature/mac-system-shortcuts)
+Reported (Mac client → Linux host): some shortcuts acted on the Mac. Cause: only an in-app key monitor, which never sees macOS's global hotkeys (⌘Tab, ⌘Space, Spaces/Mission Control, screenshots…). Now, while a tab has the keyboard (active, hovering, not released), `SystemShortcuts.hold` turns them off via the private `CGSSetGlobalHotKeyOperatingMode` (looked up with dlsym; checked every 0.15 s and restored on leave, Shift+Esc, focus loss, quit), and with Accessibility a session keyboard event tap (`App.installKeyTap`) forwards anything else. Testing pending: which shortcuts the user saw act locally.
+
 ### 2026-11-04 — Guard: scripts/linux-root-check.sh (0fe66b1)
 The makepkg/doas fix is tested (user). New check, in `scripts/check.sh` and the Arch job of `fork-builds.yml` (1.1.0): rules over `bin/` and the Makefile (no makepkg -s/-i/-r, no sudo/doas/su, pacman -S/-U/-R only after gliff_root; the rules are self-tested on samples), `gliff_auth_tool` order with stub tools and makepkg.conf files (`GLIFF_ETC_MAKEPKG_CONF`, linux-install.sh 1.2.0), and `bin/package-linux` with stand-ins (a missing dependency goes through GLIFF_AUTH; makepkg only builds). Putting `makepkg -fs` back fails two checks. docs/development.md states the rule.
 
