@@ -230,6 +230,9 @@ Support today:
 
 Newest first. Format: `### YYYY-MM-DD — summary (commit)`, then a line or two.
 
+### 2026-11-12 — Synced with upstream gliff 0.4.3 (merge/upstream-0.4.3)
+Merged omacom/main (0.4.2: #119 `StrictHostKeyChecking=accept-new` unless the SSH config sets it, via `ssh -G`; 0.4.3: #137 icon). Conflicts: `ssh.rs` (both kept: the fork's `remote_command`/`shell_word`/`command_line` and upstream's `host_key_checking_is_default`), `pkgbuild/gliff.svg` (kept deleted: the fork ships its own PNG icon). Workspace crates now 0.4.3 in Cargo.lock. Checks pass here (fmt, clippy Linux and macOS, settings/transport tests, linux-root-check).
+
 ### 2026-11-09 — Merged feature/mac-host-speakers, feature/mac-system-shortcuts, feature/info-position
 Into `acrogenesis/macos-client-host`, on request (system shortcuts tested; Host speakers on a Mac host and the Connection Info corner still being tested). Conflicts only in this log.
 

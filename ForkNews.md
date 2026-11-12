@@ -27,6 +27,7 @@ A quick look at what this fork adds. The README carries the same list; [ToDone.m
 - **#98**: settings window and per-machine tab menu. Merged, and brought to the Mac client.
 - **#80**: sound from Linux hosts (Opus over the existing connection). Merged.
 - **#5**: dhh's macOS client. Only its VideoToolbox + Metal video path, ported into #47's viewer.
+- **Upstream releases to 0.4.3** (synced 2026-11-12): #119 accepts an unknown SSH host key on first connect (`StrictHostKeyChecking=accept-new`, unless your SSH config sets it). #137's redrawn icon is not taken: the fork keeps its own app icon.
 
 ## Fork features
 

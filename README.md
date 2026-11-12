@@ -51,6 +51,7 @@ This fork ([LaurentFough/gliff](https://github.com/LaurentFough/gliff)) builds o
 - **#98**: settings window and per-machine tab menu. Merged, and brought to the Mac client.
 - **#80**: sound from Linux hosts (Opus over the existing connection). Merged.
 - **#5**: dhh's macOS client. Only its VideoToolbox + Metal video path, ported into #47's viewer.
+- **Upstream releases to 0.4.3** (synced 2026-11-12): #119 accepts an unknown SSH host key on first connect (`StrictHostKeyChecking=accept-new`, unless your SSH config sets it). #137's redrawn icon is not taken: the fork keeps its own app icon.
 
 ### Fork features
 
@@ -517,8 +518,14 @@ the macOS client and host (upstream PR #47), and adds the following.
 - **#98, settings window and per-machine tab menu** (Linux client). Applied
   to this branch's Linux client, which lives in `crates/gliff/src/linux.rs`.
 - **#80, sound from Linux hosts.** Opus over the existing connection, played
-  through ALSA on Linux viewers. Mac hosts do not advertise sound; Mac
-  viewers play it (see Sound on the Mac below).
+  through ALSA on Linux viewers. Mac viewers play it (see Sound on the Mac
+  below); the fork's Mac hosts send sound too.
+- **#119, SSH host keys (gliff 0.4.2).** With no terminal to answer ssh's
+  prompt, an unknown host key is accepted on first connect
+  (`StrictHostKeyChecking=accept-new`) unless the SSH config sets it; a
+  changed key still fails. The Command line in Settings shows the option.
+- **gliff 0.4.3.** Its redrawn monitor icon (#137) is not taken; the fork
+  keeps its own app icon.
 
 Ported, not merged: #5 (dhh's macOS client, an alternative to #47's). Only
 its VideoToolbox and Metal video path is taken; see GPU video below. Not
