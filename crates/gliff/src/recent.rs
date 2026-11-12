@@ -17,6 +17,10 @@ pub struct Config {
     /// The machine the window showed last.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shown: Option<String>,
+    /// The mesh menu also lists offline machines this client has connected
+    /// to. Written only when on.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub mesh_show_offline: bool,
 }
 
 impl Config {

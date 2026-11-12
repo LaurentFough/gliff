@@ -80,6 +80,16 @@ struct Cli {
     /// the GLIFF_VIDEO environment variable.
     #[arg(long, value_parser = ["gpu", "cpu"])]
     video: Option<String>,
+    /// Show what each mesh VPN client (Tailscale/Headscale, Rayfish) answers
+    /// and the online machines it lists, as a table, then exit.
+    #[arg(long)]
+    mesh: bool,
+    /// With --mesh: also list offline machines.
+    #[arg(long, requires = "mesh")]
+    offline: bool,
+    /// With --mesh: JSON instead of the table.
+    #[arg(long, requires = "mesh")]
+    json: bool,
 }
 
 /// Everything the UI shares with its callbacks.
@@ -227,6 +237,22 @@ fn main() -> glib::ExitCode {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
     let cli = Cli::parse();
+    if cli.mesh {
+        // What each mesh VPN client answered, to see why a machine is missing.
+        let reports = gliff_transport::mesh::reports(Duration::from_secs(4));
+        if cli.json {
+            println!(
+                "{}",
+                gliff_transport::mesh::render_json(&reports, cli.offline)
+            );
+        } else {
+            print!(
+                "{}",
+                gliff_transport::mesh::render_table(&reports, cli.offline)
+            );
+        }
+        return glib::ExitCode::SUCCESS;
+    }
     // GTK uses the program name as the Wayland app ID.
     glib::set_prgname(Some(APP_NAME));
     let app = adw::Application::builder().build();
@@ -304,8 +330,15 @@ fn build_ui(app: &adw::Application, cli: &Cli) {
         .icon_name(CONNECT_ICON)
         .tooltip_text("Connect")
         .build();
+    // Machines on the mesh VPNs this computer is on (Tailscale/Headscale,
+    // Rayfish); install_mesh_menu fills the list each time it opens.
+    let mesh_btn = gtk::MenuButton::builder()
+        .icon_name("network-workgroup-symbolic")
+        .tooltip_text("Machines on your mesh VPNs (Tailscale, Rayfish)")
+        .build();
     let address_bar = gtk::Box::builder().css_classes(["linked"]).build();
     address_bar.append(&entry);
+    address_bar.append(&mesh_btn);
     address_bar.append(&connect_btn);
     let add_revealer = gtk::Revealer::builder()
         .transition_type(gtk::RevealerTransitionType::SlideRight)
@@ -431,6 +464,7 @@ fn build_ui(app: &adw::Application, cli: &Cli) {
     install_input_handlers(&ui, &video, &window, hotkey);
     install_resize_handler(&ui);
     install_address_bar(&ui, &connect_btn);
+    install_mesh_menu(&ui, &mesh_btn);
     refresh_tabs(&ui);
 
     // Fullscreen toggle.
@@ -535,6 +569,139 @@ fn build_ui(app: &adw::Application, cli: &Cli) {
 const CONNECT_ICON: &str = "go-next-symbolic";
 const STOP_ICON: &str = "media-playback-stop-symbolic";
 const FORGET_ICON: &str = "window-close-symbolic";
+
+/// The mesh VPN menu: when it opens, ask every mesh client for its peers
+/// (off the UI thread, `gliff_transport::mesh`), then list the online ones,
+/// and with "Show offline machines" also the offline ones Gliff has
+/// connected to (the config's machines; saved as `mesh_show_offline`).
+/// Choosing one connects to it like typing it into the address bar.
+fn install_mesh_menu(ui: &Rc<App>, button: &gtk::MenuButton) {
+    let list = gtk::ListBox::builder()
+        .selection_mode(gtk::SelectionMode::None)
+        .css_classes(["navigation-sidebar"])
+        .build();
+    let status = gtk::Label::builder()
+        .css_classes(["dim-label"])
+        .margin_top(6)
+        .margin_bottom(6)
+        .margin_start(12)
+        .margin_end(12)
+        .wrap(true)
+        .max_width_chars(36)
+        .build();
+    let scroll = gtk::ScrolledWindow::builder()
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .propagate_natural_height(true)
+        .max_content_height(360)
+        .child(&list)
+        .build();
+    let offline = gtk::CheckButton::builder()
+        .label("Show offline machines I've connected to")
+        .margin_top(6)
+        .margin_bottom(6)
+        .margin_start(12)
+        .margin_end(12)
+        .active(Config::load(&ui.config_path).mesh_show_offline)
+        .build();
+    let body = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    body.append(&status);
+    body.append(&scroll);
+    body.append(&offline);
+    let popover = gtk::Popover::builder().child(&body).build();
+    button.set_popover(Some(&popover));
+    // Every peer from the last ask; render() filters it.
+    let peers: Rc<RefCell<Option<Vec<gliff_transport::mesh::MeshPeer>>>> =
+        Rc::new(RefCell::new(None));
+    let render: Rc<dyn Fn()> = {
+        let (ui, list, status, popover, offline, peers) = (
+            Rc::downgrade(ui),
+            list.clone(),
+            status.clone(),
+            popover.clone(),
+            offline.clone(),
+            peers.clone(),
+        );
+        Rc::new(move || {
+            while let Some(row) = list.first_child() {
+                list.remove(&row);
+            }
+            let Some(ui_rc) = ui.upgrade() else { return };
+            let Some(all) = peers.borrow().clone() else {
+                status.set_label("Asking Tailscale and Rayfish…");
+                status.set_visible(true);
+                return;
+            };
+            let known = Config::load(&ui_rc.config_path).machines;
+            let shown: Vec<_> = all
+                .into_iter()
+                .filter(|p| {
+                    p.online
+                        || (offline.is_active()
+                            && gliff_transport::mesh::is_known(&p.address, &known))
+                })
+                .collect();
+            if shown.is_empty() {
+                status.set_label(
+                    "No machines online. Is Tailscale or Rayfish running and logged in? gliff --mesh shows what each answers.",
+                );
+                status.set_visible(true);
+                return;
+            }
+            status.set_visible(false);
+            for peer in shown {
+                let state = if peer.online { "" } else { " · offline" };
+                let row = adw::ActionRow::builder()
+                    .title(format!("{} ({})", peer.name, peer.label()))
+                    .subtitle(format!("{}{state}", peer.address))
+                    .use_markup(false)
+                    .activatable(true)
+                    .build();
+                // The user of a known `user@` machine, else ssh's config
+                // applies, as for a typed name.
+                let address = match gliff_transport::mesh::known_user(&peer.address, &known) {
+                    Some(user) => format!("{user}@{}", peer.address),
+                    None => peer.address.clone(),
+                };
+                let (ui, popover) = (ui.clone(), popover.clone());
+                row.connect_activated(move |_| {
+                    popover.popdown();
+                    if let Some(ui) = ui.upgrade() {
+                        ui.entry.set_text(&address);
+                        connect_from_address_bar(&ui);
+                    }
+                });
+                list.append(&row);
+            }
+        })
+    };
+    {
+        let (ui, render) = (Rc::downgrade(ui), render.clone());
+        offline.connect_toggled(move |check| {
+            if let Some(ui) = ui.upgrade() {
+                let mut config = Config::load(&ui.config_path);
+                config.mesh_show_offline = check.is_active();
+                if let Err(e) = config.save(&ui.config_path) {
+                    tracing::warn!(error = %e, "cannot save the mesh setting");
+                }
+            }
+            render();
+        });
+    }
+    popover.connect_show(move |_| {
+        *peers.borrow_mut() = None;
+        render();
+        let (peers, render) = (peers.clone(), render.clone());
+        glib::spawn_future_local(async move {
+            let all = gtk::gio::spawn_blocking(|| {
+                gliff_transport::mesh::discover_all(Duration::from_secs(4))
+            })
+            .await
+            .unwrap_or_default();
+            *peers.borrow_mut() = Some(all);
+            render();
+        });
+    });
+}
 
 /// Wire the address bar: the + expands it, Enter connects to what was
 /// typed, and Escape, or leaving it empty, folds it back into the +.

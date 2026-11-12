@@ -88,6 +88,21 @@ A bare `gliff` opens the window with a tab for each machine you have used,
 and connects again to the ones that were connected when you closed it; with
 no machines yet, it opens with the address bar ready.
 
+**Mesh VPNs.** The network button next to the address bar lists the machines
+on the mesh VPNs this computer is on: Tailscale (and Headscale, which uses
+the same client) and Rayfish. Pick one to connect, as if you had typed it;
+the user comes from a machine you added as `user@host`, else from your ssh
+config. Only online Linux and macOS machines are listed; tick **Show offline
+machines I've connected to** to add the offline ones you have used. gliff
+only reads the local status (`tailscale status --json`, `ray status --json`)
+and sends nothing. To see what each client answers:
+
+```
+gliff --mesh            # a table of the online machines, sorted by name
+gliff --mesh --offline  # with the offline ones too
+gliff --mesh --json     # the same as JSON
+```
+
 **Keyboard.** While the pointer is over the picture, everything you type goes
 to the remote machine, window-manager shortcuts included; move the pointer
 off it to get your own back. Press `Shift+Esc` to get your shortcuts back

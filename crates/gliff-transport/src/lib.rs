@@ -12,6 +12,7 @@
 #![forbid(unsafe_code)]
 
 pub mod clipboard;
+pub mod mesh;
 mod ssh;
 
 use bytes::{Buf, Bytes, BytesMut};
