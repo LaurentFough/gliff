@@ -67,7 +67,9 @@ fn ssh_command(target: &SshTarget) -> Command {
     // No terminal to answer the host-key prompt: trust a host on first
     // connect, as typing "yes" would. A changed key still fails. Only when
     // the user's ssh config leaves the default, since -o would override it.
-    if host_key_checking_is_default(target) {
+    //= Fork: not with an askpass helper (the Mac client), which asks
+    //= "Connect to this computer?" with the key's fingerprint instead.
+    if target.askpass.is_none() && host_key_checking_is_default(target) {
         cmd.arg("-o").arg("StrictHostKeyChecking=accept-new");
     }
     cmd.arg("--").arg(&target.host).arg(remote_command(target));
@@ -156,6 +158,23 @@ fn host_key_checking_is_default(target: &SshTarget) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_askpass_helper_keeps_the_host_key_question() {
+        //= The Mac client's helper shows the fingerprint; ssh must ask it.
+        let mut target = SshTarget::new("me@box");
+        target.askpass = Some(std::path::PathBuf::from("/bin/true"));
+        let cmd = ssh_command(&target);
+        let args: Vec<String> = cmd
+            .as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            !args.iter().any(|a| a.starts_with("StrictHostKeyChecking")),
+            "{args:?}"
+        );
+    }
 
     #[test]
     fn the_command_line_is_what_spawn_ssh_runs() {

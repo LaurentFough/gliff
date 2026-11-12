@@ -230,6 +230,9 @@ Support today:
 
 Newest first. Format: `### YYYY-MM-DD — summary (commit)`, then a line or two.
 
+### 2026-11-12 — #119 kept, without the Mac; upstream icon declined
+`ssh_command` adds `accept-new` only with no askpass helper (`target.askpass.is_none()`): the Mac client keeps its fingerprint prompt, and skips the `ssh -G` call. Test `an_askpass_helper_keeps_the_host_key_question`. #137's icon declined by the user. Upstream sync merged into `acrogenesis/macos-client-host`.
+
 ### 2026-11-12 — Synced with upstream gliff 0.4.3 (merge/upstream-0.4.3)
 Merged omacom/main (0.4.2: #119 `StrictHostKeyChecking=accept-new` unless the SSH config sets it, via `ssh -G`; 0.4.3: #137 icon). Conflicts: `ssh.rs` (both kept: the fork's `remote_command`/`shell_word`/`command_line` and upstream's `host_key_checking_is_default`), `pkgbuild/gliff.svg` (kept deleted: the fork ships its own PNG icon). Workspace crates now 0.4.3 in Cargo.lock. Checks pass here (fmt, clippy Linux and macOS, settings/transport tests, linux-root-check).
 

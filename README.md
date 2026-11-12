@@ -51,7 +51,7 @@ This fork ([LaurentFough/gliff](https://github.com/LaurentFough/gliff)) builds o
 - **#98**: settings window and per-machine tab menu. Merged, and brought to the Mac client.
 - **#80**: sound from Linux hosts (Opus over the existing connection). Merged.
 - **#5**: dhh's macOS client. Only its VideoToolbox + Metal video path, ported into #47's viewer.
-- **Upstream releases to 0.4.3** (synced 2026-11-12): #119 accepts an unknown SSH host key on first connect (`StrictHostKeyChecking=accept-new`, unless your SSH config sets it). #137's redrawn icon is not taken: the fork keeps its own app icon.
+- **Upstream releases to 0.4.3** (synced 2026-11-12): #119 accepts an unknown SSH host key on first connect (`StrictHostKeyChecking=accept-new`, unless your SSH config sets it) in the Linux client; the Mac client keeps asking "Connect to this computer?" with the key's fingerprint. #137's redrawn icon is not taken: the fork keeps its own app icon.
 
 ### Fork features
 
@@ -523,7 +523,9 @@ the macOS client and host (upstream PR #47), and adds the following.
 - **#119, SSH host keys (gliff 0.4.2).** With no terminal to answer ssh's
   prompt, an unknown host key is accepted on first connect
   (`StrictHostKeyChecking=accept-new`) unless the SSH config sets it; a
-  changed key still fails. The Command line in Settings shows the option.
+  changed key still fails. The Mac client is left out: its SSH helper already
+  asks "Connect to this computer?" with the key's fingerprint, and keeps
+  doing so. The Command line in Settings shows the option where it applies.
 - **gliff 0.4.3.** Its redrawn monitor icon (#137) is not taken; the fork
   keeps its own app icon.
 
