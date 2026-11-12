@@ -230,6 +230,9 @@ Support today:
 
 Newest first. Format: `### YYYY-MM-DD — summary (commit)`, then a line or two.
 
+### 2026-11-12 — Upstream PR branches (from omacom/main 0.4.3)
+`pr/linux-install-root` (2c3b6c5): upstream's `bin/install` does its root steps through GLIFF_AUTH / PACMAN_AUTH / sudo / doas / su instead of `makepkg -fsi`; `scripts/install-root-check.sh` in check.sh (fails on the old script). `pr/linux-mesh-machines` (374c062): `gliff_transport::mesh` + the address-bar mesh menu and `gliff --mesh [--offline] [--json]`, ported to upstream's `main.rs`/`recent.rs`. fmt and workspace clippy pass here; both need testing on Omarchy before the PRs are opened. Not sent to acrogenesis/gliff: both change upstream's code, not #47's. Mac and #80/#98-based features wait for those PRs upstream.
+
 ### 2026-11-12 — #119 kept, without the Mac; upstream icon declined
 `ssh_command` adds `accept-new` only with no askpass helper (`target.askpass.is_none()`): the Mac client keeps its fingerprint prompt, and skips the `ssh -G` call. Test `an_askpass_helper_keeps_the_host_key_question`. #137's icon declined by the user. Upstream sync merged into `acrogenesis/macos-client-host`.
 
