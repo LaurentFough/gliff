@@ -1,5 +1,62 @@
 #!/bin/sh
+# Build the Arch package and install it.
+#
+# makepkg -s and -i become root with makepkg.conf's PACMAN_AUTH, else sudo,
+# else su, so on a doas-only system (no sudo, no root password) they stop
+# with an authentication error. This script does the two root steps itself
+# (the missing build dependencies, then the package) with GLIFF_AUTH if set,
+# else PACMAN_AUTH, else sudo, doas or su, and runs makepkg only to build.
+# Arguments go to makepkg. scripts/install-root-check.sh tests it.
 set -eu
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 cd "$ROOT/pkgbuild"
-makepkg -fsi "$@"
+
+# The command that runs a command as root; empty when already root.
+auth_tool() {
+    [ "$(id -u)" = 0 ] && return 0
+    if [ -n "${GLIFF_AUTH:-}" ]; then printf '%s\n' "$GLIFF_AUTH"; return 0; fi
+    for conf in "${XDG_CONFIG_HOME:-$HOME/.config}/pacman/makepkg.conf" "$HOME/.makepkg.conf" "${MAKEPKG_CONF:-/etc/makepkg.conf}"; do
+        [ -r "$conf" ] || continue
+        # PACMAN_AUTH=(doas) or PACMAN_AUTH=(sudo -k): its first word.
+        auth=$(sed -n 's/^[[:space:]]*PACMAN_AUTH=(\([^)]*\)).*/\1/p' "$conf" | tail -n 1 | tr -d "'\"" | awk '{print $1}')
+        if [ -n "$auth" ] && command -v "$auth" >/dev/null 2>&1; then printf '%s\n' "$auth"; return 0; fi
+    done
+    for tool in sudo doas; do
+        if command -v "$tool" >/dev/null 2>&1; then printf '%s\n' "$tool"; return 0; fi
+    done
+    printf 'su\n'
+}
+
+as_root() {
+    tool=$(auth_tool)
+    case "$tool" in
+        '') "$@" ;;
+        su)
+            # su -c takes one string: quote each argument.
+            cmd=""
+            for a in "$@"; do cmd="$cmd '$(printf %s "$a" | sed "s/'/'\\\\''/g")'"; done
+            su -c "$cmd" ;;
+        *) "$tool" "$@" ;;
+    esac
+}
+
+# Build dependencies pacman does not have yet (pacman -T lists them).
+deps=$(makepkg --printsrcinfo | awk -F' = ' '/^[[:space:]]*(make|check)?depends = /{print $2}')
+# shellcheck disable=SC2086 # one dependency per word
+missing=$(pacman -T $deps || true)
+if [ -n "$missing" ]; then
+    # shellcheck disable=SC2086
+    as_root pacman -S --needed --asdeps $missing
+fi
+
+makepkg -f "$@"
+
+# The packages just built, without the debug package (as makepkg -i).
+pkgs=""
+for pkg in $(makepkg --packagelist); do
+    case "$pkg" in *-debug-*) continue ;; esac
+    [ -f "$pkg" ] && pkgs="$pkgs $pkg"
+done
+[ -n "$pkgs" ] || { echo "bin/install: makepkg built no package" >&2; exit 1; }
+# shellcheck disable=SC2086 # one package per word
+as_root pacman -U $pkgs

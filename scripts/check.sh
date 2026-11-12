@@ -16,4 +16,6 @@ echo "== clippy"
 cargo clippy --workspace --all-targets --locked -- -D warnings
 echo "== test"
 cargo test --workspace --locked
+echo "== install root steps"
+sh scripts/install-root-check.sh
 echo "CHECK PASS"

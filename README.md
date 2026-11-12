@@ -57,6 +57,10 @@ bin/install
 
 This uses the current checkout, including fixes newer than the last release.
 
+It asks for root with sudo, or doas when sudo is not installed; set
+`PACMAN_AUTH` in makepkg.conf or `GLIFF_AUTH` (e.g. `GLIFF_AUTH=doas bin/install`)
+to choose.
+
 To build from source, see [docs/development.md](docs/development.md).
 
 ## Use
